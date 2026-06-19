@@ -1,0 +1,50 @@
+{
+  "name": "AutoEdit Publish",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "autoedit-publish",
+        "responseMode": "lastNode"
+      },
+      "name": "AutoEdit Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "comment": "Add your publishing nodes here: download {{$json.videoUrl}}, upload to YouTube/TikTok/Instagram, etc. socialCopy and titles are in the payload."
+      },
+      "name": "Your Publishing Steps",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.AUTOEDIT_API_URL }}/api/webhooks/n8n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-AutoEdit-Signature",
+              "value": "={{ $crypto.createHmac('sha256', $env.AUTOEDIT_WEBHOOK_SECRET).update(JSON.stringify($json)).digest('hex') }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "jsonBody": "={{ JSON.stringify({ workflowRunId: $json.workflowRunId, status: 'SUCCESS', result: { publishedUrl: $json.publishedUrl } }) }}"
+      },
+      "name": "Notify AutoEdit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [720, 300]
+    }
+  ],
+  "connections": {
+    "AutoEdit Webhook": { "main": [[{ "node": "Your Publishing Steps", "type": "main", "index": 0 }]] },
+    "Your Publishing Steps": { "main": [[{ "node": "Notify AutoEdit", "type": "main", "index": 0 }]] }
+  }
+}

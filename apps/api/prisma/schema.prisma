@@ -1,0 +1,386 @@
+// AutoEdit AI — database schema
+// Run: npx prisma migrate dev --name init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String?
+  passwordHash  String?  // null when the user signs in only via Google
+  googleId      String?  @unique
+  avatarUrl     String?
+  role          UserRole @default(USER)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  projects      Project[]
+  n8nConnection N8nConnection?
+  activityLogs  ActivityLog[]
+  creatorProfile CreatorProfile?
+  feedback      Feedback[]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Projects & media
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum ProjectStatus {
+  UPLOADING
+  UPLOADED
+  ANALYZING
+  ANALYZED
+  RENDERING
+  RENDERED
+  FAILED
+}
+
+model Project {
+  id          String        @id @default(cuid())
+  userId      String
+  title       String
+  description String?
+  status      ProjectStatus @default(UPLOADING)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceAsset Asset?        @relation("SourceAsset", fields: [sourceAssetId], references: [id])
+  sourceAssetId String?     @unique
+  analysis    Analysis?
+  timeline    EditTimeline?
+  transcript  Transcript?
+  versions    EditVersion[]
+  renders     Render[]
+  jobs        Job[]
+
+  @@index([userId, createdAt])
+}
+
+enum AssetKind {
+  SOURCE_VIDEO
+  AUDIO
+  RENDER_OUTPUT
+  THUMBNAIL
+  MUSIC
+}
+
+model Asset {
+  id          String    @id @default(cuid())
+  kind        AssetKind
+  s3Key       String
+  bucket      String
+  mimeType    String
+  sizeBytes   BigInt
+  durationSec Float?
+  width       Int?
+  height      Int?
+  fps         Float?
+  createdAt   DateTime  @default(now())
+
+  // backref for source asset on a project
+  sourceFor   Project?  @relation("SourceAsset")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI analysis (output of Claude + media probing)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Analysis {
+  id            String   @id @default(cuid())
+  projectId     String   @unique
+  // structured Claude output
+  summary       String?
+  highlights    Json     // [{ start, end, label, score }]
+  silences      Json     // [{ start, end }]
+  speakers      Json     // [{ id, label, segments: [{start,end}] }]
+  captions      Json     // [{ start, end, text }]  (SRT-like cues)
+  suggestedTitles Json   // string[]
+  socialCopy    Json     // { instagram, tiktok, youtube, linkedin }
+  storyboard    Json?    // [{ scene, description, shotType }]
+  hook          Json?    // { hook: {start,end,text}, alternatives: string[] }  (Hook agent)
+  thumbnail     Json?    // { concept, overlayText, bestFrameSec }              (Thumbnail agent)
+  agentLog      Json?    // [{ agent, ms, summary }] — multi-agent run trace
+  strategy      String?  // Director's editing strategy
+  rawClaude     Json?    // full raw response for auditing
+  model         String
+  createdAt     DateTime @default(now())
+
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+// The editable plan the user approves before rendering.
+model EditTimeline {
+  id          String   @id @default(cuid())
+  projectId   String   @unique
+  // ordered list of clip operations; see ffmpeg/pipeline.ts EditPlan type
+  operations  Json     // EditOperation[]
+  effects     Json     // { subtitles, zooms, transitions, music }
+  outputs     Json     // [{ format: 'reel'|'short'|'landscape', aspect, maxDurationSec }]
+  approved    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+// Immutable snapshot of a timeline. Every prompt edit / restore appends one;
+// existing versions are NEVER mutated. parentVersionId forms a tree so future
+// branching (Version A → B, A → C) works without schema changes.
+model EditVersion {
+  id              String   @id @default(cuid())
+  projectId       String
+  name            String   // e.g. "Original cut", "Tighter viral cut"
+  userPrompt      String?  // the instruction that produced this version (null for root)
+  aiExplanation   String?  // Claude's overall reasoning for the edit
+  changes         Json     @default("[]") // [{ action, target, reasons: string[] }]
+  timelineJson    Json     // snapshot: { operations, effects }
+  parentVersionId String?
+  createdAt       DateTime @default(now())
+
+  project  Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  parent   EditVersion?  @relation("VersionTree", fields: [parentVersionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  children EditVersion[] @relation("VersionTree")
+
+  @@index([projectId, createdAt])
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum RenderStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model Render {
+  id          String       @id @default(cuid())
+  projectId   String
+  format      String       // 'reel' | 'short' | 'landscape'
+  status      RenderStatus @default(QUEUED)
+  progress    Int          @default(0) // 0-100
+  outputS3Key String?
+  outputUrl   String?      // presigned/CDN url at completion
+  error       String?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime     @default(now())
+
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Queue jobs (mirror of BullMQ jobs for dashboard visibility)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum JobType {
+  ANALYZE
+  RENDER
+  N8N_DISPATCH
+}
+
+enum JobStatus {
+  QUEUED
+  ACTIVE
+  COMPLETED
+  FAILED
+}
+
+model Job {
+  id          String    @id @default(cuid())
+  bullId      String?   // BullMQ job id
+  projectId   String?
+  type        JobType
+  status      JobStatus @default(QUEUED)
+  payload     Json?
+  result      Json?
+  error       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  project     Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, type, status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// n8n integration
+// ─────────────────────────────────────────────────────────────────────────────
+
+model N8nConnection {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  baseUrl       String
+  apiKeyEnc     String   // encrypted at rest
+  // optional default workflow to fire after a render
+  defaultWorkflowId String?
+  webhookSecret String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  runs          WorkflowRun[]
+}
+
+enum WorkflowRunStatus {
+  TRIGGERED
+  RUNNING
+  SUCCESS
+  ERROR
+}
+
+model WorkflowRun {
+  id            String            @id @default(cuid())
+  connectionId  String
+  projectId     String?
+  workflowId    String
+  executionId   String?           // n8n execution id
+  status        WorkflowRunStatus @default(TRIGGERED)
+  payload       Json?
+  result        Json?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  connection    N8nConnection     @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Activity logs (AI activity feed on dashboard)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  userId    String
+  projectId String?
+  kind      String   // 'analysis' | 'render' | 'n8n' | 'auth' | ...
+  message   String
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reliability / observability (Phase 1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Per-stage timing for every project run — powers analytics + bottleneck review.
+model StageTiming {
+  id        String   @id @default(cuid())
+  projectId String?
+  stage     String   // upload | transcription | analysis | timeline | render | download
+  ms        Int
+  ok        Boolean  @default(true)
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  @@index([stage, createdAt])
+  @@index([projectId])
+}
+
+enum ErrorCategory {
+  FFMPEG
+  CLAUDE
+  OLLAMA
+  INVALID_JSON
+  QUEUE
+  WORKER_CRASH
+  MEMORY
+  RENDER_TIMEOUT
+  TRANSCRIPTION
+  UNKNOWN
+}
+
+model ErrorEvent {
+  id        String        @id @default(cuid())
+  category  ErrorCategory
+  projectId String?
+  jobId     String?
+  message   String
+  stack     String?
+  meta      Json?
+  createdAt DateTime      @default(now())
+
+  @@index([category, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Transcription (Phase 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Transcript {
+  id           String   @id @default(cuid())
+  projectId    String   @unique
+  language     String
+  durationSec  Float
+  // segment-level cues with confidence + optional speaker
+  segments     Json     // [{ start, end, text, speaker?, confidence }]
+  words        Json     // [{ start, end, word, confidence }]  word-level timestamps
+  avgConfidence Float?
+  model        String
+  createdAt    DateTime @default(now())
+
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Creator memory (Phase 3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model CreatorProfile {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  pacingPreference   String   @default("balanced")   // slow | balanced | fast
+  captionPreference  String   @default("on")          // on | off | minimal
+  musicPreference    String   @default("subtle")      // none | subtle | prominent
+  hookPreference     String   @default("strong")      // strong | gentle
+  platformPreference String   @default("shorts")      // shorts | youtube | tiktok | reels | linkedin
+  editingStyle       String   @default("viral")       // viral | educational | documentary | podcast | sales
+  // free-form signal counters the learner updates over time
+  signals            Json     @default("{}")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Feedback (Phase 5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Feedback {
+  id        String   @id @default(cuid())
+  userId    String
+  projectId String?
+  rating    Int      // 1-5
+  comment   String?
+  category  String?  // time_saved | confusing | would_pay | magical | other
+  answers   Json?    // { savedTime, confusing, wouldPay, magical }
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+}

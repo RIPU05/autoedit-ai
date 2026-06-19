@@ -1,0 +1,32 @@
+# deps
+node_modules/
+.pnp.*
+.yarn/*
+
+# build output
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# env / secrets — never commit these
+.env
+.env.*
+.env.local
+.env.*.local
+*.pem
+
+# prisma generated client
+apps/api/node_modules/.prisma/
+
+# render scratch
+/tmp/autoedit/
+renderwork/
+tmp/
+temp/
+
+# logs / os
+*.log
+coverage/
+.DS_Store

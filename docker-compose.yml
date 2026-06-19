@@ -1,0 +1,90 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: autoedit
+      POSTGRES_PASSWORD: autoedit
+      POSTGRES_DB: autoedit
+    ports: ['5432:5432']
+    volumes: ['pgdata:/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U autoedit']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports: ['6379:6379']
+    volumes: ['redisdata:/data']
+
+  n8n:
+    image: n8nio/n8n:latest
+    ports: ['5678:5678']
+    environment:
+      N8N_HOST: localhost
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: http://localhost:5678/
+      N8N_PUBLIC_API_DISABLED: 'false'
+    volumes: ['n8ndata:/home/node/.n8n']
+
+  whisper:
+    build: ./services/whisper
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-base}
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+      ENABLE_DIARIZATION: ${ENABLE_DIARIZATION:-false}
+      HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN:-}
+    ports: ['9000:9000']
+    # GPU: uncomment to use an NVIDIA device (needs nvidia-container-toolkit)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices: [{ driver: nvidia, count: 1, capabilities: [gpu] }]
+
+  api:
+    build: ./apps/api
+    command: sh -c "npx prisma migrate deploy && node dist/index.js"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://autoedit:autoedit@postgres:5432/autoedit?schema=public
+      REDIS_URL: redis://redis:6379
+      N8N_BASE_URL: http://n8n:5678
+    ports: ['4000:4000']
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+
+  worker:
+    build: ./apps/api
+    command: node dist/worker.js
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://autoedit:autoedit@postgres:5432/autoedit?schema=public
+      REDIS_URL: redis://redis:6379
+      N8N_BASE_URL: http://n8n:5678
+      WHISPER_URL: http://whisper:9000
+    volumes: ['renderwork:/tmp/autoedit']
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+      whisper: { condition: service_started }
+    # scale render capacity: docker compose up --scale worker=3
+    deploy:
+      replicas: 1
+
+  web:
+    build: ./apps/web
+    env_file: .env
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:4000
+    ports: ['3000:3000']
+    depends_on: [api]
+
+volumes:
+  pgdata:
+  redisdata:
+  n8ndata:
+  renderwork:
