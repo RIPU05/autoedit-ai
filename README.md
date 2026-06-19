@@ -1,141 +1,299 @@
 # AutoEdit AI
 
-AI-powered video editing automation platform. Upload a video, Claude analyzes it
-(highlights, silence, speakers, captions, titles, social copy), an FFmpeg/Remotion
-pipeline renders the result, and n8n workflows are triggered for publishing.
+AutoEdit AI is an AI-assisted video editing pipeline for turning uploaded videos into edited, captioned, render-ready outputs. It supports cloud storage through S3, local transcription through Whisper, local or cloud AI analysis, FFmpeg rendering, and a fallback timeline path when external AI is unavailable.
 
-> This repository is a **production-ready scaffold**. Core integration logic
-> (Claude, n8n, FFmpeg, BullMQ queue, S3 multipart upload, JWT + Google OAuth)
-> is fully implemented. Some UI screens and edge cases are stubbed and marked
-> with `// TODO` so you can extend them for your exact product.
+## Main Features
 
----
+- User authentication and project dashboard
+- S3 multipart video upload
+- PostgreSQL persistence through Prisma
+- Redis/BullMQ background workers
+- Whisper sidecar transcription
+- AI analysis with Claude or local Ollama/Qwen
+- Fallback timeline generation when AI providers fail
+- FFmpeg render pipeline
+- Final rendered video upload to S3
+- Health checks for database, Redis, S3, Claude, and Ollama
 
-## 1. Architecture
+## Current Status
 
+| Area | Status |
+| --- | --- |
+| Upload | Working |
+| S3 | Working |
+| Whisper | Working |
+| Transcription | Working |
+| Fallback timeline | Working |
+| Render | Working |
+| Final S3 output | Working |
+| Claude | Optional / requires credits |
+| Ollama | Optional / local model may fallback |
+
+## Tech Stack
+
+| Layer | Technology |
+| --- | --- |
+| Frontend | Next.js, React, TypeScript, Tailwind CSS |
+| Backend | Node.js, Express, TypeScript |
+| Database | PostgreSQL, Prisma |
+| Queue | Redis, BullMQ |
+| Storage | AWS S3 multipart upload and signed URLs |
+| Transcription | Faster-Whisper sidecar |
+| AI | Anthropic Claude, Ollama/Qwen, fallback provider |
+| Rendering | FFmpeg |
+| Local infra | Docker Compose |
+
+## Architecture Flow
+
+```text
+Browser / Next.js web app
+  -> Express API
+  -> S3 multipart upload
+  -> PostgreSQL project and asset records
+  -> Redis/BullMQ analysis job
+  -> Worker downloads source video from S3
+  -> FFmpeg probe and audio extraction
+  -> Whisper transcription
+  -> Claude or Ollama analysis
+  -> fallback timeline if AI is unavailable
+  -> timeline and edit version saved to database
+  -> render job queued
+  -> FFmpeg render
+  -> final output uploaded to S3
 ```
-                         ┌─────────────────────────┐
-                         │   Next.js 15 (apps/web)  │
-                         │  React, Tailwind, shadcn │
-                         └────────────┬─────────────┘
-                                      │ REST + JWT (httpOnly cookie)
-                                      ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                       Express API (apps/api)                           │
-│  auth · projects · upload(S3 multipart) · render · n8n · webhooks      │
-└───┬───────────────┬──────────────────┬──────────────┬─────────────────┘
-    │               │                  │              │
-    ▼               ▼                  ▼              ▼
-┌─────────┐   ┌────────────┐    ┌─────────────┐  ┌──────────────┐
-│PostgreSQL│   │   Redis    │    │   AWS S3     │  │  Claude API  │
-│ (Prisma) │   │ (BullMQ)   │    │ (originals + │  │ (analysis +  │
-│          │   │  queues    │    │  renders)    │  │  content gen)│
-└─────────┘   └─────┬──────┘    └─────────────┘  └──────────────┘
-                    │
-        ┌───────────┴────────────┐
-        ▼                        ▼
-┌────────────────┐      ┌────────────────────┐
-│ analysis worker│      │   render worker     │
-│ (Claude calls) │      │ (FFmpeg pipeline)   │
-└───────┬────────┘      └─────────┬───────────┘
-        │                         │
-        └──────────► n8n ◄────────┘
-            (trigger workflows, receive status via webhook)
-```
 
-**Data flow for one project**
+## Repository Layout
 
-1. User uploads video → S3 multipart, `Project` + `Asset` rows created.
-2. `analysis` job enqueued → worker extracts metadata + audio, asks Claude for an
-   editing strategy, persists an `EditTimeline`, captions, titles, descriptions.
-3. User approves/edits the timeline → `render` job enqueued.
-4. Render worker runs the FFmpeg pipeline (trim, silence removal, subtitles, zoom,
-   transitions, music), uploads the result to S3, writes a `Render` row.
-5. n8n workflow is triggered with the render URL + generated copy; n8n posts status
-   back to `/api/webhooks/n8n`.
-
----
-
-## 2. Tech Stack
-
-| Layer       | Choice                                            |
-|-------------|---------------------------------------------------|
-| Frontend    | Next.js 15 (App Router), TypeScript, Tailwind, shadcn/ui |
-| Backend     | Node.js, Express, TypeScript                      |
-| Database    | PostgreSQL + Prisma ORM                           |
-| Queue       | Redis + BullMQ                                     |
-| AI          | Anthropic Claude API (`@anthropic-ai/sdk`)        |
-| Automation  | n8n (REST API + webhooks)                          |
-| Video       | FFmpeg (ffmpeg-static + fluent-ffmpeg), Remotion (optional) |
-| Storage     | AWS S3 (multipart upload, presigned URLs)         |
-| Deploy      | Docker + docker-compose                            |
-
----
-
-## 3. Repository layout
-
-```
+```text
 autoedit-ai/
-├── docker-compose.yml          # postgres, redis, api, worker, web, n8n
-├── .env.example
-├── apps/
-│   ├── api/                    # Express backend + workers
-│   │   ├── prisma/schema.prisma
-│   │   ├── src/
-│   │   │   ├── index.ts        # express app entrypoint
-│   │   │   ├── worker.ts       # BullMQ worker entrypoint
-│   │   │   ├── config/env.ts
-│   │   │   ├── lib/            # prisma, redis, s3 clients
-│   │   │   ├── middleware/     # auth, error handling
-│   │   │   ├── routes/         # auth, projects, upload, render, n8n, webhooks
-│   │   │   ├── services/       # claude, n8n, analysis, storage
-│   │   │   ├── queue/          # queues + workers
-│   │   │   └── ffmpeg/         # rendering pipeline
-│   │   └── Dockerfile
-│   └── web/                    # Next.js 15 frontend
-│       ├── src/app/            # routes (login, dashboard, projects)
-│       ├── src/components/     # UI components
-│       ├── src/lib/            # api client, auth helpers
-│       └── Dockerfile
-└── infra/                      # extra deploy notes
+  apps/
+    api/                Express API, Prisma, workers, FFmpeg pipeline
+    web/                Next.js frontend
+  services/
+    whisper/            Whisper sidecar service
+  infra/                Deployment notes
+  docker-compose.yml    Local Postgres, Redis, Whisper services
+  .env.example          Safe environment template
 ```
 
----
+## Local Setup
 
-## 4. Local development
+Prerequisites:
 
-```bash
-# 0. prerequisites: Docker, Node 20+, pnpm (or npm), an FFmpeg install for bare-metal
-cp .env.example .env            # fill in ANTHROPIC_API_KEY, AWS creds, etc.
+- Node.js 20 or newer
+- npm
+- Docker Desktop
+- FFmpeg support through the project dependencies
+- AWS S3 bucket and IAM credentials for upload/render output
+- Optional: Ollama for free local AI analysis
+- Optional: Anthropic API key for Claude analysis
 
-# 1. boot infra + services
-docker compose up -d postgres redis n8n
+Install dependencies:
 
-# 2. backend
+```powershell
 cd apps/api
 npm install
-npx prisma migrate dev --name init
-npm run dev          # API on :4000
-npm run worker       # in a second terminal — BullMQ workers
 
-# 3. frontend
 cd ../web
 npm install
-npm run dev          # web on :3000
 ```
 
-Or run everything in containers: `docker compose up --build`.
+Create environment files:
 
----
+```powershell
+Copy-Item .env.example .env
+Copy-Item .env.example apps/api/.env
+```
 
-## 5. Production deployment
+Fill in real values in `apps/api/.env`. Do not commit `.env` files.
 
-See [`infra/DEPLOYMENT.md`](infra/DEPLOYMENT.md) for the full guide
-(managed Postgres/Redis, S3 bucket + IAM policy, ECS/Fly/Render options,
-autoscaling the render worker, secrets, health checks, and observability).
+## Docker Setup
 
----
+Start local infrastructure:
 
-## 6. Environment variables
+```powershell
+docker compose up -d postgres redis whisper
+```
 
-See `.env.example` — every variable is documented inline.
+Check containers:
+
+```powershell
+docker compose ps
+```
+
+Expected local services:
+
+- PostgreSQL on `localhost:5432`
+- Redis on `localhost:6379`
+- Whisper sidecar on `localhost:9000`
+
+## Database Migration
+
+From `apps/api`:
+
+```powershell
+npx prisma generate
+npx prisma migrate dev
+```
+
+Check migration status:
+
+```powershell
+npx prisma migrate status
+```
+
+## Running The API
+
+From `apps/api`:
+
+```powershell
+npm run dev
+```
+
+The API should be available at:
+
+```text
+http://localhost:4000
+```
+
+Useful health checks:
+
+```text
+http://localhost:4000/health/db
+http://localhost:4000/health/redis
+http://localhost:4000/health/s3
+http://localhost:4000/health/ollama
+http://localhost:4000/health/claude
+```
+
+## Running The Worker
+
+From `apps/api`, in a separate terminal:
+
+```powershell
+npm run worker
+```
+
+The worker processes analysis and render jobs from Redis/BullMQ.
+
+## Running The Web App
+
+From `apps/web`:
+
+```powershell
+npm run dev
+```
+
+The web app should be available at:
+
+```text
+http://localhost:3000
+```
+
+## S3 Setup Notes
+
+Create an S3 bucket in the same region configured by `AWS_REGION`.
+
+The IAM user or role needs permissions for the configured bucket, including:
+
+- `s3:ListBucket`
+- `s3:GetBucketLocation`
+- `s3:GetBucketCors`
+- `s3:PutObject`
+- `s3:GetObject`
+- `s3:DeleteObject`
+- `s3:AbortMultipartUpload`
+- `s3:ListBucketMultipartUploads`
+- `s3:ListMultipartUploadParts`
+
+Bucket CORS should allow browser uploads and expose `ETag`:
+
+```json
+[
+  {
+    "AllowedOrigins": ["http://localhost:3000"],
+    "AllowedMethods": ["GET", "PUT", "POST", "HEAD"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["ETag"]
+  }
+]
+```
+
+## Ollama Setup Notes
+
+Ollama is optional. If enabled, it can run local AI analysis before falling back to the basic timeline generator.
+
+Install and start Ollama, then pull a model:
+
+```powershell
+ollama pull qwen3:1.7b
+```
+
+Recommended local settings:
+
+```env
+AI_PROVIDER=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen3:1.7b
+```
+
+If Ollama returns invalid JSON, times out, or is unavailable, the worker should use the fallback timeline path.
+
+## Claude Setup Notes
+
+Claude is optional and requires a valid Anthropic API key with available credits.
+
+```env
+AI_PROVIDER=claude
+ANTHROPIC_API_KEY=your-anthropic-api-key
+```
+
+If Claude is unavailable due to authentication, billing, rate limits, or credits, the app can fall back to a basic timeline.
+
+## Whisper Setup Notes
+
+The local Whisper sidecar is started by Docker Compose:
+
+```powershell
+docker compose up -d whisper
+```
+
+The API expects:
+
+```env
+WHISPER_URL=http://localhost:9000
+```
+
+## Build Commands
+
+API:
+
+```powershell
+cd apps/api
+npm run build
+```
+
+Web:
+
+```powershell
+cd apps/web
+npm run build
+```
+
+## Known Limitations
+
+- Claude requires valid billing and credits.
+- Local Ollama performance depends heavily on the machine and selected model.
+- Ollama responses may fall back if strict JSON generation fails.
+- Render performance depends on video length, FFmpeg behavior, disk speed, and CPU.
+- Production hardening still needs rate limiting, stronger observability, complete route tests, and deployment-specific security review.
+
+## Security Notes
+
+- Never commit `.env` files.
+- Never commit AWS credentials.
+- Never commit Anthropic keys.
+- Use a long random `JWT_SECRET`.
+- Use least-privilege IAM permissions for S3.
+- Rotate leaked credentials immediately.
+
