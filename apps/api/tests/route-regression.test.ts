@@ -1,0 +1,230 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { db, prismaMock, queueAdds, resetDb, resetQueues } from './test-state.js';
+
+vi.mock('../src/lib/prisma.js', () => ({ prisma: prismaMock }));
+vi.mock('../src/lib/redis.js', () => ({
+  connection: { ping: vi.fn(async () => 'PONG') },
+  bullConnection: {},
+}));
+vi.mock('../src/lib/s3.js', () => ({
+  s3: { send: vi.fn(async () => ({ ok: true })) },
+  startMultipart: vi.fn(async (key: string) => ({ uploadId: `upload-${key}`, bucket: 'autoedit-test-bucket' })),
+  presignUploadPart: vi.fn(async () => 'https://s3.test/upload-part'),
+  completeMultipart: vi.fn(async () => ({ ok: true })),
+  abortMultipart: vi.fn(async () => ({ ok: true })),
+  presignDownload: vi.fn(async () => 'https://s3.test/download'),
+  putObject: vi.fn(async () => ({ ok: true })),
+}));
+vi.mock('../src/queue/queues.js', () => ({
+  ANALYSIS_QUEUE: 'analysis',
+  RENDER_QUEUE: 'render',
+  N8N_QUEUE: 'n8n-dispatch',
+  analysisQueue: { getJobCounts: vi.fn(async () => ({ waiting: 0, active: 0, failed: 0 })) },
+  renderQueue: { getJobCounts: vi.fn(async () => ({ waiting: 0, active: 0, failed: 0 })) },
+  n8nQueue: { getJobCounts: vi.fn(async () => ({ waiting: 0, active: 0, failed: 0 })) },
+  enqueueAnalysis: vi.fn(async (data) => {
+    queueAdds.analysis.push(data);
+    return { id: 'analysis-job-1' };
+  }),
+  enqueueRender: vi.fn(async (data) => {
+    queueAdds.render.push(data);
+    return { id: `render-job-${queueAdds.render.length}` };
+  }),
+  enqueueN8n: vi.fn(async (data) => {
+    queueAdds.n8n.push(data);
+    return { id: `n8n-job-${queueAdds.n8n.length}` };
+  }),
+  moveToDeadLetter: vi.fn(async () => undefined),
+}));
+vi.mock('../src/ffmpeg/probe.js', () => ({
+  probe: vi.fn(async () => ({ durationSec: 12, width: 640, height: 360, fps: 30 })),
+  detectSilences: vi.fn(async () => [{ start: 4, end: 5 }]),
+  extractAudio: vi.fn(async (_file: string, out: string) => out),
+}));
+vi.mock('../src/services/integration-events.service.js', () => ({
+  dispatchIntegrationEvent: vi.fn(async () => undefined),
+  getConnectedClaudeApiKey: vi.fn(async () => undefined),
+}));
+vi.mock('../src/services/creator-memory.service.js', () => ({
+  buildPromptInjection: vi.fn(async () => ''),
+  learnFromPromptEdit: vi.fn(async () => undefined),
+  learnFromProject: vi.fn(async () => undefined),
+}));
+
+let baseUrl = '';
+let server: http.Server;
+const realFetch = global.fetch;
+
+async function request(path: string, init: RequestInit = {}) {
+  const res = await fetch(`${baseUrl}${path}`, {
+    ...init,
+    headers: { 'content-type': 'application/json', ...(init.headers ?? {}) },
+  });
+  const text = await res.text();
+  const body = text ? JSON.parse(text) : null;
+  return { res, body };
+}
+
+async function register() {
+  const email = `test-${Math.random().toString(16).slice(2)}@example.com`;
+  const { body } = await request('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({ email, password: 'Password123!', name: 'Test User' }),
+  });
+  return { email, token: body.token, user: body.user };
+}
+
+beforeAll(async () => {
+  global.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+    if (baseUrl && String(url).startsWith(baseUrl)) return realFetch(url, init);
+    if (String(url).includes('anthropic.com')) return new Response(JSON.stringify({ error: 'invalid' }), { status: 401 });
+    if (String(url).includes('/api/tags')) return Response.json({ models: [{ name: 'qwen3:1.7b' }] });
+    if (String(url).includes('s3.test/download')) return new Response(new Uint8Array([1, 2, 3]));
+    if (String(url).includes('s3.test/upload-part')) return new Response(null, { status: 200, headers: { ETag: '"etag-1"' } });
+    return new Response(JSON.stringify({ ok: true }), { status: init?.method === 'POST' ? 200 : 200 });
+  }) as typeof fetch;
+
+  const { createApp } = await import('../src/app.js');
+  server = createApp().listen(0);
+  await new Promise<void>((resolve) => server.once('listening', () => resolve()));
+  const address = server.address() as AddressInfo;
+  baseUrl = `http://127.0.0.1:${address.port}`;
+});
+
+afterAll(async () => {
+  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+});
+
+beforeEach(() => {
+  resetDb();
+  resetQueues();
+  vi.mocked(global.fetch).mockClear();
+});
+
+describe('auth routes', () => {
+  it('registers, logs in, and returns me without leaking password hashes', async () => {
+    const { email, token, user } = await register();
+    expect(token).toEqual(expect.any(String));
+    expect(user.passwordHash).toBeUndefined();
+
+    const login = await request('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password: 'Password123!' }),
+    });
+    expect(login.res.status).toBe(200);
+    expect(login.body.user.passwordHash).toBeUndefined();
+
+    const me = await request('/api/auth/me', { headers: { Authorization: `Bearer ${login.body.token}` } });
+    expect(me.res.status).toBe(200);
+    expect(me.body.user.email).toBe(email);
+  });
+});
+
+describe('project and upload routes', () => {
+  it('creates project shell, lists it, completes upload, and enqueues analysis with mocked S3', async () => {
+    const { token } = await register();
+    const headers = { Authorization: `Bearer ${token}` };
+
+    const start = await request('/api/upload/start', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ filename: 'sample.mp4', contentType: 'video/mp4', title: 'Sample' }),
+    });
+    expect(start.res.status).toBe(200);
+    expect(start.body).toMatchObject({ bucket: 'autoedit-test-bucket', uploadId: expect.any(String), key: expect.stringContaining('sample.mp4') });
+
+    const list = await request('/api/projects', { headers });
+    expect(list.res.status).toBe(200);
+    expect(list.body.projects).toHaveLength(1);
+
+    const detail = await request(`/api/projects/${start.body.projectId}`, { headers });
+    expect(detail.res.status).toBe(200);
+    expect(detail.body.project.title).toBe('Sample');
+
+    const part = await request('/api/upload/part', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ key: start.body.key, uploadId: start.body.uploadId, partNumber: 1 }),
+    });
+    expect(part.res.status).toBe(200);
+    expect(part.body.url).toContain('s3.test');
+
+    const complete = await request('/api/upload/complete', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        projectId: start.body.projectId,
+        key: start.body.key,
+        uploadId: start.body.uploadId,
+        contentType: 'video/mp4',
+        sizeBytes: 123,
+        parts: [{ ETag: '"etag-1"', PartNumber: 1 }],
+      }),
+    });
+    expect(complete.res.status).toBe(200);
+    expect(queueAdds.analysis).toEqual([{ projectId: start.body.projectId, s3Key: start.body.key, bucket: 'autoedit-test-bucket' }]);
+    expect(db.assets[0].s3Key).toBe(start.body.key);
+  });
+});
+
+describe('integration routes', () => {
+  it('handles Claude invalid key and disconnects without returning secrets', async () => {
+    const { token } = await register();
+    const headers = { Authorization: `Bearer ${token}` };
+
+    const status = await request('/api/integrations/claude/status', { headers });
+    expect(status.body.status).toBe('DISCONNECTED');
+
+    const connect = await request('/api/integrations/claude/connect', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ apiKey: 'bad-key' }),
+    });
+    expect(connect.res.status).toBe(400);
+    expect(JSON.stringify(connect.body)).not.toContain('bad-key');
+
+    const test = await request('/api/integrations/claude/test', { method: 'POST', headers });
+    expect(test.res.status).toBe(400);
+
+    const disconnected = await request('/api/integrations/claude/disconnect', { method: 'DELETE', headers });
+    expect(disconnected.body.status).toBe('DISCONNECTED');
+  });
+
+  it('connects, tests, and disconnects n8n without exposing signing secret', async () => {
+    const { token } = await register();
+    const headers = { Authorization: `Bearer ${token}` };
+
+    const invalid = await request('/api/integrations/n8n/connect', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ webhookUrl: 'not-a-url' }),
+    });
+    expect(invalid.res.status).toBe(400);
+
+    const connect = await request('/api/integrations/n8n/connect', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ webhookUrl: 'https://n8n.example.test/webhook/autoedit', workflowName: 'Local', signingSecret: 'secret-value' }),
+    });
+    expect(connect.res.status).toBe(200);
+    expect(connect.body.status).toBe('CONNECTED');
+    expect(JSON.stringify(connect.body)).not.toContain('secret-value');
+
+    const test = await request('/api/integrations/n8n/test', { method: 'POST', headers });
+    expect(test.res.status).toBe(200);
+
+    const disconnected = await request('/api/integrations/n8n/disconnect', { method: 'DELETE', headers });
+    expect(disconnected.body.status).toBe('DISCONNECTED');
+  });
+});
+
+describe('health routes', () => {
+  it('reports mocked db, redis, s3, and ollama health without real services', async () => {
+    await expect(request('/health/db')).resolves.toMatchObject({ body: { ok: true } });
+    await expect(request('/health/redis')).resolves.toMatchObject({ body: { ok: true } });
+    await expect(request('/health/s3')).resolves.toMatchObject({ body: { ok: true } });
+    await expect(request('/health/ollama')).resolves.toMatchObject({ body: { ok: true } });
+  });
+});

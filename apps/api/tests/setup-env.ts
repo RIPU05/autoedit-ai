@@ -1,0 +1,21 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+process.env.NODE_ENV = 'test';
+process.env.API_PORT = '0';
+process.env.WEB_ORIGIN = 'http://localhost:3000';
+process.env.API_BASE_URL = 'http://localhost:4000';
+process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/autoedit_test';
+process.env.REDIS_URL = 'redis://localhost:6379';
+process.env.JWT_SECRET = 'test-jwt-secret-at-least-16-chars';
+process.env.INTEGRATION_ENCRYPTION_SECRET = 'test-integration-secret-at-least-32-chars';
+process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+process.env.AI_PROVIDER = 'fallback';
+process.env.OLLAMA_BASE_URL = 'http://localhost:11434';
+process.env.OLLAMA_MODEL = 'qwen3:1.7b';
+process.env.AWS_REGION = 'us-east-1';
+process.env.AWS_ACCESS_KEY_ID = 'test-access-key';
+process.env.AWS_SECRET_ACCESS_KEY = 'test-secret-key';
+process.env.S3_BUCKET = 'autoedit-test-bucket';
+process.env.RENDER_WORK_DIR = path.join(mkdtempSync(path.join(tmpdir(), 'autoedit-api-test-')), 'work');

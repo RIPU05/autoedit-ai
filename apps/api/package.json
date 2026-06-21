@@ -13,6 +13,7 @@
     "prisma:migrate": "prisma migrate deploy",
     "test:n8n-webhook": "tsx src/scripts/test-n8n-webhook.ts",
     "test": "vitest run",
+    "test:regression": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
