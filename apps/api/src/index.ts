@@ -17,6 +17,7 @@ import { startMemorySampler } from './lib/observability.js';
 const app = express();
 
 app.use(helmet());
+app.set('json replacer', (_key: string, value: unknown) => (typeof value === 'bigint' ? value.toString() : value));
 app.use(cors({ origin: env.WEB_ORIGIN, credentials: true }));
 app.use(cookieParser());
 
