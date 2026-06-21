@@ -51,6 +51,35 @@ export const feedback = {
   admin: () => api<{ items: any[]; count: number; avgRating: number }>('/api/feedback/admin'),
 };
 
+type IntegrationStatus = {
+  status: 'CONNECTED' | 'DISCONNECTED' | 'ERROR' | string;
+  metadata: Record<string, unknown>;
+  lastTestedAt: string | null;
+};
+
+export const integrations = {
+  claude: {
+    status: () => api<IntegrationStatus>('/api/integrations/claude/status'),
+    connect: (apiKey: string) =>
+      api<IntegrationStatus>('/api/integrations/claude/connect', {
+        method: 'POST',
+        body: JSON.stringify({ apiKey }),
+      }),
+    test: () => api<IntegrationStatus>('/api/integrations/claude/test', { method: 'POST' }),
+    disconnect: () => api<{ status: string }>('/api/integrations/claude/disconnect', { method: 'DELETE' }),
+  },
+  n8n: {
+    status: () => api<IntegrationStatus>('/api/integrations/n8n/status'),
+    connect: (payload: { webhookUrl: string; workflowName?: string; signingSecret?: string }) =>
+      api<IntegrationStatus>('/api/integrations/n8n/connect', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    test: () => api<IntegrationStatus>('/api/integrations/n8n/test', { method: 'POST' }),
+    disconnect: () => api<{ status: string }>('/api/integrations/n8n/disconnect', { method: 'DELETE' }),
+  },
+};
+
 export const projects = {
   list: () => api<{ projects: any[] }>('/api/projects'),
   get: (id: string) => api<{ project: any }>(`/api/projects/${id}`),

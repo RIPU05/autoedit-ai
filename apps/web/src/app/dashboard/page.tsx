@@ -38,6 +38,7 @@ export default function DashboardPage() {
         <nav className="flex items-center gap-4 text-sm">
           <a href="/analytics" className="text-white/50 hover:text-white">Analytics</a>
           <a href="/settings" className="text-white/50 hover:text-white">Preferences</a>
+          <a href="/settings/integrations" className="text-white/50 hover:text-white">Integrations</a>
           <button
             onClick={async () => {
               await auth.logout();

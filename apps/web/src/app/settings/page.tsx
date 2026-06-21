@@ -26,21 +26,24 @@ export default function SettingsPage() {
   async function set(key: string, value: string) {
     setProfile((p) => (p ? { ...p, [key]: value } : p));
     const r = await creator.update({ [key]: value });
-    setDesc(`Updated.`);
+    setDesc('Updated.');
     setSaved(true);
     setTimeout(() => setSaved(false), 1200);
     setProfile(r.profile);
   }
 
-  if (!profile) return <main className="p-8 text-white/50">Loading preferences…</main>;
+  if (!profile) return <main className="p-8 text-white/50">Loading preferences...</main>;
 
   return (
     <main className="max-w-2xl mx-auto px-6 py-8">
-      <a href="/dashboard" className="text-sm text-white/40 hover:text-white">← Dashboard</a>
+      <div className="flex items-center justify-between">
+        <a href="/dashboard" className="text-sm text-white/40 hover:text-white">Dashboard</a>
+        <a href="/settings/integrations" className="text-sm text-white/40 hover:text-white">Integrations</a>
+      </div>
       <h1 className="font-display text-2xl mt-2">Creator preferences</h1>
       <p className="text-sm text-white/50 mt-1 mb-6">
         AutoEdit learns these from your edits automatically and applies them to every AI suggestion. You can override them here.
-        {saved && <span className="text-signal ml-2">saved ✓</span>}
+        {saved && <span className="text-signal ml-2">saved</span>}
       </p>
 
       <div className="space-y-4">
