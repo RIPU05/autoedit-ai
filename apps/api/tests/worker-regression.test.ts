@@ -6,6 +6,17 @@ import { db, prismaMock, queueAdds, resetDb, resetQueues } from './test-state.js
 const processors = new Map<string, (job: any) => Promise<unknown>>();
 const failedHandlers = new Map<string, (job: any, err: Error) => Promise<void>>();
 const dispatchIntegrationEvent = vi.fn(async () => undefined);
+const hasAudioStream = vi.fn(async () => true);
+const detectSilences = vi.fn(async () => [{ start: 4, end: 5 }]);
+const extractAudio = vi.fn(async (_file: string, out: string) => out);
+const transcribeRich = vi.fn(async () => ({
+  language: 'en',
+  durationSec: 10,
+  avgConfidence: 0.98,
+  model: 'mock-whisper',
+  segments: [{ start: 0, end: 3, text: 'hello world', confidence: 0.98 }],
+  words: [{ start: 0, end: 0.5, word: 'hello', confidence: 0.98 }],
+}));
 const renderEdit = vi.fn(async (_plan, _workDir, progress) => {
   await progress(100);
   const outPath = path.join(process.cwd(), 'tmp', 'worker-rendered.mp4');
@@ -48,41 +59,38 @@ vi.mock('../src/lib/s3.js', () => ({
 }));
 vi.mock('../src/ffmpeg/probe.js', () => ({
   probe: vi.fn(async () => ({ durationSec: 10, width: 640, height: 360, fps: 30 })),
-  detectSilences: vi.fn(async () => [{ start: 4, end: 5 }]),
-  extractAudio: vi.fn(async (_file: string, out: string) => out),
+  hasAudioStream,
+  detectSilences,
+  extractAudio,
 }));
 vi.mock('../src/services/transcribe.service.js', () => ({
-  transcribeRich: vi.fn(async () => ({
-    language: 'en',
-    durationSec: 10,
-    avgConfidence: 0.98,
-    model: 'mock-whisper',
-    segments: [{ start: 0, end: 3, text: 'hello world', confidence: 0.98 }],
-    words: [{ start: 0, end: 0.5, word: 'hello', confidence: 0.98 }],
-  })),
+  transcribeRich,
 }));
 vi.mock('../src/ai/providers.js', () => ({
-  runAiProvider: vi.fn(async () => ({
-    provider: 'fallback',
-    fallback: true,
-    reason: 'mock AI unavailable',
-    result: {
-      summary: 'hello world',
-      strategy: 'fallback strategy',
-      highlights: [{ start: 0, end: 3, label: 'hello world', score: 0.5 }],
-      silences: [{ start: 4, end: 5 }],
-      speakers: [{ id: 'spk_1', label: 'Speaker 1', segments: [{ start: 0, end: 3 }] }],
-      captions: [{ start: 0, end: 3, text: 'hello world' }],
-      suggestedTitles: ['Auto-generated edit'],
-      socialCopy: { instagram: 'edit', tiktok: 'edit', youtube: 'edit', linkedin: 'edit' },
-      hook: { hook: { start: 0, end: 3, text: 'hello world' }, alternatives: [] },
-      thumbnail: { concept: 'opening', overlayText: 'edit', bestFrameSec: 0 },
-      agentLog: [{ agent: 'Fallback', ms: 0, summary: 'mock AI unavailable' }],
-      operations: [{ index: 0, start: 0, end: 3, label: 'hello world', keep: true, zoom: 1 }],
-      effects: { subtitles: true, zooms: false, transitions: 'none', music: false, metadata: { aiProvider: 'fallback' } },
-      model: 'fallback',
-    },
-  })),
+  runAiProvider: vi.fn(async ({ transcript, meta }) => {
+    const noAudio = transcript.length === 0;
+    return {
+      provider: 'fallback',
+      fallback: true,
+      reason: 'mock AI unavailable',
+      result: {
+        summary: noAudio ? 'video-only fallback' : 'hello world',
+        strategy: 'fallback strategy',
+        highlights: [{ start: 0, end: noAudio ? meta.durationSec : 3, label: noAudio ? 'Video-only segment' : 'hello world', score: 0.5 }],
+        silences: noAudio ? [] : [{ start: 4, end: 5 }],
+        speakers: noAudio ? [] : [{ id: 'spk_1', label: 'Speaker 1', segments: [{ start: 0, end: 3 }] }],
+        captions: noAudio ? [] : [{ start: 0, end: 3, text: 'hello world' }],
+        suggestedTitles: ['Auto-generated edit'],
+        socialCopy: { instagram: 'edit', tiktok: 'edit', youtube: 'edit', linkedin: 'edit' },
+        hook: { hook: { start: 0, end: noAudio ? 5 : 3, text: 'hello world' }, alternatives: [] },
+        thumbnail: { concept: 'opening', overlayText: 'edit', bestFrameSec: 0 },
+        agentLog: [{ agent: 'Fallback', ms: 0, summary: 'mock AI unavailable' }],
+        operations: [{ index: 0, start: 0, end: noAudio ? meta.durationSec : 3, label: noAudio ? 'Video-only segment' : 'hello world', keep: true, zoom: 1 }],
+        effects: { subtitles: !noAudio, zooms: false, transitions: 'none', music: false, metadata: { aiProvider: 'fallback', noAudio } },
+        model: 'fallback',
+      },
+    };
+  }),
 }));
 vi.mock('../src/services/version.service.js', () => ({
   createVersion: vi.fn(async (data) => ({ id: 'version_1', ...data })),
@@ -112,6 +120,11 @@ beforeEach(async () => {
   processors.clear();
   failedHandlers.clear();
   dispatchIntegrationEvent.mockClear();
+  hasAudioStream.mockReset();
+  hasAudioStream.mockResolvedValue(true);
+  detectSilences.mockClear();
+  extractAudio.mockClear();
+  transcribeRich.mockClear();
   renderEdit.mockClear();
   global.fetch = vi.fn(async () => new Response(new Uint8Array([1, 2, 3]))) as typeof fetch;
   vi.resetModules();
@@ -137,6 +150,40 @@ describe('analysis worker regression', () => {
     expect(db.timelines[0]).toMatchObject({ projectId: 'project_1', approved: true });
     expect(db.projects.find((p) => p.id === 'project_1')?.status).toBe('RENDERING');
     expect(db.renders.map((render) => render.format).sort()).toEqual(['landscape', 'reel', 'short']);
+    expect(queueAdds.render).toHaveLength(3);
+    expect(extractAudio).toHaveBeenCalledOnce();
+    expect(transcribeRich).toHaveBeenCalledOnce();
+  });
+
+  it('skips extractAudio for no-audio media, persists an empty transcript, and enqueues fallback renders', async () => {
+    hasAudioStream.mockResolvedValue(false);
+    db.projects.push({ id: 'project_1', userId: 'user_1', title: 'No Audio Project', status: 'UPLOADED' });
+    const processor = processors.get('analysis');
+    expect(processor).toBeDefined();
+
+    const result = await processor!({
+      id: 'analysis-job',
+      data: { projectId: 'project_1', s3Key: 'sources/user/no-audio.mp4', bucket: 'autoedit-test-bucket' },
+      updateProgress: vi.fn(async () => undefined),
+    });
+
+    expect(result).toMatchObject({ provider: 'fallback', fallback: true });
+    expect(extractAudio).not.toHaveBeenCalled();
+    expect(transcribeRich).not.toHaveBeenCalled();
+    expect(detectSilences).not.toHaveBeenCalled();
+    expect(db.transcripts[0]).toMatchObject({
+      projectId: 'project_1',
+      language: 'unknown',
+      durationSec: 10,
+      segments: [],
+      words: [],
+      avgConfidence: null,
+      model: 'no-audio',
+    });
+    expect(db.analyses[0]).toMatchObject({ projectId: 'project_1', model: 'fallback', captions: [] });
+    expect(db.timelines[0]).toMatchObject({ projectId: 'project_1', approved: true });
+    expect(db.timelines[0].operations).toEqual([expect.objectContaining({ start: 0, end: 10, keep: true })]);
+    expect(db.projects.find((p) => p.id === 'project_1')?.status).toBe('RENDERING');
     expect(queueAdds.render).toHaveLength(3);
   });
 });

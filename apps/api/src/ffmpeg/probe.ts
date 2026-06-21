@@ -23,6 +23,16 @@ export function probe(filePath: string): Promise<VideoMeta> {
   });
 }
 
+/** True when the media has at least one audio stream. */
+export function hasAudioStream(filePath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    ffmpeg.ffprobe(filePath, (err, data) => {
+      if (err) return resolve(false);
+      resolve(data.streams.some((s) => s.codec_type === 'audio'));
+    });
+  });
+}
+
 /**
  * Detect silent segments using FFmpeg's silencedetect filter.
  * Returns gaps where audio stays below `thresholdDb` for at least `minSilenceSec`.

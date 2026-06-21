@@ -241,7 +241,7 @@ export async function renderEdit(
 
   // 3. subtitles + music
   const renderedCaptions = captionsForRenderedTimeline(plan.captions, plan.keep, appliedCrossfade ? CROSSFADE_SEC : 0);
-  const srt = await writeSrt(renderedCaptions, workDir);
+  const srt = renderedCaptions.length > 0 ? await writeSrt(renderedCaptions, workDir) : undefined;
   const finalOut = path.join(workDir, `final_${plan.format}.mp4`);
   const concatHasAudio = await hasAudioStream(concatOut);
   let musicBed: string | undefined;
@@ -258,27 +258,29 @@ export async function renderEdit(
   await new Promise<void>((resolve, reject) => {
     const cmd = ffmpeg(concatOut);
     // burn-in subtitles (escape path for the subtitles filter)
-    const subPath = srt.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
-    const videoFilter =
-      `subtitles='${subPath}':force_style='FontName=Arial,FontSize=20,Outline=2,Shadow=1,Alignment=2'`;
+    const subPath = srt?.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
+    const videoFilter = subPath
+      ? `subtitles='${subPath}':force_style='FontName=Arial,FontSize=20,Outline=2,Shadow=1,Alignment=2'`
+      : undefined;
 
     if (musicBed) {
       cmd.input(musicBed);
       if (concatHasAudio) {
+        const filters = [`[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=2[a]`];
+        if (videoFilter) filters.unshift(`[0:v]${videoFilter}[v]`);
         cmd
-          .complexFilter([
-            `[0:v]${videoFilter}[v]`,
-            `[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=2[a]`,
-          ])
-          .outputOptions(['-map [v]', '-map [a]', '-shortest']);
+          .complexFilter(filters)
+          .outputOptions([videoFilter ? '-map [v]' : '-map 0:v', '-map [a]', '-shortest']);
       } else {
+        const filters = ['[1:a]anull[a]'];
+        if (videoFilter) filters.unshift(`[0:v]${videoFilter}[v]`);
         cmd
-          .complexFilter([`[0:v]${videoFilter}[v]`, '[1:a]anull[a]'])
-          .outputOptions(['-map [v]', '-map [a]', '-shortest']);
+          .complexFilter(filters)
+          .outputOptions([videoFilter ? '-map [v]' : '-map 0:v', '-map [a]', '-shortest']);
       }
       console.log(JSON.stringify({ level: 'info', msg: 'render.music.applied', volume: plan.musicVolume ?? 0.1 }));
     } else {
-      cmd.videoFilters(videoFilter);
+      if (videoFilter) cmd.videoFilters(videoFilter);
       console.log(JSON.stringify({ level: 'info', msg: 'render.music.skipped', reason: 'disabled or unavailable' }));
     }
 

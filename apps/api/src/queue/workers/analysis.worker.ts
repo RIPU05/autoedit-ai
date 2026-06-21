@@ -5,7 +5,7 @@ import path from 'node:path';
 import { bullConnection as connection } from '../../lib/redis.js';
 import { prisma } from '../../lib/prisma.js';
 import { presignDownload } from '../../lib/s3.js';
-import { probe, detectSilences, extractAudio } from '../../ffmpeg/probe.js';
+import { probe, detectSilences, extractAudio, hasAudioStream } from '../../ffmpeg/probe.js';
 import { type TranscriptCue } from '../../services/claude.service.js';
 import { transcribeRich } from '../../services/transcribe.service.js';
 import { createVersion } from '../../services/version.service.js';
@@ -62,12 +62,27 @@ export const analysisWorker = new Worker<AnalysisJobData>(
 
     // 2. probe + silence detection (FFmpeg)
     const meta = await timeStage('probe', projectId, () => probe(localVideo));
-    const silences = await timeStage('silence', projectId, () => detectSilences(localVideo));
+    const hasAudio = await timeStage('audio-stream', projectId, () => hasAudioStream(localVideo));
+    const silences = hasAudio ? await timeStage('silence', projectId, () => detectSilences(localVideo)) : [];
 
     // 3. transcribe audio (rich: words + confidence + language)
-    const audioPath = path.join(workDir, 'audio.wav');
-    await extractAudio(localVideo, audioPath);
-    const tr = await timeStage('transcription', projectId, () => transcribeRich(audioPath));
+    const tr = hasAudio
+      ? await (async () => {
+          const audioPath = path.join(workDir, 'audio.wav');
+          await extractAudio(localVideo, audioPath);
+          return timeStage('transcription', projectId, () => transcribeRich(audioPath));
+        })()
+      : {
+          language: 'unknown',
+          durationSec: meta.durationSec,
+          segments: [],
+          words: [],
+          avgConfidence: null,
+          model: 'no-audio',
+        };
+    if (!hasAudio) {
+      console.warn(JSON.stringify({ level: 'warn', msg: 'No audio stream detected; skipping transcription and using fallback timeline', projectId }));
+    }
     await job.updateProgress(40);
 
     // persist transcript

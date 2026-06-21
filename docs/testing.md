@@ -29,6 +29,7 @@ Route regression tests cover:
 Worker regression tests cover:
 
 - Analysis worker transcript persistence.
+- No-audio analysis path with transcription skipped.
 - AI provider fallback path.
 - Fallback timeline persistence.
 - Automatic render job enqueueing.
@@ -77,4 +78,5 @@ Upload -> S3 -> Whisper -> fallback timeline -> render -> final S3 output.
 - Tests do not launch Docker services.
 - Tests do not call real AWS, Anthropic, Ollama, or n8n.
 - No-audio upload hardening remains a future branch.
+- No-audio upload handling is covered at the worker level; full media regression should also be run manually when FFmpeg/worker behavior changes.
 - Full FFmpeg media rendering remains covered by manual regression and focused render quality checks, not by CI tests.

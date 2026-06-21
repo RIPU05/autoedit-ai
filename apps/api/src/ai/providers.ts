@@ -60,6 +60,37 @@ export function buildFallbackPipelineResult(input: {
   silences: SilenceSegment[];
   reason: string;
 }): PipelineResult {
+  if (input.transcript.length === 0) {
+    const end = Math.max(0.1, input.meta.durationSec);
+    return {
+      summary: 'Fallback edit generated from video-only media with no audio transcript.',
+      strategy: 'Fallback edit keeps the full video because no audio transcript is available.',
+      reasoning: input.reason,
+      highlights: [{ start: 0, end, label: 'Video-only segment', score: 0.5 }],
+      speakers: [],
+      captions: [],
+      suggestedTitles: ['Auto-generated edit'],
+      socialCopy: {
+        instagram: 'Auto-generated edit',
+        tiktok: 'Auto-generated edit',
+        youtube: 'Auto-generated edit',
+        linkedin: 'Auto-generated edit',
+      },
+      hook: { hook: { start: 0, end: Math.min(end, 5), text: 'Auto-generated edit' }, alternatives: ['Auto-generated edit'] },
+      thumbnail: { concept: 'Use the opening frame', overlayText: 'Auto edit', bestFrameSec: 0 },
+      operations: [{ index: 0, start: 0, end, label: 'Video-only segment', keep: true, zoom: 1 }],
+      effects: {
+        subtitles: false,
+        zooms: false,
+        transitions: 'none',
+        music: false,
+        metadata: { aiProvider: 'fallback', reason: input.reason, noAudio: true },
+      } as PipelineResult['effects'],
+      agentLog: [{ agent: 'Fallback', ms: 0, summary: 'No audio transcript available; kept video content.' }],
+      model: 'fallback',
+    };
+  }
+
   const captions = input.transcript.map((cue) => ({
     start: cue.start,
     end: cue.end,
