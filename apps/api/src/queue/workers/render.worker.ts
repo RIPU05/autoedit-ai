@@ -19,6 +19,22 @@ async function download(url: string, dest: string) {
   await fs.writeFile(dest, Buffer.from(await res.arrayBuffer()));
 }
 
+async function resolveMusicPath(effects: Record<string, unknown>) {
+  if (effects.music !== true) return undefined;
+  const metadata = effects.metadata && typeof effects.metadata === 'object' ? (effects.metadata as Record<string, unknown>) : {};
+  const candidate = typeof metadata.musicPath === 'string' ? metadata.musicPath : env.BACKGROUND_MUSIC_PATH;
+  if (!candidate) {
+    console.warn(JSON.stringify({ level: 'warn', msg: 'render.music.skipped', reason: 'missing path' }));
+    return undefined;
+  }
+  const exists = await fs.stat(candidate).then((s) => s.isFile()).catch(() => false);
+  if (!exists) {
+    console.warn(JSON.stringify({ level: 'warn', msg: 'render.music.skipped', reason: 'invalid path' }));
+    return undefined;
+  }
+  return candidate;
+}
+
 export const renderWorker = new Worker<RenderJobData>(
   RENDER_QUEUE,
   async (job) => {
@@ -76,8 +92,8 @@ export const renderWorker = new Worker<RenderJobData>(
       keep,
       captions: effects.subtitles ? (analysis.captions as any[]) : [],
       transition: effects.transitions === 'fade' ? 'fade' : 'none',
-      musicPath: undefined, // TODO: download chosen music asset if effects.music
-      musicVolume: 0.15,
+      musicPath: await resolveMusicPath(effects),
+      musicVolume: env.BACKGROUND_MUSIC_VOLUME,
       format,
     };
 

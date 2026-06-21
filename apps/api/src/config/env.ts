@@ -35,6 +35,8 @@ const schema = z.object({
   N8N_WEBHOOK_SECRET: z.string().default('change-me'),
 
   RENDER_WORK_DIR: z.string().default('/tmp/autoedit'),
+  BACKGROUND_MUSIC_PATH: z.string().optional(),
+  BACKGROUND_MUSIC_VOLUME: z.coerce.number().default(0.1),
   MAX_UPLOAD_BYTES: z.coerce.number().default(5_368_709_120),
 
   // queue + worker controls (Phase 6)
