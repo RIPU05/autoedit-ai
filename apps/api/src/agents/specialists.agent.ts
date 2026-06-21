@@ -9,7 +9,7 @@ export interface EditorOutput {
   operations: { index: number; start: number; end: number; label: string; keep: boolean; zoom: number }[];
   effects: { subtitles: boolean; zooms: boolean; transitions: 'fade' | 'none'; music: boolean };
 }
-export async function runEditor(input: { strategy: string; segments: Seg[]; durationSec: number }) {
+export async function runEditor(input: { strategy: string; segments: Seg[]; durationSec: number; apiKey?: string }) {
   return callAgent<EditorOutput>({
     name: 'Editor',
     system:
@@ -56,6 +56,7 @@ export async function runEditor(input: { strategy: string; segments: Seg[]; dura
       `STRATEGY: ${input.strategy}`,
       `SEGMENTS: ${JSON.stringify(input.segments)}`,
     ].join('\n\n'),
+    apiKey: input.apiKey,
   });
 }
 
@@ -63,7 +64,7 @@ export async function runEditor(input: { strategy: string; segments: Seg[]; dura
 export interface CaptionOutput {
   captions: { start: number; end: number; text: string }[];
 }
-export async function runCaptioner(input: { transcript: TranscriptCue[]; segments: Seg[] }) {
+export async function runCaptioner(input: { transcript: TranscriptCue[]; segments: Seg[]; apiKey?: string }) {
   return callAgent<CaptionOutput>({
     name: 'Caption',
     system:
@@ -90,6 +91,7 @@ export async function runCaptioner(input: { transcript: TranscriptCue[]; segment
       },
     },
     user: [`SEGMENTS: ${JSON.stringify(input.segments)}`, `TRANSCRIPT: ${JSON.stringify(input.transcript)}`].join('\n\n'),
+    apiKey: input.apiKey,
   });
 }
 
@@ -98,7 +100,7 @@ export interface HookOutput {
   hook: { start: number; end: number; text: string };
   alternatives: string[];
 }
-export async function runHook(input: { transcript: TranscriptCue[]; segments: Seg[] }) {
+export async function runHook(input: { transcript: TranscriptCue[]; segments: Seg[]; apiKey?: string }) {
   return callAgent<HookOutput>({
     name: 'Hook',
     system:
@@ -122,6 +124,7 @@ export async function runHook(input: { transcript: TranscriptCue[]; segments: Se
       },
     },
     user: [`SEGMENTS: ${JSON.stringify(input.segments)}`, `TRANSCRIPT: ${JSON.stringify(input.transcript)}`].join('\n\n'),
+    apiKey: input.apiKey,
   });
 }
 
@@ -130,7 +133,7 @@ export interface SocialOutput {
   suggestedTitles: string[];
   socialCopy: { instagram: string; tiktok: string; youtube: string; linkedin: string };
 }
-export async function runSocial(input: { summary: string; strategy: string }) {
+export async function runSocial(input: { summary: string; strategy: string; apiKey?: string }) {
   return callAgent<SocialOutput>({
     name: 'Social',
     system:
@@ -160,6 +163,7 @@ export async function runSocial(input: { summary: string; strategy: string }) {
       },
     },
     user: `SUMMARY: ${input.summary}\n\nSTRATEGY: ${input.strategy}`,
+    apiKey: input.apiKey,
   });
 }
 
@@ -169,7 +173,7 @@ export interface ThumbnailOutput {
   overlayText: string;
   bestFrameSec: number;
 }
-export async function runThumbnail(input: { summary: string; segments: Seg[] }) {
+export async function runThumbnail(input: { summary: string; segments: Seg[]; apiKey?: string }) {
   return callAgent<ThumbnailOutput>({
     name: 'Thumbnail',
     system:
@@ -190,5 +194,6 @@ export async function runThumbnail(input: { summary: string; segments: Seg[] }) 
       },
     },
     user: `SUMMARY: ${input.summary}\n\nSEGMENTS: ${JSON.stringify(input.segments)}`,
+    apiKey: input.apiKey,
   });
 }

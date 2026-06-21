@@ -15,6 +15,7 @@ import { moveToDeadLetter } from '../queues.js';
 import { env } from '../../config/env.js';
 import { ANALYSIS_QUEUE, type AnalysisJobData, enqueueRender } from '../queues.js';
 import { runAiProvider } from '../../ai/providers.js';
+import { dispatchIntegrationEvent, getConnectedClaudeApiKey } from '../../services/integration-events.service.js';
 
 async function download(url: string, dest: string) {
   const res = await fetch(url);
@@ -93,12 +94,22 @@ export const analysisWorker = new Worker<AnalysisJobData>(
     const transcript: TranscriptCue[] = tr.segments.map((s) => ({ start: s.start, end: s.end, text: s.text, speaker: s.speaker }));
 
     // creator memory → prompt injection
-    const proj0 = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true } });
+    const proj0 = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true, title: true } });
     const creatorProfile = proj0 ? await buildPromptInjection(proj0.userId) : undefined;
+    if (proj0) {
+      void dispatchIntegrationEvent(proj0.userId, 'transcript.completed', {
+        projectId,
+        title: proj0.title,
+        language: tr.language,
+        durationSec: tr.durationSec,
+        segments: tr.segments.length,
+      });
+    }
+    const claudeApiKey = proj0 ? await getConnectedClaudeApiKey(proj0.userId).catch(() => undefined) : undefined;
 
     // 4. AI provider pipeline (timed); selected provider falls back only for known unavailable states.
     const ai = await timeStage('analysis', projectId, () =>
-      runAiProvider({ meta, transcript, silences, goal: job.data.userPrompt, creatorProfile }),
+      runAiProvider({ meta, transcript, silences, goal: job.data.userPrompt, creatorProfile, claudeApiKey }),
     );
     if (ai.fallback) {
       console.warn(JSON.stringify({ level: 'warn', msg: 'analysis.fallback', projectId, reason: ai.reason }));

@@ -15,9 +15,11 @@ export async function callAgent<T>(opts: {
   user: string;
   model?: string;
   maxTokens?: number;
+  apiKey?: string;
 }): Promise<{ output: T; ms: number }> {
   const t0 = Date.now();
-  const message = await anthropic.messages.create({
+  const client = opts.apiKey ? new Anthropic({ apiKey: opts.apiKey }) : anthropic;
+  const message = await client.messages.create({
     model: opts.model ?? env.CLAUDE_MODEL,
     max_tokens: opts.maxTokens ?? 4000,
     system: opts.system,

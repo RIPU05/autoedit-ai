@@ -10,6 +10,7 @@ import { presignDownload } from '../lib/s3.js';
 import { env } from '../config/env.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { dispatchIntegrationEvent } from '../services/integration-events.service.js';
 
 export const uploadRouter = Router();
 uploadRouter.use(requireAuth);
@@ -27,6 +28,10 @@ uploadRouter.post(
 
     const project = await prisma.project.create({
       data: { userId: req.user!.sub, title: title ?? filename, status: 'UPLOADING' },
+    });
+    void dispatchIntegrationEvent(req.user!.sub, 'project.created', {
+      projectId: project.id,
+      title: project.title,
     });
 
     res.json({ projectId: project.id, key, bucket, uploadId });
@@ -93,6 +98,17 @@ uploadRouter.post(
     await prisma.job.create({
       data: { bullId: job.id, projectId, type: 'ANALYZE', status: 'QUEUED' },
     });
+    const project = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true, title: true } });
+    if (project) {
+      void dispatchIntegrationEvent(project.userId, 'upload.completed', {
+        projectId,
+        title: project.title,
+        assetId: asset.id,
+        s3Key: key,
+        contentType,
+        sizeBytes,
+      });
+    }
 
     res.json({ projectId, assetId: asset.id, analysisJobId: job.id });
   }),

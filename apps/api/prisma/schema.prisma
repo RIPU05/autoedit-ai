@@ -35,6 +35,53 @@ model User {
   activityLogs  ActivityLog[]
   creatorProfile CreatorProfile?
   feedback      Feedback[]
+  integrationAccounts IntegrationAccount[]
+  integrationEventLogs IntegrationEventLog[]
+}
+
+enum IntegrationProvider {
+  CLAUDE
+  N8N
+}
+
+enum IntegrationStatus {
+  CONNECTED
+  DISCONNECTED
+  ERROR
+}
+
+model IntegrationAccount {
+  id                   String              @id @default(cuid())
+  userId               String
+  provider             IntegrationProvider
+  status               IntegrationStatus   @default(DISCONNECTED)
+  encryptedCredentials String
+  metadata             Json                @default("{}")
+  lastTestedAt         DateTime?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider])
+  @@index([provider, status])
+}
+
+model IntegrationEventLog {
+  id        String              @id @default(cuid())
+  userId    String
+  provider  IntegrationProvider
+  eventType String
+  status    String
+  payload   Json?
+  response  Json?
+  error     String?
+  createdAt DateTime            @default(now())
+
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, provider, createdAt])
+  @@index([eventType, createdAt])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

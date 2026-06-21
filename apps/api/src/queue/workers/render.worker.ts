@@ -11,6 +11,7 @@ import { env } from '../../config/env.js';
 import { timeStage, captureError, withTimeout } from '../../lib/observability.js';
 import { learnFromProject } from '../../services/creator-memory.service.js';
 import { RENDER_QUEUE, type RenderJobData } from '../queues.js';
+import { dispatchIntegrationEvent } from '../../services/integration-events.service.js';
 
 async function download(url: string, dest: string) {
   const res = await fetch(url);
@@ -116,6 +117,13 @@ export const renderWorker = new Worker<RenderJobData>(
         message: `Rendered ${format} for "${project.title}".`,
       },
     });
+    void dispatchIntegrationEvent(project.userId, 'render.completed', {
+      projectId,
+      renderId,
+      format,
+      outputS3Key: outKey,
+      outputUrl,
+    });
 
     // creator memory: a completed render is a strong signal of shipped taste
     void learnFromProject(projectId);
@@ -161,6 +169,18 @@ renderWorker.on('failed', async (job, err) => {
   await prisma.render
     .update({ where: { id: job.data.renderId }, data: { status: 'FAILED', error: err.message } })
     .catch(() => {});
+  const project = await prisma.project.findUnique({
+    where: { id: job.data.projectId },
+    select: { userId: true, title: true },
+  });
+  if (project) {
+    void dispatchIntegrationEvent(project.userId, 'render.failed', {
+      projectId: job.data.projectId,
+      renderId: job.data.renderId,
+      title: project.title,
+      error: err.message,
+    });
+  }
   if (job.attemptsMade >= (job.opts.attempts ?? 1)) {
     await moveToDeadLetter(RENDER_QUEUE, job.data, err.message).catch(() => {});
   }

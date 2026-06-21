@@ -14,6 +14,7 @@ export async function runDirector(input: {
   silences: SilenceSegment[];
   goal?: string;
   creatorProfile?: string;
+  apiKey?: string;
 }) {
   return callAgent<DirectorOutput>({
     name: 'Director',
@@ -57,5 +58,6 @@ export async function runDirector(input: {
     ]
       .filter(Boolean)
       .join('\n\n'),
+    apiKey: input.apiKey,
   });
 }

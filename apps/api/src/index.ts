@@ -11,6 +11,7 @@ import { projectRouter, dashboardRouter } from './routes/projects.routes.js';
 import { n8nRouter, webhookRouter } from './routes/n8n.routes.js';
 import { healthRouter } from './routes/health.routes.js';
 import { creatorRouter, analyticsRouter, feedbackRouter } from './routes/account.routes.js';
+import { integrationsRouter } from './routes/integrations.routes.js';
 import { startMemorySampler } from './lib/observability.js';
 
 const app = express();
@@ -34,6 +35,7 @@ app.use('/api/upload', uploadRouter);
 app.use('/api/projects', projectRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/n8n', n8nRouter);
+app.use('/api/integrations', integrationsRouter);
 app.use('/api/webhooks', webhookRouter);
 app.use('/api/creator', creatorRouter);
 app.use('/api/analytics', analyticsRouter);

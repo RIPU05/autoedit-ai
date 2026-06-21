@@ -10,6 +10,7 @@ export interface AiProviderInput {
   silences: SilenceSegment[];
   goal?: string;
   creatorProfile?: string;
+  claudeApiKey?: string;
 }
 
 export interface AiProvider {
@@ -144,7 +145,7 @@ export class ClaudeProvider extends BaseProvider {
   name: AiProviderName = 'claude';
 
   analyzeTranscript(input: AiProviderInput) {
-    return runEditorialPipeline(input);
+    return runEditorialPipeline({ ...input, apiKey: input.claudeApiKey });
   }
 }
 

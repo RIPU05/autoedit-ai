@@ -59,6 +59,7 @@ export async function runEditorialPipeline(input: {
   silences: SilenceSegment[];
   goal?: string;
   creatorProfile?: string;
+  apiKey?: string;
 }): Promise<PipelineResult> {
   const log: AgentLogEntry[] = [];
 
@@ -69,11 +70,11 @@ export async function runEditorialPipeline(input: {
 
   // 2. specialists in parallel
   const [editor, captioner, hook, social, thumbnail] = await Promise.all([
-    runEditor({ strategy: director.output.strategy, segments, durationSec: input.meta.durationSec }),
-    runCaptioner({ transcript: input.transcript, segments }),
-    runHook({ transcript: input.transcript, segments }),
-    runSocial({ summary: director.output.summary, strategy: director.output.strategy }),
-    runThumbnail({ summary: director.output.summary, segments }),
+    runEditor({ strategy: director.output.strategy, segments, durationSec: input.meta.durationSec, apiKey: input.apiKey }),
+    runCaptioner({ transcript: input.transcript, segments, apiKey: input.apiKey }),
+    runHook({ transcript: input.transcript, segments, apiKey: input.apiKey }),
+    runSocial({ summary: director.output.summary, strategy: director.output.strategy, apiKey: input.apiKey }),
+    runThumbnail({ summary: director.output.summary, segments, apiKey: input.apiKey }),
   ]);
 
   log.push({ agent: 'Editor', ms: editor.ms, summary: `${editor.output.operations.length} clips arranged` });
