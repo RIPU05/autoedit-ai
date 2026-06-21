@@ -31,7 +31,7 @@ uploadRouter.post(
     });
     void dispatchIntegrationEvent(req.user!.sub, 'project.created', {
       projectId: project.id,
-      title: project.title,
+      projectTitle: project.title,
     });
 
     res.json({ projectId: project.id, key, bucket, uploadId });
@@ -102,11 +102,9 @@ uploadRouter.post(
     if (project) {
       void dispatchIntegrationEvent(project.userId, 'upload.completed', {
         projectId,
-        title: project.title,
+        projectTitle: project.title,
         assetId: asset.id,
-        s3Key: key,
-        contentType,
-        sizeBytes,
+        metadata: { s3Key: key, contentType, sizeBytes },
       });
     }
 

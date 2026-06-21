@@ -120,9 +120,10 @@ export const renderWorker = new Worker<RenderJobData>(
     void dispatchIntegrationEvent(project.userId, 'render.completed', {
       projectId,
       renderId,
-      format,
-      outputS3Key: outKey,
-      outputUrl,
+      renderFormat: format,
+      renderUrl: outputUrl,
+      projectTitle: project.title,
+      metadata: { outputS3Key: outKey },
     });
 
     // creator memory: a completed render is a strong signal of shipped taste
@@ -177,8 +178,9 @@ renderWorker.on('failed', async (job, err) => {
     void dispatchIntegrationEvent(project.userId, 'render.failed', {
       projectId: job.data.projectId,
       renderId: job.data.renderId,
-      title: project.title,
-      error: err.message,
+      renderFormat: job.data.format,
+      projectTitle: project.title,
+      metadata: { error: err.message },
     });
   }
   if (job.attemptsMade >= (job.opts.attempts ?? 1)) {

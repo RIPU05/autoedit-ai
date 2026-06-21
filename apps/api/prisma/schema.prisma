@@ -73,6 +73,9 @@ model IntegrationEventLog {
   provider  IntegrationProvider
   eventType String
   status    String
+  projectId String?
+  renderId  String?
+  responseStatusCode Int?
   payload   Json?
   response  Json?
   error     String?
@@ -82,6 +85,8 @@ model IntegrationEventLog {
 
   @@index([userId, provider, createdAt])
   @@index([eventType, createdAt])
+  @@index([projectId, createdAt])
+  @@index([renderId, createdAt])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

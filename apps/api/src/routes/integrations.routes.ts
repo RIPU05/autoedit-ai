@@ -176,7 +176,10 @@ integrationsRouter.post(
       select: { status: true },
     });
     if (!existing || existing.status === 'DISCONNECTED') throw new HttpError(400, 'n8n is not connected');
-    await dispatchIntegrationEvent(req.user!.sub, 'project.created', { test: true, source: 'integration-test' });
+    await dispatchIntegrationEvent(req.user!.sub, 'project.created', {
+      projectTitle: 'Integration test',
+      metadata: { test: true, source: 'integration-test' },
+    });
     const account = await prisma.integrationAccount.update({
       where: { userId_provider: { userId: req.user!.sub, provider: 'N8N' } },
       data: { lastTestedAt: new Date() },

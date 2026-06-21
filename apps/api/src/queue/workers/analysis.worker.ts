@@ -99,10 +99,12 @@ export const analysisWorker = new Worker<AnalysisJobData>(
     if (proj0) {
       void dispatchIntegrationEvent(proj0.userId, 'transcript.completed', {
         projectId,
-        title: proj0.title,
-        language: tr.language,
-        durationSec: tr.durationSec,
-        segments: tr.segments.length,
+        projectTitle: proj0.title,
+        metadata: {
+          language: tr.language,
+          durationSec: tr.durationSec,
+          segments: tr.segments.length,
+        },
       });
     }
     const claudeApiKey = proj0 ? await getConnectedClaudeApiKey(proj0.userId).catch(() => undefined) : undefined;

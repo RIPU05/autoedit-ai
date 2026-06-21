@@ -11,6 +11,7 @@
     "start:worker": "node dist/worker.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
+    "test:n8n-webhook": "tsx src/scripts/test-n8n-webhook.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
