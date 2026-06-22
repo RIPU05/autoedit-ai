@@ -6,6 +6,15 @@ const schema = z.object({
   API_PORT: z.coerce.number().default(4000),
   WEB_ORIGIN: z.string().url().default('http://localhost:3000'),
   API_BASE_URL: z.string().url().default('http://localhost:4000'),
+  TRUST_PROXY: z
+    .string()
+    .default('false')
+    .transform((value) => {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === 'true' || normalized === '1') return 1;
+      if (normalized === 'false' || normalized === '0') return false;
+      return value;
+    }),
 
   DATABASE_URL: z.string(),
   REDIS_URL: z.string().default('redis://localhost:6379'),

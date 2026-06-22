@@ -19,6 +19,13 @@ Added reusable API limiters:
 * `INTEGRATION_LIMITER`: 10 requests per minute
 * `GENERAL_API_LIMITER`: 100 requests per minute
 
+Limiter keying behavior:
+
+* auth limiter is IP-based for login/register abuse protection
+* authenticated upload, integration, project, dashboard, creator, analytics, and feedback routes are user-id based when `req.user` is available
+* authenticated limiters fall back to client IP if a user id is unavailable
+* test-only deterministic keys are used by mocked regression tests
+
 ### Protected Routes
 
 Protected authentication routes:
@@ -46,6 +53,26 @@ Protected general API routes:
 * `/api/feedback`
 
 Health checks remain unthrottled so deployment and monitoring probes are not blocked.
+
+## Deployment Notes
+
+`TRUST_PROXY` is now configurable for deployments behind a trusted proxy or load balancer.
+
+Recommended local value:
+
+```env
+TRUST_PROXY=false
+```
+
+Recommended value behind a single trusted proxy, such as common Render/Railway/Cloudflare-style deployments:
+
+```env
+TRUST_PROXY=1
+```
+
+Configure this carefully. IP-based auth limiting depends on Express seeing the correct client IP.
+
+Upload limits may need tuning for very large multipart uploads or very small chunk sizes. The current default allows 20 upload API requests per minute per authenticated user.
 
 ## 429 Behavior
 

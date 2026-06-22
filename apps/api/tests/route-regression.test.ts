@@ -274,6 +274,37 @@ describe('rate limit regression', () => {
     expect(last.body).toMatchObject({ error: 'rate limit exceeded', retryAfterSec: expect.any(Number) });
   });
 
+  it('keys authenticated upload limits by user instead of sharing one client bucket', async () => {
+    const firstUser = await register();
+    const secondUser = await register();
+    const sharedClientKey = `shared-client-${Math.random()}`;
+    const firstHeaders = { Authorization: `Bearer ${firstUser.token}`, 'x-test-rate-limit-key': sharedClientKey };
+    const secondHeaders = { Authorization: `Bearer ${secondUser.token}`, 'x-test-rate-limit-key': sharedClientKey };
+    let last = await request('/api/upload/part', {
+      method: 'POST',
+      headers: firstHeaders,
+      body: JSON.stringify({ key: 'sources/test.mp4', uploadId: 'upload-id', partNumber: 1 }),
+    });
+    expect(last.res.status).toBe(200);
+
+    for (let i = 1; i < 21; i++) {
+      last = await request('/api/upload/part', {
+        method: 'POST',
+        headers: firstHeaders,
+        body: JSON.stringify({ key: 'sources/test.mp4', uploadId: 'upload-id', partNumber: i + 1 }),
+      });
+    }
+
+    expect(last.res.status).toBe(429);
+
+    const secondUserRequest = await request('/api/upload/part', {
+      method: 'POST',
+      headers: secondHeaders,
+      body: JSON.stringify({ key: 'sources/test.mp4', uploadId: 'upload-id', partNumber: 1 }),
+    });
+    expect(secondUserRequest.res.status).toBe(200);
+  });
+
   it('limits integration routes', async () => {
     const { token } = await register();
     const key = `integration-limit-${Math.random()}`;
