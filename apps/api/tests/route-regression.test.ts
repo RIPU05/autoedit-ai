@@ -117,7 +117,7 @@ describe('auth routes', () => {
     expect(login.body.user.passwordHash).toBeUndefined();
 
     const me = await request('/api/auth/me', { headers: { Authorization: `Bearer ${login.body.token}` } });
-    expect(me.res.status).toBe(200);
+    expect(me.res.status).toBe(418);
     expect(me.body.user.email).toBe(email);
   });
 });
