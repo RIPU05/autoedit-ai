@@ -2,9 +2,9 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
-import rateLimit from 'express-rate-limit';
 import { env } from './config/env.js';
 import { errorHandler } from './middleware/auth.js';
+import { AUTH_LIMITER, GENERAL_API_LIMITER, INTEGRATION_LIMITER, UPLOAD_LIMITER } from './middleware/rateLimit.js';
 import { authRouter } from './routes/auth.routes.js';
 import { uploadRouter } from './routes/upload.routes.js';
 import { projectRouter, dashboardRouter } from './routes/projects.routes.js';
@@ -30,16 +30,16 @@ export function createApp() {
     }),
   );
 
-  app.use('/api/auth', rateLimit({ windowMs: 60_000, max: 30 }), authRouter);
-  app.use('/api/upload', uploadRouter);
-  app.use('/api/projects', projectRouter);
-  app.use('/api/dashboard', dashboardRouter);
+  app.use('/api/auth', AUTH_LIMITER, authRouter);
+  app.use('/api/upload', UPLOAD_LIMITER, uploadRouter);
+  app.use('/api/projects', GENERAL_API_LIMITER, projectRouter);
+  app.use('/api/dashboard', GENERAL_API_LIMITER, dashboardRouter);
   app.use('/api/n8n', n8nRouter);
-  app.use('/api/integrations', integrationsRouter);
+  app.use('/api/integrations', INTEGRATION_LIMITER, integrationsRouter);
   app.use('/api/webhooks', webhookRouter);
-  app.use('/api/creator', creatorRouter);
-  app.use('/api/analytics', analyticsRouter);
-  app.use('/api/feedback', feedbackRouter);
+  app.use('/api/creator', GENERAL_API_LIMITER, creatorRouter);
+  app.use('/api/analytics', GENERAL_API_LIMITER, analyticsRouter);
+  app.use('/api/feedback', GENERAL_API_LIMITER, feedbackRouter);
   app.use('/health', healthRouter);
 
   app.use(errorHandler);

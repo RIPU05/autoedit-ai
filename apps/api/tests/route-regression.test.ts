@@ -71,6 +71,7 @@ async function register() {
   const email = `test-${Math.random().toString(16).slice(2)}@example.com`;
   const { body } = await request('/api/auth/register', {
     method: 'POST',
+    headers: { 'x-test-rate-limit-key': email },
     body: JSON.stringify({ email, password: 'Password123!', name: 'Test User' }),
   });
   return { email, token: body.token, user: body.user };
@@ -226,5 +227,65 @@ describe('health routes', () => {
     await expect(request('/health/redis')).resolves.toMatchObject({ body: { ok: true } });
     await expect(request('/health/s3')).resolves.toMatchObject({ body: { ok: true } });
     await expect(request('/health/ollama')).resolves.toMatchObject({ body: { ok: true } });
+  });
+});
+
+describe('rate limit regression', () => {
+  it('limits auth routes and returns JSON 429 with retry information', async () => {
+    const key = `auth-limit-${Math.random()}`;
+    const statuses: number[] = [];
+    let limitedBody: unknown;
+
+    for (let i = 0; i < 6; i++) {
+      const response = await request('/api/auth/register', {
+        method: 'POST',
+        headers: { 'x-test-rate-limit-key': key },
+        body: JSON.stringify({ email: `${key}-${i}@example.com`, password: 'Password123!', name: 'Limited User' }),
+      });
+      statuses.push(response.res.status);
+      limitedBody = response.body;
+    }
+
+    expect(statuses.slice(0, 5)).toEqual([200, 200, 200, 200, 200]);
+    expect(statuses[5]).toBe(429);
+    expect(limitedBody).toMatchObject({ error: 'rate limit exceeded', retryAfterSec: expect.any(Number) });
+  });
+
+  it('limits upload routes after normal threshold usage', async () => {
+    const { token } = await register();
+    const key = `upload-limit-${Math.random()}`;
+    const headers = { Authorization: `Bearer ${token}`, 'x-test-rate-limit-key': key };
+    let last = await request('/api/upload/part', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ key: 'sources/test.mp4', uploadId: 'upload-id', partNumber: 1 }),
+    });
+    expect(last.res.status).toBe(200);
+
+    for (let i = 1; i < 21; i++) {
+      last = await request('/api/upload/part', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ key: 'sources/test.mp4', uploadId: 'upload-id', partNumber: i + 1 }),
+      });
+    }
+
+    expect(last.res.status).toBe(429);
+    expect(last.body).toMatchObject({ error: 'rate limit exceeded', retryAfterSec: expect.any(Number) });
+  });
+
+  it('limits integration routes', async () => {
+    const { token } = await register();
+    const key = `integration-limit-${Math.random()}`;
+    const headers = { Authorization: `Bearer ${token}`, 'x-test-rate-limit-key': key };
+    let last = await request('/api/integrations/claude/test', { method: 'POST', headers });
+    expect(last.res.status).toBe(400);
+
+    for (let i = 1; i < 11; i++) {
+      last = await request('/api/integrations/claude/test', { method: 'POST', headers });
+    }
+
+    expect(last.res.status).toBe(429);
+    expect(last.body).toMatchObject({ error: 'rate limit exceeded', retryAfterSec: expect.any(Number) });
   });
 });
