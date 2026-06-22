@@ -1,5 +1,7 @@
 # AutoEdit AI
 
+[![AutoEdit AI CI](https://github.com/RIPU05/autoedit-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/RIPU05/autoedit-ai/actions/workflows/ci.yml)
+
 AutoEdit AI is an AI-assisted video editing pipeline for turning uploaded videos into edited, captioned, render-ready outputs. It supports cloud storage through S3, local transcription through Whisper, local or cloud AI analysis, FFmpeg rendering, and a fallback timeline path when external AI is unavailable.
 
 ## Main Features
@@ -296,4 +298,3 @@ npm run build
 - Use a long random `JWT_SECRET`.
 - Use least-privilege IAM permissions for S3.
 - Rotate leaked credentials immediately.
-
