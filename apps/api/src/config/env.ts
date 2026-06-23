@@ -26,7 +26,7 @@ const schema = z.object({
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_CALLBACK_URL: z.string().optional(),
 
-  ANTHROPIC_API_KEY: z.string(),
+  ANTHROPIC_API_KEY: z.string().optional().default(''),
   CLAUDE_MODEL: z.string().default('claude-sonnet-4-6'),
   CLAUDE_FAST_MODEL: z.string().default('claude-haiku-4-5-20251001'),
   AI_PROVIDER: z.enum(['claude', 'ollama', 'fallback']).default('claude'),
@@ -58,6 +58,14 @@ const schema = z.object({
   // Transcription sidecar (services/whisper)
   WHISPER_URL: z.string().url().default('http://localhost:9000'),
   WHISPER_MODEL: z.string().default('base'),
+}).superRefine((value, ctx) => {
+  if (value.AI_PROVIDER === 'claude' && value.ANTHROPIC_API_KEY.trim().length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['ANTHROPIC_API_KEY'],
+      message: 'ANTHROPIC_API_KEY is required when AI_PROVIDER=claude',
+    });
+  }
 });
 
 export const env = schema.parse(process.env);

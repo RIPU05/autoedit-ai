@@ -58,7 +58,7 @@ AWS ECS/Fargate remains the strongest later production path, but it is more infr
 - `AI_PROVIDER=fallback`
 - `BACKGROUND_MUSIC_PATH` only if background music should be enabled
 
-Claude credentials are not part of the fallback deployment plan. Current code may still parse Anthropic configuration even when Claude is skipped; that should be treated as a deployment hardening gap, not a product dependency.
+Claude credentials are not part of the fallback deployment plan. `ANTHROPIC_API_KEY` is required only when `AI_PROVIDER=claude`; fallback-only deployment can boot without it.
 
 ## Deployment Risks
 
@@ -77,7 +77,7 @@ Claude credentials are not part of the fallback deployment plan. Current code ma
 - Public deployment has not started.
 - Live deployment smoke testing is still required.
 - Whisper resource sizing must be validated on the chosen host.
-- Current env parsing may need a small future hardening pass so fallback deployment does not require unused Claude configuration.
+- Claude can remain disconnected for fallback-only deployment.
 
 ## Next Step
 

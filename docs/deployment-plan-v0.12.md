@@ -243,7 +243,7 @@ GOOGLE_CLIENT_SECRET=
 GOOGLE_CALLBACK_URL=
 ```
 
-Claude is intentionally not required for this deployment plan. Deployment gap to track: the current API env schema still includes Anthropic configuration even when `AI_PROVIDER=fallback`. The fallback deployment should not require real Claude credentials; relax that schema in a future code branch if the runtime currently forces a value.
+Claude is intentionally not required for this deployment plan. For fallback-only deployment, set `AI_PROVIDER=fallback`; `ANTHROPIC_API_KEY` is not required unless `AI_PROVIDER=claude`. Claude can remain disconnected.
 
 ## Docker Requirements
 
