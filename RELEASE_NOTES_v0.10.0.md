@@ -73,6 +73,10 @@ Publishing destinations are configured inside n8n:
 
 n8n workflows should download or forward the render promptly. Store `outputS3Key` when a durable backend reference is needed.
 
+Delayed workflows should refresh the URL through the backend or download the file before expiry.
+
+Temporary local webhook harness files used during validation are not included in this release.
+
 ## Known Limitations
 
 * Claude remains skipped.
