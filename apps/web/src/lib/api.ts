@@ -123,6 +123,24 @@ export const projects = {
  * The file never streams through our API — only presigned PUTs to S3.
  */
 const PART_SIZE = 8 * 1024 * 1024; // 8 MB parts
+const UPLOAD_PART_ATTEMPTS = 3;
+
+async function putUploadPart(url: string, blob: Blob, partNumber: number) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= UPLOAD_PART_ATTEMPTS; attempt += 1) {
+    try {
+      const put = await fetch(url, { method: 'PUT', body: blob });
+      if (!put.ok) throw new Error(`part ${partNumber} failed: ${put.status}`);
+      const etag = put.headers.get('ETag');
+      if (!etag) throw new Error(`part ${partNumber} missing ETag; check S3 CORS ExposeHeaders`);
+      return etag.replaceAll('"', '');
+    } catch (err) {
+      lastError = err;
+      if (attempt < UPLOAD_PART_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(`part ${partNumber} failed`);
+}
 
 export async function uploadVideo(file: File, onProgress: (pct: number) => void) {
   const start = await api<{ projectId: string; key: string; uploadId: string }>('/api/upload/start', {
@@ -140,9 +158,8 @@ export async function uploadVideo(file: File, onProgress: (pct: number) => void)
       method: 'POST',
       body: JSON.stringify({ key: start.key, uploadId: start.uploadId, partNumber }),
     });
-    const put = await fetch(url, { method: 'PUT', body: blob });
-    if (!put.ok) throw new Error(`part ${partNumber} failed`);
-    parts.push({ ETag: put.headers.get('ETag')!.replaceAll('"', ''), PartNumber: partNumber });
+    const etag = await putUploadPart(url, blob, partNumber);
+    parts.push({ ETag: etag, PartNumber: partNumber });
     onProgress(Math.round((partNumber / partCount) * 100));
   }
 

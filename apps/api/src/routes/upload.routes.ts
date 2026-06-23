@@ -67,13 +67,29 @@ uploadRouter.post(
 
     await completeMultipart(key, uploadId, parts);
 
-    // probe metadata by pulling a small range — here we download to /tmp for accuracy
+    // Metadata probing is useful but must not make a completed S3 upload fail.
     const tmp = path.join(env.RENDER_WORK_DIR, `${projectId}-probe.mp4`);
-    await fs.mkdir(env.RENDER_WORK_DIR, { recursive: true });
-    const dl = await fetch(await presignDownload(key));
-    await fs.writeFile(tmp, Buffer.from(await dl.arrayBuffer()));
-    const meta = await probe(tmp).catch(() => null);
-    await fs.rm(tmp, { force: true });
+    const meta = await (async () => {
+      try {
+        await fs.mkdir(env.RENDER_WORK_DIR, { recursive: true });
+        const dl = await fetch(await presignDownload(key), { signal: AbortSignal.timeout(30_000) });
+        if (!dl.ok) throw new Error(`probe download failed: ${dl.status}`);
+        await fs.writeFile(tmp, Buffer.from(await dl.arrayBuffer()));
+        return await probe(tmp);
+      } catch (err) {
+        console.warn(
+          JSON.stringify({
+            level: 'warn',
+            msg: 'upload.probe_metadata_failed',
+            projectId,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+        return null;
+      } finally {
+        await fs.rm(tmp, { force: true }).catch(() => {});
+      }
+    })();
 
     const asset = await prisma.asset.create({
       data: {

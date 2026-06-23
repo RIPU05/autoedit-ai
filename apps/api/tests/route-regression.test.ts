@@ -168,6 +168,47 @@ describe('project and upload routes', () => {
     expect(queueAdds.analysis).toEqual([{ projectId: start.body.projectId, s3Key: start.body.key, bucket: 'autoedit-test-bucket' }]);
     expect(db.assets[0].s3Key).toBe(start.body.key);
   });
+
+  it('completes upload when best-effort metadata probe download fails', async () => {
+    const { token } = await register();
+    const headers = { Authorization: `Bearer ${token}` };
+
+    const start = await request('/api/upload/start', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ filename: 'probe-timeout.mp4', contentType: 'video/mp4', title: 'Probe Timeout' }),
+    });
+    expect(start.res.status).toBe(200);
+
+    const defaultFetch = vi.mocked(global.fetch).getMockImplementation();
+    vi.mocked(global.fetch).mockImplementation(async (url: string, init?: RequestInit) => {
+      if (baseUrl && String(url).startsWith(baseUrl)) return realFetch(url, init);
+      if (String(url).includes('s3.test/download')) throw new TypeError('fetch failed');
+      if (defaultFetch) return defaultFetch(url, init);
+      throw new TypeError('fetch failed');
+    });
+
+    try {
+      const complete = await request('/api/upload/complete', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          projectId: start.body.projectId,
+          key: start.body.key,
+          uploadId: start.body.uploadId,
+          contentType: 'video/mp4',
+          sizeBytes: 123,
+          parts: [{ ETag: '"etag-1"', PartNumber: 1 }],
+        }),
+      });
+
+      expect(complete.res.status).toBe(200);
+      expect(queueAdds.analysis).toEqual([{ projectId: start.body.projectId, s3Key: start.body.key, bucket: 'autoedit-test-bucket' }]);
+      expect(db.assets[0]).toMatchObject({ s3Key: start.body.key, durationSec: undefined });
+    } finally {
+      if (defaultFetch) vi.mocked(global.fetch).mockImplementation(defaultFetch);
+    }
+  });
 });
 
 describe('integration routes', () => {
