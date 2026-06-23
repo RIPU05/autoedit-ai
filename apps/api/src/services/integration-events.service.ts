@@ -22,8 +22,12 @@ export type N8nEventPayload = {
   assetId?: string;
   renderId?: string;
   renderFormat?: 'short' | 'reel' | 'landscape';
+  outputS3Key?: string;
   renderUrl?: string;
+  renderUrlExpiresAt?: string;
+  expiresInSeconds?: number;
   projectTitle?: string;
+  createdAt?: string;
   timestamp: string;
   metadata: Record<string, unknown>;
 };
@@ -72,8 +76,12 @@ export async function dispatchIntegrationEvent(
     assetId: payload.assetId,
     renderId: payload.renderId,
     renderFormat: payload.renderFormat,
+    outputS3Key: payload.outputS3Key,
     renderUrl: payload.renderUrl,
+    renderUrlExpiresAt: payload.renderUrlExpiresAt,
+    expiresInSeconds: payload.expiresInSeconds,
     projectTitle: payload.projectTitle,
+    createdAt: payload.createdAt,
     timestamp: new Date().toISOString(),
     metadata: payload.metadata ?? {},
   } satisfies N8nEventPayload;

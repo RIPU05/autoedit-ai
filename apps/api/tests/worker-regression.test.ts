@@ -223,7 +223,22 @@ describe('render worker regression', () => {
     expect(result).toMatchObject({ outKey: 'renders/project_1/render_1-short.mp4' });
     expect(db.renders[0]).toMatchObject({ status: 'COMPLETED', progress: 100, outputS3Key: 'renders/project_1/render_1-short.mp4' });
     expect(db.projects[0].status).toBe('RENDERED');
-    expect(dispatchIntegrationEvent).toHaveBeenCalledWith('user_1', 'render.completed', expect.objectContaining({ renderId: 'render_1' }));
+    expect(dispatchIntegrationEvent).toHaveBeenCalledWith(
+      'user_1',
+      'render.completed',
+      expect.objectContaining({
+        projectId: 'project_1',
+        renderId: 'render_1',
+        renderFormat: 'short',
+        outputS3Key: 'renders/project_1/render_1-short.mp4',
+        renderUrl: 'https://s3.test/renders/project_1/render_1-short.mp4',
+        renderUrlExpiresAt: expect.any(String),
+        expiresInSeconds: expect.any(Number),
+        projectTitle: 'Render Project',
+        createdAt: expect.any(String),
+        metadata: expect.objectContaining({ outputS3Key: 'renders/project_1/render_1-short.mp4' }),
+      }),
+    );
   });
 
   it('logs render failure and n8n failure dispatch remains best-effort', async () => {

@@ -113,6 +113,8 @@ export const renderWorker = new Worker<RenderJobData>(
     const outKey = `renders/${projectId}/${renderId}-${format}.mp4`;
     await putObject(outKey, createReadStream(outPath), 'video/mp4');
     const outputUrl = await presignDownload(outKey);
+    const finishedAt = new Date();
+    const renderUrlExpiresAt = new Date(finishedAt.getTime() + env.S3_PRESIGN_TTL * 1000).toISOString();
 
     await prisma.render.update({
       where: { id: renderId },
@@ -121,7 +123,7 @@ export const renderWorker = new Worker<RenderJobData>(
         progress: 100,
         outputS3Key: outKey,
         outputUrl,
-        finishedAt: new Date(),
+        finishedAt,
       },
     });
     await prisma.project.update({ where: { id: projectId }, data: { status: 'RENDERED' } });
@@ -137,8 +139,12 @@ export const renderWorker = new Worker<RenderJobData>(
       projectId,
       renderId,
       renderFormat: format,
+      outputS3Key: outKey,
       renderUrl: outputUrl,
+      renderUrlExpiresAt,
+      expiresInSeconds: env.S3_PRESIGN_TTL,
       projectTitle: project.title,
+      createdAt: finishedAt.toISOString(),
       metadata: { outputS3Key: outKey },
     });
 

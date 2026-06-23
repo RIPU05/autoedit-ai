@@ -50,12 +50,18 @@ AutoEdit sends one consistent JSON object:
   "assetId": "asset-id",
   "renderId": "render-id",
   "renderFormat": "short",
+  "outputS3Key": "renders/project-id/render-id-short.mp4",
   "renderUrl": "https://signed-output-url",
+  "renderUrlExpiresAt": "2026-06-21T13:00:00.000Z",
+  "expiresInSeconds": 3600,
   "projectTitle": "Launch video",
+  "createdAt": "2026-06-21T12:00:00.000Z",
   "timestamp": "2026-06-21T12:00:00.000Z",
   "metadata": {}
 }
 ```
+
+`renderUrl` is a presigned S3 download URL, not a public bucket URL. It expires according to `S3_PRESIGN_TTL`, so workflows should download the file promptly or store the `outputS3Key` for backend follow-up.
 
 Supported events:
 
