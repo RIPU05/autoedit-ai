@@ -32,7 +32,7 @@ NEXT_PUBLIC_API_BASE_URL=https://YOUR_RENDER_API_HOST
 
 The current frontend code reads `NEXT_PUBLIC_API_BASE_URL` in `apps/web/src/lib/api.ts`.
 
-Do not use `NEXT_PUBLIC_API_URL` unless the frontend code is changed later. For v0.13, keep the existing variable name.
+Do not use `NEXT_PUBLIC_API_URL` unless the frontend code is changed later. For v0.13, keep the existing variable name even if a dashboard field says "API URL".
 
 ## Manual Dashboard Step
 

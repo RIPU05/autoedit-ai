@@ -36,7 +36,5 @@ services:
         sync: false
       - key: S3_BUCKET
         sync: false
-      - key: WHISPER_URL
-        sync: false
       - key: RENDER_WORK_DIR
         value: /tmp/autoedit
