@@ -12,6 +12,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "test:n8n-webhook": "tsx src/scripts/test-n8n-webhook.ts",
+    "smoke:hybrid": "tsx scripts/hybrid-smoke-check.ts",
     "test": "vitest run",
     "test:regression": "vitest run",
     "test:watch": "vitest"

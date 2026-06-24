@@ -62,19 +62,15 @@ Local worker:
 ## Test Flow
 
 1. Open Vercel frontend.
-2. Register or log in.
-3. Upload a 10-30 second MP4.
-4. Confirm browser upload to S3 completes.
-5. Confirm cloud API returns an analysis job id.
-6. Watch local worker logs.
-7. Confirm worker receives analysis job.
-8. Confirm worker downloads source media from S3.
-9. Confirm worker calls local Whisper.
-10. Confirm fallback timeline is created.
-11. Confirm render jobs are queued.
-12. Confirm local FFmpeg render completes.
-13. Confirm output uploads to S3.
-14. Confirm frontend/API shows project `RENDERED`.
+2. Register/login.
+3. Upload short video.
+4. API stores upload in S3.
+5. API enqueues job in Upstash Redis.
+6. Local worker receives job.
+7. Worker calls local Whisper.
+8. Worker renders locally.
+9. Worker uploads final outputs to S3.
+10. Frontend/API shows `RENDERED`.
 
 ## Failure Classification
 
