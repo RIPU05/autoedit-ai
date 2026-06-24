@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: autoedit-api
+    runtime: node
+    plan: free
+    rootDir: apps/api
+    buildCommand: npm install && npx prisma generate && npm run build
+    startCommand: npx prisma migrate deploy && npm run start
+    healthCheckPath: /health/db
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: API_PORT
+        value: 4000
+      - key: TRUST_PROXY
+        value: "1"
+      - key: AI_PROVIDER
+        value: fallback
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: INTEGRATION_ENCRYPTION_SECRET
+        sync: false
+      - key: WEB_ORIGIN
+        sync: false
+      - key: API_BASE_URL
+        sync: false
+      - key: AWS_REGION
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: WHISPER_URL
+        sync: false
+      - key: RENDER_WORK_DIR
+        value: /tmp/autoedit
