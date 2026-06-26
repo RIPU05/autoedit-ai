@@ -4,6 +4,53 @@ This smoke test verifies:
 
 Vercel frontend -> cloud API -> S3 upload -> Upstash queue -> local worker -> local Whisper -> local FFmpeg -> S3 output.
 
+## Successful Result
+
+The first hybrid deployment smoke test passed end-to-end.
+
+Current deployed architecture:
+
+- Frontend: Vercel
+- API: Render
+- Database: Neon Postgres
+- Redis: Upstash Redis
+- Storage: AWS S3
+- Worker: local PC
+- Whisper: local Docker sidecar
+- Rendering: local FFmpeg
+- AI: `AI_PROVIDER=fallback`
+
+Verified successful flow:
+
+1. Vercel frontend loaded.
+2. Render API health passed.
+3. CORS passed with Render `WEB_ORIGIN` set to the Vercel URL.
+4. Auth registration passed.
+5. Upload start passed.
+6. Upload part passed and S3 returned an ETag.
+7. Upload complete passed.
+8. Upstash queue received the analysis job.
+9. Local worker consumed the job.
+10. Local Whisper transcribed the source video.
+11. Fallback analysis generated the timeline.
+12. Local FFmpeg rendered all formats.
+13. Final outputs uploaded to S3.
+14. Project reached `RENDERED`.
+
+Completed render formats:
+
+- short
+- reel
+- landscape
+
+Known caveats:
+
+- Local PC must stay on.
+- Worker stops if the PC sleeps, loses internet, or the terminal closes.
+- Render free may sleep after inactivity.
+- Upstash free Redis reported an eviction policy warning: `optimistic-volatile` instead of `noeviction`.
+- Claude remains skipped.
+
 ## Prerequisites
 
 Cloud:

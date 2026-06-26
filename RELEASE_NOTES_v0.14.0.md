@@ -1,8 +1,8 @@
-# AutoEdit AI v0.14.0 - Hybrid Deploy Execution Prep
+# AutoEdit AI v0.14.0 - Hybrid Deployment Success
 
 ## Summary
 
-This release prepares the actual manual execution path for the hybrid free deployment.
+This release prepares and validates the first successful hybrid free deployment smoke test for AutoEdit AI.
 
 Claude remains skipped:
 
@@ -10,7 +10,7 @@ Claude remains skipped:
 AI_PROVIDER=fallback
 ```
 
-No deployment is performed automatically.
+The deployment uses Vercel for the frontend, Render for the API, Neon for Postgres, Upstash for Redis, AWS S3 for storage, and the local PC for the worker, Whisper, and FFmpeg rendering.
 
 ## What's New
 
@@ -23,6 +23,47 @@ No deployment is performed automatically.
 - Vercel frontend deployment runbook
 - Render API integration guidance for `NEXT_PUBLIC_API_BASE_URL`
 - Render `WEB_ORIGIN` CORS update step after Vercel URL is assigned
+
+## Successful Hybrid Smoke Test
+
+The first hybrid deployment smoke test passed end-to-end.
+
+Verified:
+
+- Vercel frontend loaded successfully
+- Render API health passed
+- Neon database connected
+- Upstash Redis connected
+- AWS S3 connected
+- Local Whisper running
+- Local worker running
+- Auth registration passed
+- Upload start passed
+- Upload part passed
+- Upload complete passed
+- Upstash queue received the job
+- Local worker consumed the job
+- Whisper transcription ran
+- Fallback analysis ran
+- FFmpeg render completed
+- All render formats completed:
+  - short
+  - reel
+  - landscape
+- All final outputs uploaded to S3
+- Project reached `RENDERED`
+
+## Current Architecture
+
+- Frontend: Vercel
+- API: Render
+- Database: Neon Postgres
+- Redis: Upstash Redis
+- Storage: AWS S3
+- Worker: local PC
+- Whisper: local Docker sidecar
+- Rendering: local FFmpeg
+- AI: fallback provider
 
 ## Smoke Check Coverage
 
@@ -44,20 +85,13 @@ The script does not upload files, create database records, enqueue jobs, or muta
 - Render API must update `WEB_ORIGIN` to the final Vercel URL after deployment.
 - Railway free/trial availability depends on account status.
 - Upstash free limits may affect BullMQ reliability.
+- Upstash free Redis reported an eviction policy warning: `optimistic-volatile` instead of `noeviction`.
 - Local PC must stay on.
 - Worker stops if the PC sleeps or loses internet.
 - Local Whisper and FFmpeg are not production-grade infrastructure.
+- Claude remains skipped.
 - This setup is for staging, demos, and cost-free validation, not production.
 
 ## Next Step
 
-Manual deployment:
-
-1. Create Neon database.
-2. Create Upstash Redis.
-3. Deploy Render/Railway API.
-4. Deploy Vercel web.
-5. Fill local `apps/api/.env` from `apps/api/.env.hybrid.example`.
-6. Run `npm run smoke:hybrid`.
-7. Start local worker.
-8. Run one full upload/fallback/render/S3 smoke test.
+Use the hybrid deployment for continued staging validation, then decide whether to harden toward production hosting or keep the local-worker architecture for demos.
