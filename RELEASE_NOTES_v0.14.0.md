@@ -20,6 +20,9 @@ No deployment is performed automatically.
 - Non-destructive hybrid smoke check script
 - `npm run smoke:hybrid`
 - Updated hybrid smoke test flow
+- Vercel frontend deployment runbook
+- Render API integration guidance for `NEXT_PUBLIC_API_BASE_URL`
+- Render `WEB_ORIGIN` CORS update step after Vercel URL is assigned
 
 ## Smoke Check Coverage
 
@@ -37,6 +40,8 @@ The script does not upload files, create database records, enqueue jobs, or muta
 ## Caveats
 
 - Render free may sleep.
+- Vercel frontend must set `NEXT_PUBLIC_API_BASE_URL=https://autoedit-ai.onrender.com`.
+- Render API must update `WEB_ORIGIN` to the final Vercel URL after deployment.
 - Railway free/trial availability depends on account status.
 - Upstash free limits may affect BullMQ reliability.
 - Local PC must stay on.
