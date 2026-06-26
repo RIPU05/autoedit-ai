@@ -1,6 +1,10 @@
 import type { EditChange, Version, VersionDiff } from './types';
 
-const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:4000';
+const BASE = process.env.NEXT_PUBLIC_API_BASE_URL;
+
+if (!BASE) {
+  throw new Error('NEXT_PUBLIC_API_BASE_URL is required');
+}
 
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
