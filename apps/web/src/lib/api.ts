@@ -1,13 +1,17 @@
 import type { EditChange, Version, VersionDiff } from './types';
 
-const BASE = process.env.NEXT_PUBLIC_API_BASE_URL;
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL ??
+  (process.env.NODE_ENV === 'production' ? undefined : 'http://localhost:4000');
 
-if (!BASE) {
-  throw new Error('NEXT_PUBLIC_API_BASE_URL is required');
+if (process.env.NODE_ENV === 'production' && !process.env.NEXT_PUBLIC_API_BASE_URL) {
+  throw new Error('NEXT_PUBLIC_API_BASE_URL is missing');
 }
 
+console.log('API BASE =', API_BASE_URL);
+
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...(init.headers ?? {}) },
@@ -26,7 +30,7 @@ export const auth = {
     api<{ user: any }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
   logout: () => api('/api/auth/logout', { method: 'POST' }),
   me: () => api<{ user: any }>('/api/auth/me'),
-  googleUrl: () => `${BASE}/api/auth/google`,
+  googleUrl: () => `${API_BASE_URL}/api/auth/google`,
 };
 
 export const dashboard = {
