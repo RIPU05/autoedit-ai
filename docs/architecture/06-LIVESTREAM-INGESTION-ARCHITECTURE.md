@@ -62,9 +62,11 @@ A common misconception in video SaaS development is assuming that authenticating
 | **YouTube** | **Fully Supported** (Google OAuth2 `youtube.readonly`, `youtube.force-ssl`) | **Supported** via YouTube Data API v3 (`liveBroadcasts.list`) | **Supported** via `liveChatMessages.list` (Subject to strict 10,000 unit/day quota) | **Supported** via `videos.list` | **RESTRICTED.** YouTube does not provide raw MP4 video streams via API. Media must be ingested directly from OBS or uploaded by the creator. |
 | **Kick** | **Partially Documented** (Public developer portal in beta) | **Supported** via public channel polling | **Supported** via Pusher WebSocket listener (`chatrooms.{id}.v2`) | **Supported** via public channel recordings API | **UNOFFICIAL / FRAGILE.** Direct HLS stream extraction exists on Kick CDNs, but has no guaranteed long-term API contract. |
 
-### Architectural Directive for Path A:
-1. **Chat & Telemetry First:** Path A is primarily leveraged to ingest **metadata, stream status, and real-time chat excitement events**.
-2. **Media Pairing:** For video footage, creators on Twitch/YouTube/Kick either:
+### Architectural Directive for Ingestion Pathways:
+1. **Both Pathways are First-MVP Requirements:** Creators require both direct live broadcasting and platform integrations. To deliver maximum reliability, the implementation is phased:
+   - **Phase 1 Priority:** Path B (Direct OBS Ingest via MediaMTX) is implemented first to establish end-to-end streaming control, zero-latency chunking, and deterministic timestamp alignment.
+   - **Phase 2 Follow-up:** Path A (Twitch/YouTube/Kick Platform Connectors) connects to ingest live chat velocity, stream status, and metadata, pairing with OBS video.
+2. **Chat & Telemetry Pairing:** For video footage, creators on Twitch/YouTube/Kick either:
    - Stream simultaneously to AutoAI Edit via OBS multi-streaming (Path B).
    - Or upload the completed stream recording directly to AutoAI Edit once the broadcast concludes.
 
@@ -93,11 +95,11 @@ Direct live ingestion gives AutoAI Edit 100% control over video quality, timesta
   ```
 - Each chunk is written to a local SSD tmpfs cache and asynchronously streamed to AWS S3 / Cloudflare R2 with standard S3 lifecycle metadata.
 
-### 3. Segment Pinning & Rolling Retention
-To avoid storing hundreds of gigabytes of unedited dead air from a 6-hour stream:
-1. **Rolling Buffer Window:** Unpinned segments older than **90 minutes** are purged by an automated cleanup cron (`INFRA-007`).
-2. **Segment Pinning (`LIVE-010`):** When a highlight candidate is flagged (e.g. at timestamp 45:10), the system flags chunks 450 through 465 as `isPinned: true`. Pinned chunks are permanently retained and exempt from deletion.
-3. **Session Sealing (`LIVE-013`):** When the broadcast concludes, pinned chunks are linked to an active `Project` record for immediate clipping and rendering in the Studio.
+### 3. Segment Pinning & 30-Minute Rolling Retention
+To avoid storing hundreds of gigabytes of unedited dead air from a multi-hour stream:
+1. **Configurable Rolling Buffer Window (30-Minute Pilot):** Unpinned segments older than **30 minutes** are purged by an automated cleanup cron (`INFRA-007`). This pilot window minimizes ephemeral storage overhead while providing ample runway for live highlight identification. Retention duration is configurable per user tier.
+2. **Segment Pinning (`LIVE-010`):** When a highlight candidate is flagged (e.g. at timestamp 45:10) or bookmarked by the creator, the system flags chunks 450 through 465 as `isPinned: true`. Pinned chunks are permanently retained and exempt from deletion.
+3. **Session Sealing (`LIVE-013`):** When the broadcast concludes, pinned chunks are linked to an active `Project` record for immediate clipping, previewing, and rendering in the Unified Studio.
 
 ---
 
@@ -123,13 +125,15 @@ Streaming creators frequently encounter brief Wi-Fi hiccups or OBS crashes. Auto
 
 ---
 
-## 5. Storage Economics & Ingestion Cost Model
+## 5. Storage Economics & Ingestion Cost Projections
 
-| Stream Duration | Raw Bitrate (1080p60) | Total Ingest Volume | Unpinned Buffer (90m Window) | Pinned Highlights (~10 clips) | Est. S3 Ephemeral Cost |
+*(Note: Storage figures are heuristic engineering projections based on 6.0 Mbps 1080p60 H.264 streams; empirical bandwidth and storage will be calibrated during Milestone 3 beta testing).*
+
+| Stream Duration | Raw Bitrate (1080p60) | Total Ingest Volume | Unpinned Buffer (30m Window) | Pinned Highlights (~10 clips) | Est. S3 Ephemeral Cost |
 |---|---|---|---|---|---|
-| **1 Hour** | 6.0 Mbps | 2.70 GB | 2.70 GB | ~250 MB | $0.06 |
-| **3 Hours** | 6.0 Mbps | 8.10 GB | 4.05 GB (Purged) | ~450 MB | $0.18 |
-| **6 Hours** | 6.0 Mbps | 16.20 GB | 4.05 GB (Purged) | ~700 MB | $0.37 |
+| **1 Hour** | 6.0 Mbps | 2.70 GB | 1.35 GB (Purged) | ~250 MB | $0.03 |
+| **3 Hours** | 6.0 Mbps | 8.10 GB | 1.35 GB (Purged) | ~450 MB | $0.08 |
+| **6 Hours** | 6.0 Mbps | 16.20 GB | 1.35 GB (Purged) | ~700 MB | $0.15 |
 
 > [!TIP]
-> By combining rolling buffer segment purging with Cloudflare R2 (which features $0.00 egress fees), AutoAI Edit slashes live stream storage overhead by over 75% compared to storing raw monolithic VODs.
+> By combining a 30-minute rolling buffer segment purge with Cloudflare R2 (which features $0.00 egress fees), AutoAI Edit slashes live stream storage overhead by over 88% compared to storing raw monolithic VODs.

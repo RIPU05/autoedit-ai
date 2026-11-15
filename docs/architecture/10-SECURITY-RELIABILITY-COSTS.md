@@ -93,12 +93,15 @@ if (!workDir.startsWith(baseDir)) {
 
 ---
 
-## 5. Comprehensive Unit Economics & Cost Attribution
+## 5. Engineering Cost Projections & Unit Economics
 
-AutoAI Edit's unit economics demonstrate strong commercial margins across all content formats:
+> [!NOTE]
+> **Pricing & Tier Packaging Disclaimer:** The unit costs below represent **theoretical engineering cost projections** based on current cloud provider pricing (Modal GPU, Render CPU, Anthropic tokens, AWS S3 storage). **Retail subscription pricing, free-tier limits, and packaging remain undecided** and will be finalized only after empirical cost tracking, fraud prevention testing, and user feedback during the Milestone 4/5 beta.
+
+AutoAI Edit's projected unit economics demonstrate strong commercial margins across all content formats:
 
 ```
-Cost Composition for a 1-Hour Video (5 Clips Produced):
+Engineering Cost Model for a 1-Hour Video (5 Clips Produced):
 ┌────────────────────────────────────────────────────────┐
 │ Anthropic Claude 3.5 Sonnet:          $0.0900 (65.7%)  │
 │ AWS S3 Storage & Data Transfer:       $0.0320 (23.4%)  │
@@ -109,11 +112,11 @@ Cost Composition for a 1-Hour Video (5 Clips Produced):
 └────────────────────────────────────────────────────────┘
 ```
 
-### Monthly Cost Models at Varying Usage Scales:
+### Projected Monthly Cost Models at Varying Usage Scales (Illustrative):
 
-| Creator Usage Tier | Monthly Videos Processed | Compute & AI Cost | Fixed Infra (Render/DB) | Total Cost / Month | Target SaaS Price | Gross Margin |
+| Creator Usage Model | Monthly Videos Processed | Compute & AI Cost | Fixed Infra (Render/DB) | Total Cost / Month | Illustrative Target Price | Projected Gross Margin |
 |---|---|---|---|---|---|---|
-| **Free Tier** | 2 videos (15m each) | $0.10 | $0.00 (Free tiers) | **$0.10** | $0.00 | N/A (Acquisition) |
-| **Creator Plan** | 15 videos (30m each) | $1.25 | $50.00 | **$51.25** | $29.00 / user (x5) | **64.7%** |
-| **Pro Streamer** | 40 streams (2h each) | $8.20 | $50.00 | **$58.20** | $79.00 / user (x5) | **85.3%** |
-| **Agency / Studio** | 200 videos (multi-creator)| $32.50 | $75.00 | **$107.50** | $299.00 / mo | **64.0%** |
+| **Free / Trial** | 2 videos (15m each) | $0.10 | $0.00 (Free tiers) | **$0.10** | $0.00 (Undecided) | N/A (Acquisition) |
+| **Creator Model** | 15 videos (30m each) | $1.25 | $50.00 | **$51.25** | $29.00 / user (x5) (Undecided) | **64.7%** |
+| **Streamer Model** | 40 streams (2h each) | $8.20 | $50.00 | **$58.20** | $79.00 / user (x5) (Undecided) | **85.3%** |
+| **Studio Model** | 200 videos (multi-creator)| $32.50 | $75.00 | **$107.50** | $299.00 / mo (Undecided) | **64.0%** |

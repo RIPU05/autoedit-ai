@@ -9,7 +9,10 @@
 
 ## 1. Hybrid Multi-Cloud Architecture Overview
 
-AutoAI Edit rejects both monolithic cloud lock-in and premature microservice fragmentation. It implements a **Workload-Matched Hybrid Architecture**: CPU-bound transcoding, serverless GPU inference, managed transactional storage, and low-latency edge ingestion run on the exact cloud providers best suited for each workload:
+AutoAI Edit rejects both monolithic cloud lock-in and premature microservice fragmentation. It implements a **Workload-Matched Hybrid Architecture**: CPU-bound transcoding, serverless GPU inference, managed transactional storage, and low-latency edge ingestion run on the exact cloud providers best suited for each workload.
+
+> [!NOTE]
+> **Cloud Provider Portability & Flexibility:** While Render (API + Docker Worker), Modal Labs (Serverless GPU), and Upstash (Redis) represent the primary validated staging topology, the application interfaces are strictly decoupled via standard Docker containers, standard Redis protocols, and S3-compatible APIs. Compute workloads can seamlessly migrate to alternative cloud providers—such as **Oracle Cloud Infrastructure (OCI)** ARM Ampere instances for high CPU/RAM per dollar, **Hetzner Cloud** for ultra-cost-effective bare metal/VPS, **AWS ECS/Fargate**, or **RunPod** serverless GPU—without modifying core business logic.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐

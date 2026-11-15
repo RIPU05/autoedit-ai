@@ -48,7 +48,7 @@ export interface EditTimelinePlan {
   effects: {
     subtitles?: {
       enabled: boolean;
-      style: 'modern_yellow' | 'classic_white' | 'bold_stroke';
+      style: 'karaoke_bounce' | 'minimalist_clean' | 'modern_yellow' | 'classic_white' | 'bold_stroke';
       fontSize: number;
       uppercase: boolean;
     };
@@ -90,7 +90,17 @@ export type EditOperation =
 
 ---
 
-## 4. Subtitle Synchronization & Animated Styling
+## 4. Subtitle Synchronization & Caption Styling (MVP Core Styles)
+
+AutoAI Edit supports multiple caption styles in its MVP render configuration to satisfy diverse creator genres:
+
+### 1. Karaoke Animated Subtitles (`karaoke_bounce`) — Default
+- **Visuals:** Montserrat ExtraBold, high-contrast yellow/white fill with a 3.5px black outline and dynamic active-word scaling/color fill tracking Faster-Whisper word timestamps.
+- **Audience:** High-energy TikTok, YouTube Shorts, and Instagram Reels (gaming, comedy, creator vlogs).
+
+### 2. Clean Minimalist Subtitles (`minimalist_clean`)
+- **Visuals:** Inter SemiBold or Helvetica, clean crisp white text with a subtle translucent dark background box, static per sentence or line without bouncing animations.
+- **Audience:** Corporate interviews, educational tutorials, podcasts, and LinkedIn thought-leadership videos.
 
 ### Faster-Whisper to ASS Subtitle Pipeline:
 1. **Timestamp Extraction:** Faster-Whisper yields word-level timestamps (`start`, `end`, `word`).

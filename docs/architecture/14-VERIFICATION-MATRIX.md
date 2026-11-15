@@ -35,7 +35,18 @@ The Verification Matrix establishes bidirectional traceability between high-leve
 
 ---
 
-## 2. Master Verification & Traceability Matrix
+## 2. Master Verification & Traceability Summary
+
+The 94 product features cataloged in `02-COMPLETE-FEATURE-INVENTORY.md` map to the following verification levels across branches:
+
+- **Verified in Production (`master` @ `799dca2`):** 40 features (42.6%) — Active in live web application with 43 passing tests.
+- **Verified in Staging (`feature/phase2-staging-deployment` & blueprint branch):** 11 features (11.7%) — Validated via containerized worker & Modal GPU test harness with 51 passing tests.
+- **Partially Implemented:** 7 features (7.4%) — Backend services or client UI present with partial test or mock coverage.
+- **Missing Foundations:** 1 feature (1.1%) — `AUTH-005` (Tier-based project and duration quotas).
+- **Planned Only:** 35 features (37.2%) — Architecture specified; scheduled for Stage 2 Milestones 0 through 6.
+- **Total Unique Cataloged Features:** **94 features (100.0%)**.
+
+### Detailed Traceability Matrix Sample:
 
 | Feature ID | Feature Name | Data Entity | API Endpoint / Channel | UI Screen / Component | Automated Test Suite | Operational Verification Status |
 |---|---|---|---|---|---|---|
@@ -100,7 +111,17 @@ Before any milestone is merged into `master` or deployed to production, it must 
    - `apps/api`: `tsc -p tsconfig.json` compiles with 0 errors.
    - `apps/web`: `next build` compiles all routes with 0 errors.
 2. **Gate 2 (Test Harness):**
-   - 100% of runnable automated unit, regression, and reliability tests pass (51/51 baseline).
+   - 100% of runnable automated unit, regression, and reliability tests pass:
+     - On `master` baseline (`799dca2`): 43 passing tests across 8 test suites (4 explicitly skipped).
+     - On Staging / Blueprint feature branches: 51 passing tests across 10 test suites (4 explicitly skipped).
+3. **Gate 3 (Security & Invariant Audit):**
+   - Zero hardcoded secrets, tokens, or credentials in Git diff.
+   - Strict BOLA session verification enforced on all asset access.
+   - Core invariants (Preview Edit, Explainable AI, Version History) intact without breaking changes.
+4. **Gate 4 (Queue Isolation):**
+   - Staging workloads use `BULL_PREFIX=staging` and cannot consume production customer jobs.
+5. **Gate 5 (Explicit User Approval):**
+   - Written user authorization received prior to provisioning billable cloud resources or merging into `master`.
 3. **Gate 3 (Security & Invariant Audit):**
    - Zero hardcoded secrets, tokens, or credentials in Git diff.
    - Strict BOLA session verification enforced on all asset access.

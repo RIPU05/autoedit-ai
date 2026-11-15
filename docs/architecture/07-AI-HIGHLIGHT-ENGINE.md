@@ -44,32 +44,35 @@ Final Curated Highlights (1% of duration: 5–10 viral short-form clips)
 
 ## 2. Signal Definitions & Mathematical Contracts
 
+> [!NOTE]
+> **Heuristic Baseline Calibration Notice:** All numerical thresholds, window sizes (15s sliding, 300s EWMA), LUFS bounds (-24 to -6 LUFS), WPM rates (120 to 220), and weight vectors below represent **initial engineering heuristic models**. In Milestone 4, these parameters will be empirically calibrated against ground-truth creator edit datasets across gaming, podcast, and tutorial genres.
+
 Every moment in a video or broadcast is evaluated across 6 time-series signal dimensions normalized on a scale of $0.0 \le S_i(t) \le 1.0$:
 
-### 1. Chat Velocity & Surge ($S_{\text{chat}}$)
+### 1. Chat Velocity & Surge ($S_{\text{chat}}$) [Heuristic Estimate]
 - **Calculation:** Evaluated over a 15-second sliding window against a 5-minute exponentially weighted moving average (EWMA):
   $$\text{VelocityRatio}(t) = \frac{\text{Count}_{15s}(t)}{\text{EWMA}_{300s}(t) + \epsilon}$$
 - **Emote Weighting:** Messages containing recognized excitement emotes (`KEKW`, `OMEGALUL`, `POG`, `W`, `LUL`, `???`) receive a $1.5\times$ multiplier.
 - **Normalized Score:**
   $$S_{\text{chat}}(t) = \min\left(1.0, \frac{\text{VelocityRatio}(t)}{4.0}\right)$$
 
-### 2. Audio Loudness & Energy Peak ($S_{\text{audio}}$)
+### 2. Audio Loudness & Energy Peak ($S_{\text{audio}}$) [Deterministic Signal]
 - **Calculation:** Evaluated via FFmpeg `ebur128` momentary loudness $M(t)$ and root-mean-square energy:
   $$S_{\text{audio}}(t) = \begin{cases} 0.0 & \text{if } M(t) < -24 \text{ LUFS} \\ \frac{M(t) - (-24)}{-6 - (-24)} & \text{if } -24 \le M(t) \le -6 \text{ LUFS} \\ 1.0 & \text{if } M(t) > -6 \text{ LUFS} \end{cases}$$
 
-### 3. Speech Excitement & Pacing ($S_{\text{speech}}$)
+### 3. Speech Excitement & Pacing ($S_{\text{speech}}$) [Acoustic Transcript Signal]
 - **Calculation:** Words per minute (WPM) computed from Faster-Whisper word timestamps over a 10-second interval:
   $$S_{\text{speech}}(t) = \min\left(1.0, \max\left(0.0, \frac{\text{WPM}(t) - 120}{220 - 120}\right)\right)$$
 
-### 4. Semantic Significance & Hook Quality ($S_{\text{semantic}}$)
+### 4. Semantic Significance & Hook Quality ($S_{\text{semantic}}$) [LLM Model Signal]
 - **Calculation:** Extracted by LLM evaluating transcript context against viral hook archetypes (controversy, revelation, conflict, high-stakes question).
 - **Normalized Score:** Evaluated directly as a $0.0 \text{ to } 1.0$ confidence rating.
 
-### 5. Silence & Dead Air Penalty ($P_{\text{silence}}$)
+### 5. Silence & Dead Air Penalty ($P_{\text{silence}}$) [Deterministic Signal]
 - **Calculation:** If a silence gap exceeding 1.2 seconds is detected, a heavy negative penalty is applied to prevent cutting during awkward pauses:
   $$P_{\text{silence}}(t) = 0.5 \text{ (if in detected silence interval)}$$
 
-### 6. Manual Creator Bookmark ($S_{\text{bookmark}}$)
+### 6. Manual Creator Bookmark ($S_{\text{bookmark}}$) [User Signal]
 - **Calculation:** If the creator or moderator pressed a stream deck hotkey or dashboard bookmark button within $\pm 30\text{s}$, $S_{\text{bookmark}} = 1.0$.
 
 ---
@@ -79,11 +82,11 @@ Every moment in a video or broadcast is evaluated across 6 time-series signal di
 ### Composite Scoring Equation:
 $$\text{Score}(t) = w_{\text{chat}} S_{\text{chat}}(t) + w_{\text{audio}} S_{\text{audio}}(t) + w_{\text{speech}} S_{\text{speech}}(t) + w_{\text{semantic}} S_{\text{semantic}}(t) + w_{\text{bm}} S_{\text{bookmark}}(t) - P_{\text{silence}}(t)$$
 
-*Default Weight Vectors:*
+*Default Heuristic Weight Vectors (Calibrated in Milestone 4):*
 - **Live Streams with Chat:** $w_{\text{chat}} = 0.35, w_{\text{audio}} = 0.20, w_{\text{speech}} = 0.15, w_{\text{semantic}} = 0.20, w_{\text{bm}} = 0.30$
 - **Pre-Recorded Uploads (No Chat):** $w_{\text{chat}} = 0.00, w_{\text{audio}} = 0.25, w_{\text{speech}} = 0.30, w_{\text{semantic}} = 0.45, w_{\text{bm}} = 0.00$
 
-### Context Expansion & Dynamic Boundaries:
+### Context Expansion & Dynamic Boundaries [Heuristic Guardrails]:
 A raw signal peak (e.g. an in-game headshot at $t=142\text{s}$) is not a standalone clip. High engagement short-form videos require **narrative arc context**:
 1. **Pre-Roll (The Setup):** Expand backwards by $8 \text{ to } 15\text{ seconds}$ to capture the context or question that led to the moment. Snap backwards to the nearest completed sentence boundary or silence cut.
 2. **Post-Roll (The Climax & Resolution):** Expand forward by $10 \text{ to } 20\text{ seconds}$ to capture the reaction, laughter, or conclusion. Snap forward to the nearest natural sentence conclusion.
@@ -96,7 +99,15 @@ A raw signal peak (e.g. an in-game headshot at $t=142\text{s}$) is not a standal
 
 ---
 
-## 4. Multi-Agent LLM Synthesis & Explainability
+## 4. Multi-Agent LLM Synthesis, Model Independence & Replayable Evidence Timeline
+
+### Model-Independent AI Gateway:
+The highlight synthesis engine interfaces with an abstract `AiGateway` provider interface (`AI-001`). While Anthropic Claude 3.5 Sonnet serves as the primary reference implementation, the engine supports pluggable adapters for:
+1. **Anthropic Claude 3.5 Sonnet** (Primary cloud reasoning).
+2. **Google Gemini 1.5 Pro / Flash** (High-speed multimodal reasoning).
+3. **OpenAI GPT-4o** (Alternative high-capacity reasoning).
+4. **Self-Hosted Open-Weight LLMs** (Ollama / vLLM running Qwen 2.5 14B or Llama 3.1 8B on local or cloud GPUs).
+5. **Deterministic Rule Engine** (Zero-cost fallback when API quotas or offline mode apply).
 
 When top candidate clusters are selected, they are passed to the multi-agent AI pipeline (`apps/api/src/services/claude.service.ts`):
 

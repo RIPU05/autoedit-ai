@@ -73,26 +73,59 @@
 
 ---
 
-## 2. Key Product & Architectural Decisions Requiring User Choice
+## 2. Resolved Product & Architecture Decisions (Decisions A through L)
 
-The following 5 strategic decisions are presented for creator and executive alignment before proceeding to code implementation:
+The core architectural direction for AutoAI Edit has been formally established and locked:
 
-### Question 1: Ingestion Priority for Initial Beta (OBS vs. Twitch VOD Import)
-- **Option A (Recommended):** Prioritize **Path B (Direct OBS Ingest via MediaMTX)**. This provides 100% control over raw 1080p60 video quality, real-time chunking, and zero platform API limitations.
-- **Option B:** Prioritize **Path A (Completed Twitch/YouTube VOD URL import)**. This is simpler for creators who already stream, but is constrained by platform API restrictions on direct video downloads.
+### Decision A: Studio Unification
+- **Resolution:** **One Unified Studio**. Creators do not use disjoint tools for live streams vs. pre-recorded videos. Both live broadcasts and VOD uploads share the identical timeline engine, non-destructive editing primitives, and explainable AI narrative drawer.
 
-### Question 2: Subtitle Aesthetic & Typography Standards
-- **Option A (Recommended):** High-contrast modern **Karaoke Animated Subtitles** (Montserrat ExtraBold, high-contrast yellow/white fill with black stroke, active word highlight animation matching speech cadence).
-- **Option B:** Clean Minimalist Static Subtitles (Subtle bottom captions without animation, preferred for corporate or educational podcasts).
+### Decision B: Ingestion Topology (Both are First-MVP Requirements)
+- **Resolution:** Both **Direct OBS Ingest (Path B)** and **Connected Platforms (Path A)** are core MVP requirements.
+- **Phasing:** Path B (OBS via MediaMTX) is implemented first to establish deterministic low-latency chunking and timestamp synchronization. Path A (Twitch/YouTube/Kick chat and stream status) follows immediately to pair chat excitement with the broadcast video.
 
-### Question 3: Live Buffer Retention Window
-- **Option A (Recommended):** **90-minute rolling buffer** for live broadcasts. Unpinned chunks older than 90m are purged to minimize S3 storage costs.
-- **Option B:** Full stream retention (Keep all 6 hours of raw chunks). Increases storage costs by ~$0.30 per stream.
+### Decision C: Caption & Subtitle Aesthetic
+- **Resolution:** **Multiple Caption Styles Supported in MVP**. Both high-contrast animated **Karaoke Subtitles** (active word highlight tracking speech cadence for TikTok/Reels) and **Clean Minimalist Subtitles** (static crisp typography with subtle translucent backing for educational/podcasts) are supported as first-class presets.
 
-### Question 4: Primary AI Model Tiering
-- **Option A (Recommended):** **Anthropic Claude 3.5 Sonnet** as primary reasoning engine with deterministic rule-based fallback. Delivers the highest editorial humor, narrative coherence, and hook quality.
-- **Option B:** Self-hosted open-weight LLM (e.g. Qwen 3:8B or Llama 3 on Modal GPU). Eliminates Anthropic API dependencies, but requires managing GPU inference cold starts and delivers slightly lower editorial reasoning quality.
+### Decision D: Live Rolling Buffer Retention
+- **Resolution:** **30-Minute Rolling Buffer Pilot** (updated from 90m). Unpinned chunks older than 30 minutes are automatically purged during live broadcasts to eliminate unnecessary cloud storage fees during beta testing. Retention is configurable per user tier.
 
-### Question 5: SaaS Packaging & Free Tier Strategy
-- **Option A (Recommended):** **Freemium with Watermark & Resolution Cap** (Free tier allows 2 exports/month with subtle "AutoAI Edit" corner watermark; $29/mo Creator tier unlocks watermark-free 1080p exports and live OBS ingest).
-- **Option B:** 7-Day Free Trial (Full access for 7 days, then credit card required).
+### Decision E: Segment Pinning
+- **Resolution:** **Supported (`LIVE-010`)**. Chunks associated with flagged highlight candidates or creator bookmarks are pinned (`isPinned: true`) and permanently retained, completely exempt from rolling buffer purging.
+
+### Decision F: Replayable Evidence Timeline
+- **Resolution:** **Mandatory Core Requirement**. Every AI highlight references exact audio/visual/chat evidence with millisecond timestamps, chat surge percentages, and acoustic metrics, allowing creators to inspect why each clip was chosen.
+
+### Decision G: Model-Independent AI Gateway
+- **Resolution:** **Vendor-Agnostic Adapter Pattern**. The system interfaces with an abstract `AiGateway` provider. While Claude 3.5 Sonnet serves as the primary reasoning engine, pluggable adapters support Google Gemini, OpenAI GPT-4o, and self-hosted open-weight LLMs (Ollama/vLLM), with deterministic fallback.
+
+### Decision H: Cloud Provider Flexibility
+- **Resolution:** **Strict Protocol Decoupling**. Core services communicate via standard Docker containers, standard Redis protocols, and S3-compatible APIs. Compute workloads can migrate seamlessly between Render, Oracle Cloud ARM instances, Hetzner, AWS, or RunPod without vendor lock-in.
+
+### Decision I: Undecided Subscription Pricing & Packaging
+- **Resolution:** **Undecided Pending Empirical Calibration**. Unit economics are modeled as engineering projections. Retail SaaS pricing, free-tier quotas, and packaging remain undecided until empirical costs and abuse controls are measured during the beta.
+
+### Decision J: Non-Negotiable Core Invariants
+- **Resolution:** **Strictly Preserved**. Instant Preview Edit (`EDIT-001`), Explainable AI (`EDIT-002`), and Non-Destructive Version History (`EDIT-003`) must never be degraded or broken.
+
+### Decision K: Queue Isolation & Multi-Tenancy
+- **Resolution:** **Dynamic Namespacing (`BULL_PREFIX`)**. Enforces 100% queue isolation between staging and production environments on shared Redis clusters.
+
+### Decision L: Security & BOLA Protection
+- **Resolution:** **Zero Secret Git Policy & BOLA Session Verification**. All third-party tokens encrypted with AES-256-GCM; all upload sessions and media access guarded by database ownership checks.
+
+---
+
+## 3. Genuine Remaining Open Decisions (Deferred to Empirical Beta)
+
+The following operational questions will be evaluated using real creator telemetry during Milestone 4 and Milestone 5:
+
+1. **Open Decision 1: Retail SaaS Tier Pricing & Free-Tier Abuse Limits**
+   - *Status:* Deferred to Milestone 5.
+   - *Plan:* Collect real compute cost data per user during the closed creator pilot before publishing commercial plan rates.
+2. **Open Decision 2: Edge Transcoder Hardware Acceleration (NVENC vs CPU)**
+   - *Status:* Deferred to Milestone 3/4.
+   - *Plan:* Monitor CPU utilization on MediaMTX edge instances. If concurrent live broadcasts exceed 50 streams, evaluate provisioning GPU-accelerated NVENC transcode nodes.
+3. **Open Decision 3: Default Ingestion Protocol for Creators (SRT vs RTMPS)**
+   - *Status:* Deferred to Milestone 3 beta onboarding.
+   - *Plan:* Both protocols are implemented in MediaMTX; creator feedback during beta onboarding will determine which protocol is highlighted as the primary recommended default in the UI.

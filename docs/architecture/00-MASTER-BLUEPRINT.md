@@ -74,13 +74,15 @@ The entire system architecture is anchored around three non-negotiable user expe
 
 ## 3. High-Level Architectural Principles
 
-1. **Monolithic Core with Serverless GPU Acceleration:**
+1. **Monolithic Core with Serverless GPU Acceleration & Cloud Flexibility:**
    - Business logic, REST endpoints, project management, and queue orchestration reside in a unified Node.js / Express backend (`apps/api`) and a Next.js 14 frontend (`apps/web`).
    - High-throughput video transcoding and silence detection run in isolated containerized background workers (`apps/api/Dockerfile.worker`).
    - Heavy machine learning inference (Faster-Whisper transcription) is delegated to serverless GPU containers on Modal Labs (`services/whisper/modal_app.py`), running NVIDIA T4 GPUs that scale to zero when idle ($0.00 idle cost).
+   - While Render, Modal, and Upstash form the primary reference implementation due to validated staging proofs, compute contracts remain vendor-agnostic (supporting Oracle Cloud ARM, Hetzner, AWS, or RunPod).
 
-2. **Unified Data Abstraction:**
+2. **Unified Data Abstraction & Single Studio Experience:**
    - Both uploaded MP4 files and live RTMP streams decompose into discrete, addressable `MediaSegment` records tied to an immutable `MediaSource`.
+   - Creators work within **One Unified Studio**: live streams and pre-recorded VODs share the exact same visual editor, non-destructive timeline, and explainable AI narrative drawer.
    - Time is indexed via epoch-normalized millisecond offsets, guaranteeing that stream interruptions, network jitter, and late chat messages synchronize precisely with video frames.
 
 3. **Multi-Tenant Isolation & Zero Secret Leakage:**
@@ -91,6 +93,10 @@ The entire system architecture is anchored around three non-negotiable user expe
 4. **Cloud Independence:**
    - The platform operates 100% in the cloud without requiring the developer's workstation or any local GPU. When a creator uploads a video or broadcasts a stream, the cloud backend handles ingestion, analysis, AI clipping, rendering, and storage end-to-end.
 
+5. **Empirical Calibration & Flexible Pricing:**
+   - Heuristic thresholds (chat velocity multipliers, audio loudness gates, clip duration clamping) serve as engineering baselines that will be empirically calibrated against ground-truth creator data in Milestone 4.
+   - Subscription pricing, free-tier quotas, and retail packaging remain undecided pending measured unit economics and abuse controls in beta.
+
 ---
 
 ## 4. Master Blueprint Directory Roadmap
@@ -100,7 +106,7 @@ The complete architecture specification is partitioned into 15 focused, cross-re
 | Document ID | File Name | Focus & Scope |
 |---|---|---|
 | **ARCH-001** | [`01-EXISTING-SYSTEM-AUDIT.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/01-EXISTING-SYSTEM-AUDIT.md) | Exhaustive audit of existing code, branches, database models, and test matrices. |
-| **ARCH-002** | [`02-COMPLETE-FEATURE-INVENTORY.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/02-COMPLETE-FEATURE-INVENTORY.md) | Itemized catalog of 80+ product features across Categories A through J with stable IDs. |
+| **ARCH-002** | [`02-COMPLETE-FEATURE-INVENTORY.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/02-COMPLETE-FEATURE-INVENTORY.md) | Itemized catalog of 94 product features across Categories A through J with stable IDs. |
 | **ARCH-003** | [`03-APPLICATION-SCREENS-AND-UX.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/03-APPLICATION-SCREENS-AND-UX.md) | UX workflows, component hierarchies, loading/empty/error states for all 18+ application screens. |
 | **ARCH-004** | [`04-SERVICES-AND-API-CONTRACTS.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/04-SERVICES-AND-API-CONTRACTS.md) | Complete REST & WebSocket API schemas, BullMQ payload contracts, and error structures. |
 | **ARCH-005** | [`05-DATA-MODEL-AND-EVENT-TIMELINE.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/05-DATA-MODEL-AND-EVENT-TIMELINE.md) | Unified relational Prisma schema, event models, time synchronization, and diffs. |

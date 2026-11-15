@@ -178,24 +178,55 @@ Every major subsystem across the repository has been audited against source code
 
 ---
 
-## 4. Test Coverage Baseline Summary
+## 4. Test Coverage Baseline Reconciliation by Branch
 
-The automated Vitest harness (`apps/api/tests`) executes **10 test suites**:
+To maintain strict truth in technical documentation, test execution counts must never conflate the production `master` branch with experimental or staging feature branches:
 
-| Test File | Focus | Tests Passed | Tests Skipped | Tests Failed |
-|---|---|---|---|---|
-| `tests/auth-rate-limit.test.ts` | Auth rate limiting & lockout prevention | 3 | 0 | 0 |
-| `tests/cloud-worker-poc.test.ts` | Phase 2.1 cloud worker lifecycle & DLQ routing | 3 | 0 | 0 |
-| `tests/route-regression.test.ts` | Auth, projects, S3 upload, integration endpoints | 10 | 0 | 0 |
-| `tests/staging-worker-validation.test.ts` | Phase 2.2 queue isolation, secret headers, healthcheck | 5 | 0 | 0 |
-| `tests/upload-authorization.test.ts` | BOLA security, multi-user chunk isolation | 11 | 0 | 0 |
-| `tests/worker-regression.test.ts` | Analysis worker fallback, timeline generation | 4 | 0 | 0 |
-| `tests/worker-reliability.test.ts` | Scratch cleanup, retry backoff, error categorization | 4 | 0 | 0 |
-| `tests/unit/env.test.ts` | Zod schema validation for environment variables | 4 | 0 | 0 |
-| `tests/unit/pipeline.test.ts` | FFmpeg command synthesis & filtergraph compilation | 7 | 0 | 0 |
-| `tests/integration/e2e.test.ts` | Live service integration tests (requires live sidecars) | 0 | 4 | 0 |
-| **TOTAL** | | **51** | **4** | **0** |
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                   TEST SUITE INVENTORY BY BRANCH                       │
+└────────────────────────────────────────────────────────────────────────┘
+  [PRODUCTION: master (commit 799dca2)]
+  ├── tests/auth-rate-limit.test.ts            (3 tests passed)
+  ├── tests/route-regression.test.ts           (10 tests passed)
+  ├── tests/upload-authorization.test.ts      (11 tests passed)
+  ├── tests/worker-regression.test.ts          (4 tests passed)
+  ├── tests/worker-reliability.test.ts         (4 tests passed)
+  ├── tests/unit/env.test.ts                   (4 tests passed)
+  ├── tests/unit/pipeline.test.ts              (7 tests passed)
+  └── tests/integration/e2e.test.ts           (4 tests skipped - live sidecars)
+  ────────────────────────────────────────────────────────────────────────
+  MASTER TOTAL:                                43 passed | 4 skipped | 0 failed
 
-- **Automated Test Success Rate:** **100% of runnable tests passing** (51/51).
+  [STAGING ADDITIONS: feature/phase2-cloud-worker-poc (commit d684e51)]
+  └── tests/cloud-worker-poc.test.ts           (+3 tests passed, 10 criteria)
+  ────────────────────────────────────────────────────────────────────────
+  PHASE 2.1 POC TOTAL:                         46 passed | 4 skipped | 0 failed
+
+  [STAGING ADDITIONS: feature/phase2-staging-deployment & docs/autoai-master-blueprint]
+  └── tests/staging-worker-validation.test.ts  (+5 tests passed, queue/auth)
+  ────────────────────────────────────────────────────────────────────────
+  STAGING & BLUEPRINT TOTAL:                   51 passed | 4 skipped | 0 failed
+```
+
+| Test File | Focus | On `master`? | On `phase2-staging`? | Tests Passed | Tests Skipped | Tests Failed |
+|---|---|---|---|---|---|---|
+| `tests/auth-rate-limit.test.ts` | Auth rate limiting & lockout prevention | **Yes** | **Yes** | 3 | 0 | 0 |
+| `tests/route-regression.test.ts` | Auth, projects, S3 upload, integration routes | **Yes** | **Yes** | 10 | 0 | 0 |
+| `tests/upload-authorization.test.ts` | BOLA security, multi-user chunk isolation | **Yes** | **Yes** | 11 | 0 | 0 |
+| `tests/worker-regression.test.ts` | Analysis worker fallback, timeline generation | **Yes** | **Yes** | 4 | 0 | 0 |
+| `tests/worker-reliability.test.ts` | Scratch cleanup, retry backoff, error categories | **Yes** | **Yes** | 4 | 0 | 0 |
+| `tests/unit/env.test.ts` | Zod schema validation for environment variables | **Yes** | **Yes** | 4 | 0 | 0 |
+| `tests/unit/pipeline.test.ts` | FFmpeg command synthesis & filtergraph logic | **Yes** | **Yes** | 7 | 0 | 0 |
+| `tests/integration/e2e.test.ts` | Live service integration (requires live sidecars) | **Yes** | **Yes** | 0 | 4 | 0 |
+| `tests/cloud-worker-poc.test.ts` | Phase 2.1 cloud worker lifecycle & DLQ routing | **No** (Branch only) | **Yes** | 3 | 0 | 0 |
+| `tests/staging-worker-validation.test.ts` | Phase 2.2 queue isolation, secret headers, health | **No** (Branch only) | **Yes** | 5 | 0 | 0 |
+| **TOTALS** | | **Master: 8 files** | **Branch: 10 files** | **Master: 43**<br>**Branch: 51** | **4** | **0** |
+
+> [!CAUTION]
+> **Production Baseline Truth:** 43 tests pass on `master`. 51 tests pass only on the staging and blueprint feature branches (`feature/phase2-staging-deployment` and `docs/autoai-master-blueprint`). No claim may be made that 51 tests run on production until the feature branch is merged into `master`.
+
+- **Automated Test Success Rate on Current Blueprint Branch:** **100% of runnable tests passing** (51/51).
 - **TypeScript Compilation:** `apps/api` (`tsc -p tsconfig.json`) passes with **0 errors**.
+- **Next.js Web Build:** `apps/web` (`next build`) compiles all 10 production routes with **0 errors**.
 - **Next.js Web Build:** `apps/web` (`next build`) compiles all 10 production routes with **0 errors**.
