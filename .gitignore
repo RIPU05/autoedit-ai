@@ -30,3 +30,4 @@ temp/
 *.log
 coverage/
 .DS_Store
+.vite/

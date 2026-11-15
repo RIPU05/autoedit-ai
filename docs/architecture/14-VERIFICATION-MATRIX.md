@@ -94,34 +94,44 @@ The 94 product features cataloged in `02-COMPLETE-FEATURE-INVENTORY.md` map to t
 | **PUB-001** | n8n Webhook Dispatch | `WorkflowRun` | `POST /api/integrations/n8n` | `SCR-014` (`/integrations`) | `tests/route-regression.test.ts` | **VERIFIED IN PRODUCTION** |
 | **PUB-002** | Encrypted Secrets | `N8nConnection` | AES-256-GCM Encryption | `apps/api/src/services` | `tests/route-regression.test.ts` | **VERIFIED IN PRODUCTION** |
 | **PUB-003** | Delivery Monitoring | `WorkflowRun` | `GET /api/integrations/n8n/runs` | `SCR-014` (`/integrations`) | `tests/route-regression.test.ts` | **VERIFIED IN PRODUCTION** |
-| **LIVE-001** | LiveSession Entity | `LiveSession` | Proposed Stage 2 Endpoints | `SCR-017` (`/live`) | Stage 2 Prerequisite | **PLANNED ONLY** |
+| **LIVE-001** | LiveSession Entity | `LiveSession` | Proposed Stage 2 Endpoints | `SCR-017` (`/live`) | `@autoedit/contracts` Suite | **CONTRACT VERIFIED (STAGE 2)** |
 | **LIVE-002** | MediaMTX RTMP Ingest | `MediaSegment` | `rtmps://ingest.../live` | `SCR-017` (`/live`) | Stage 2 Prerequisite | **PLANNED ONLY** |
-| **LIVE-004** | Stream Key Auth | `LiveSession` | `POST /api/live/auth/stream-key`| `SCR-017` (`/live`) | Stage 2 Prerequisite | **PLANNED ONLY** |
-| **LIVE-005** | 6-Second Rolling Chunks | `MediaSegment` | S3 Ephemeral Buffer | Backend Pipeline | Stage 2 Prerequisite | **PLANNED ONLY** |
-| **VOD-004** | Chat Velocity Spike | `HighlightSignal` | Signal Processing Engine | `SCR-018` (`/live/[id]`) | Stage 2 Prerequisite | **PLANNED ONLY** |
+| **LIVE-004** | Stream Key Auth | `LiveSession` | `POST /api/live/auth/stream-key`| `SCR-017` (`/live`) | `@autoedit/contracts` Suite | **CONTRACT VERIFIED (STAGE 2)** |
+| **LIVE-005** | 6-Second Rolling Chunks | `MediaSegment` | S3 Ephemeral Buffer | Backend Pipeline | `@autoedit/contracts` Suite | **CONTRACT VERIFIED (STAGE 2)** |
+| **LIVE-010** | Reference-Aware Retention | `SegmentPinReference` | Storage Manager | `SCR-017` (`/live`) | `@autoedit/contracts` Suite | **CONTRACT VERIFIED (STAGE 2)** |
+| **VOD-004** | Chat Velocity Spike | `HighlightSignal` | Signal Processing Engine | `SCR-018` (`/live/[id]`) | `@autoedit/contracts` Suite | **CONTRACT VERIFIED (STAGE 2)** |
 | **SAAS-001** | Stripe Subscriptions | `Subscription` | Stripe Webhooks | `SCR-013` (`/settings`) | Stage 2 Prerequisite | **PLANNED ONLY** |
+| **SAAS-008** | Retention Policy Leases | `RetentionPolicy` | Storage Lifecycle | Backend Core | `@autoedit/contracts` Suite | **CONTRACT VERIFIED (STAGE 2)** |
 
 ---
 
-## 3. Operational Acceptance Gates
+## 3. Shared Contracts Foundation (`@autoedit/contracts`)
+
+As specified in [`16-SHARED-CONTRACTS-IMPLEMENTATION.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/16-SHARED-CONTRACTS-IMPLEMENTATION.md), the core contracts package (`packages/contracts`) establishes type-safe, validated schemas for the entire platform:
+- **Media & Streaming:** `MediaSource`, `MediaAsset`, `MediaSegment`, `LiveSession`, `StreamHealthEvent`, `ReconnectionEvent`.
+- **Platform Connectors:** `PlatformProvider`, `NormalizedChatEvent`, `PlatformStreamReference`.
+- **Highlights & Intelligence:** `HighlightSignal`, `HighlightCandidate`, `HighlightEvidence`, `AlgorithmVersion`.
+- **Editing & Rendering:** `EditTimelinePlan`, `EditOperation`, `CaptionStyle`, `RenderRequest`.
+- **Processing & Jobs:** `ProcessingJob`, `JobProgressEvent`, `JobFailure`, `IdempotencyKey`.
+- **Tenancy & Governance:** `TenantReference`, `UsageEvent`, `RetentionPolicy`, `SegmentPinReference`.
+
+Automated validation suite: **21 unit tests passing** in `packages/contracts/tests/contracts.test.ts`.
+
+---
+
+## 4. Operational Acceptance Gates
 
 Before any milestone is merged into `master` or deployed to production, it must satisfy all 5 Acceptance Gates:
 
 1. **Gate 1 (Build Verification):**
+   - `packages/contracts`: `tsc -p tsconfig.json` compiles with 0 errors.
    - `apps/api`: `tsc -p tsconfig.json` compiles with 0 errors.
    - `apps/web`: `next build` compiles all routes with 0 errors.
 2. **Gate 2 (Test Harness):**
    - 100% of runnable automated unit, regression, and reliability tests pass:
+     - On `packages/contracts`: 21 passing contract validation tests.
      - On `master` baseline (`799dca2`): 43 passing tests across 8 test suites (4 explicitly skipped).
      - On Staging / Blueprint feature branches: 51 passing tests across 10 test suites (4 explicitly skipped).
-3. **Gate 3 (Security & Invariant Audit):**
-   - Zero hardcoded secrets, tokens, or credentials in Git diff.
-   - Strict BOLA session verification enforced on all asset access.
-   - Core invariants (Preview Edit, Explainable AI, Version History) intact without breaking changes.
-4. **Gate 4 (Queue Isolation):**
-   - Staging workloads use `BULL_PREFIX=staging` and cannot consume production customer jobs.
-5. **Gate 5 (Explicit User Approval):**
-   - Written user authorization received prior to provisioning billable cloud resources or merging into `master`.
 3. **Gate 3 (Security & Invariant Audit):**
    - Zero hardcoded secrets, tokens, or credentials in Git diff.
    - Strict BOLA session verification enforced on all asset access.
