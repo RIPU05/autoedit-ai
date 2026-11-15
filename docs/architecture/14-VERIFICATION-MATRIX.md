@@ -39,7 +39,7 @@ The Verification Matrix establishes bidirectional traceability between high-leve
 
 The 94 product features cataloged in `02-COMPLETE-FEATURE-INVENTORY.md` map to the following verification levels across branches:
 
-- **Verified in Production (`master` @ `799dca2`):** 40 features (42.6%) — Active in live web application with 43 passing tests.
+- **Active in Production (`master` @ `799dca2`):** 40 features (42.6%) — Active in live web application with 43 passing tests in `apps/api` and manual smoke checks (automated browser E2E test suite skipped).
 - **Verified in Staging (`feature/phase2-staging-deployment` & blueprint branch):** 11 features (11.7%) — Validated via containerized worker & Modal GPU test harness with 51 passing tests.
 - **Partially Implemented:** 7 features (7.4%) — Backend services or client UI present with partial test or mock coverage.
 - **Missing Foundations:** 1 feature (1.1%) — `AUTH-005` (Tier-based project and duration quotas).

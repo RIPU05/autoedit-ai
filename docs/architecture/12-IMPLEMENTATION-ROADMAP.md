@@ -47,15 +47,13 @@ The AutoAI Edit engineering roadmap is sequenced to maximize code reuse, preserv
 
 ## 2. Milestone 0: Core Architecture Foundations & Shared Contracts
 
-- **Objective:** Consolidate shared data types, validation schemas, and database definitions into a clean foundation before introducing new streaming microservices.
-- **Scope of Changes:**
-  - Create `packages/shared` or unified contracts module for timeline JSON schemas, queue payloads, and chat event types.
-  - Implement non-destructive Prisma schema additions (`MediaSource`, `LiveSession`, `MediaSegment`, `ChatEvent`, `HighlightSignal`, `HighlightCandidate`).
-  - Add strict Zod validation schemas for all incoming API payloads.
-- **Dependencies:** None (Internal code refactoring).
+- **Phasing Structure:**
+  - **Milestone 0A (Shared Contracts Package):** Author `@autoedit/contracts` with strict TypeScript types, Zod schemas, discriminated unions, and tenant-aware references for media, livestreams, platform connectors, highlights, and jobs. Zero database migrations.
+  - **Milestone 0B (Reviewed Database Evolution):** Generate, review, and test non-destructive Prisma schema additions (`MediaSource`, `LiveSession`, `MediaSegment`, `RetentionPolicy`, `ChatEvent`, `HighlightCandidate`) with zero-downtime safety checks before any database application.
+- **Dependencies:** None (Internal code foundation).
 - **Acceptance Tests:**
-  - 100% of existing 51 automated tests continue to pass.
-  - API TypeScript build passes with zero errors.
+  - 100% of existing automated tests continue to pass without regression.
+  - API and Web builds pass with zero errors.
   - Schema diff validates with zero breaking migrations.
 - **Definition of Done:** Foundations merged cleanly on feature branch without regressions.
 
@@ -98,7 +96,7 @@ The AutoAI Edit engineering roadmap is sequenced to maximize code reuse, preserv
   - Provision lightweight MediaMTX gateway on dedicated edge instance (`LIVE-002`, `LIVE-003`).
   - Implement stream key generation and SHA-256 webhook authentication (`POST /api/live/auth/stream-key`).
   - Configure MediaMTX to slice incoming streams into 6-second MPEG-TS chunks and sync to S3 (`LIVE-005`).
-  - Implement rolling buffer cleanup cron purging unpinned chunks older than 90 minutes.
+  - Implement rolling buffer cleanup cron purging unpinned chunks older than 30 minutes (configurable pilot buffer), preserving chunks with active reference-counted pin leases (`SegmentPinReference`).
 - **Acceptance Tests:**
   - OBS connects to `rtmps://ingest.autoedit.ai/live` using valid stream key and streams for 30 minutes without dropped frames.
   - Chunks stream into S3; unpinned chunks auto-delete after window expires.

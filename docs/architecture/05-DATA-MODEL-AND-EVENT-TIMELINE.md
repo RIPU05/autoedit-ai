@@ -50,10 +50,21 @@ AutoAI Edit unifies pre-recorded VOD editing and real-time live broadcast clippi
   - `epochStartMs`: Presentation timestamp relative to broadcast epoch zero.
   - `durationMs`: Precise chunk duration in milliseconds (~6000ms).
   - `s3Key`: S3 object storage path (`chunks/{sourceId}/{seq}.ts`).
-  - `isPinned`: Boolean flag. Pinned chunks are excluded from rolling-buffer cleanup.
+  - `pinReferenceCount`: Number of active highlight candidates, project edits, or manual bookmarks referencing this chunk.
+  - `pinExpiresAt`: Optional ISO timestamp for temporary pin lease expiration.
+  - `retentionState`: `EPHEMERAL` | `PINNED_LEASE` | `REFERENCED` | `EXPIRED` | `ARCHIVED`.
   - `hasDiscontinuity`: Boolean flag indicating stream drop or clock reset.
 
-### 4. `ChatEvent` (Normalized Interactive Event)
+### 4. `SegmentPinReference` & `RetentionPolicy` (Reference-Aware Retention)
+- **Role:** Prevents unbounded storage leaks from permanent segment pinning. When a highlight candidate or bookmark flags a segment, a `SegmentPinReference` lease is created. If an edit project is deleted or the creator releases the clip, reference counts decrement. Segments reaching zero references enter an expiration grace period.
+- **Fields (`RetentionPolicy`):**
+  - `id`: CUID primary key.
+  - `tenantId`: References `User.id`.
+  - `ephemeralBufferMinutes`: Duration to retain unpinned live chunks (default: 30-minute pilot).
+  - `pinLeaseHours`: Duration of active highlight pin lease before requiring renewal or archival.
+  - `gracePeriodHours`: Cleanup delay after reference count reaches 0.
+
+### 5. `ChatEvent` (Normalized Interactive Event)
 - **Role:** Normalized chat message captured from Twitch IRC, YouTube Live, or Kick.
 - **Fields:**
   - `id`: CUID primary key.
@@ -254,3 +265,11 @@ model HighlightCandidate {
    - Ingested chat messages are hashed: `SHA256(platform + senderId + timestampMs + message)`. Duplicate messages arriving from network reconnects are rejected before insertion.
 3. **Queue Job Idempotency:**
    - Every BullMQ job ID is formatted as `${queueName}:${projectId}:${actionId}` (e.g. `analysis:proj_123:init`). BullMQ enforces job uniqueness, guaranteeing that rapid double-clicks on "Render" never trigger duplicate transcoding tasks.
+
+---
+
+## 6. Database Migration Policy: Reviewed Additive Migrations Only
+
+1. **No Migration in Milestone 0A:** Milestone 0A defines purely shared TypeScript contracts and Zod schemas. No Prisma migrations or database operations are executed.
+2. **Controlled Additive Evolution in Milestone 0B:** Even though the proposed new entities (`MediaSource`, `LiveSession`, `MediaSegment`, `RetentionPolicy`, `ChatEvent`, `HighlightCandidate`) are purely additive extensions to PostgreSQL, they **must still go through formal migration generation (`prisma migrate dev`), SQL review, safety testing, and zero-downtime deployment (`prisma migrate deploy`)**.
+3. **Zero-Downtime Guarantee:** All new columns on existing tables must be nullable or possess safe SQL defaults. Existing tables (`User`, `Project`, `Asset`, `Analysis`, `EditTimeline`, `EditVersion`, `Render`) must never be dropped, renamed, or column-truncated.

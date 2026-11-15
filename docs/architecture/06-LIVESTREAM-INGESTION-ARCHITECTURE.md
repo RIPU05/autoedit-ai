@@ -98,7 +98,7 @@ Direct live ingestion gives AutoAI Edit 100% control over video quality, timesta
 ### 3. Segment Pinning & 30-Minute Rolling Retention
 To avoid storing hundreds of gigabytes of unedited dead air from a multi-hour stream:
 1. **Configurable Rolling Buffer Window (30-Minute Pilot):** Unpinned segments older than **30 minutes** are purged by an automated cleanup cron (`INFRA-007`). This pilot window minimizes ephemeral storage overhead while providing ample runway for live highlight identification. Retention duration is configurable per user tier.
-2. **Segment Pinning (`LIVE-010`):** When a highlight candidate is flagged (e.g. at timestamp 45:10) or bookmarked by the creator, the system flags chunks 450 through 465 as `isPinned: true`. Pinned chunks are permanently retained and exempt from deletion.
+2. **Reference-Aware Retention & Pin Leases (`LIVE-010`):** When a highlight candidate is flagged (e.g. at timestamp 45:10) or bookmarked by the creator, the system increments the chunk's `pinReferenceCount` and attaches a `SegmentPinReference` lease. Segments with active references (`pinReferenceCount > 0`) are protected from rolling buffer eviction. If an edit project is deleted or the creator releases the candidate, references decrement, and zero-reference chunks enter an expiration grace period rather than accumulating indefinitely.
 3. **Session Sealing (`LIVE-013`):** When the broadcast concludes, pinned chunks are linked to an active `Project` record for immediate clipping, previewing, and rendering in the Unified Studio.
 
 ---

@@ -80,6 +80,10 @@ The background worker executes BullMQ queues and native FFmpeg pipelines without
 - **Model Baking:** Model weights (`Systran/faster-whisper-base`) are baked into the Docker image layers at build time via `run_function(download_base_model)`.
 - **Cold Boot Time:** Drops from ~15 seconds to **~1.5 seconds**.
 
+### 3. Multi-Architecture (ARM64 vs. x86_64) Hardware Portability
+> [!WARNING]
+> **Docker Portability != ARM64 Compatibility:** Containerizing the worker in Docker does not automatically guarantee compatibility with ARM64 cloud instances (e.g. Oracle Cloud Infrastructure Ampere A1, AWS Graviton). Native binary dependencies—specifically FFmpeg statically linked codecs, Prisma query engines (`linux-arm64-openssl-3.0.x`), and CTranslate2 shared libraries—require explicit multi-architecture image builds (`docker buildx`) and platform-specific regression testing before ARM64 instances can be provisioned.
+
 ---
 
 ## 4. Upstash Redis & BullMQ Polling Safeguards
@@ -92,8 +96,9 @@ This would burn through Upstash's 10,000 free daily commands in **4.6 hours whil
 ### Production Mitigations Implemented:
 1. **Drain Delay:** Configured with `drainDelay: 30000` (worker pauses polling for 30s when queue is empty).
 2. **Stalled Check Interval:** Configured with `stalledInterval: 60000` (reduces stalled-lock checks to once per minute).
-3. **Queue Namespacing (`BULL_PREFIX`):** Segregates `staging:*` from `bull:*`, preventing staging workers from querying production keys.
-4. **Command Consumption:** With these settings, idle daily commands drop to <2,880 commands/day, safely within the free tier.
+3. **Queue Namespacing (`BULL_PREFIX`):** Segregates `staging:*` from `bull:*`, preventing staging workers from querying production keys.  
+   *(Note: `BULL_PREFIX` provides logical key namespace isolation. It does not provide complete physical isolation; shared Redis memory pressure, connection pool limits, or instance downtime can still affect both environments. True physical isolation requires dedicated Redis instances).*
+4. **Command Consumption:** With these settings, idle daily commands drop to <2,880 commands/day based on staging prototype calculations (to be validated with sustained production telemetry).
 
 ---
 
@@ -111,5 +116,5 @@ This would burn through Upstash's 10,000 free daily commands in **4.6 hours whil
      }
      ```
 3. **S3 Storage Retention:**
-   - Unpinned rolling live chunks: Purged after **90 minutes**.
+   - Unpinned rolling live chunks: Purged after **30 minutes** (configurable pilot buffer); chunks protected by active `SegmentPinReference` leases are retained until released or expired.
    - Completed exports: Retained permanently for paid tiers; expired after 30 days for free tier accounts.

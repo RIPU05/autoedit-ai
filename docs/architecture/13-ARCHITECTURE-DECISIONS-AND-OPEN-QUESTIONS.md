@@ -61,7 +61,7 @@
 - **Status:** **APPROVED & IMPLEMENTED IN STAGING (`INFRA-002`)**
 - **Context:** Testing new worker Docker containers or streaming pipelines against a shared Redis instance risks staging workers pulling and corrupting production customer jobs.
 - **Decision:** Enforce dynamic prefix isolation across all BullMQ queues and workers via `env.BULL_PREFIX` (e.g. `staging:analysis` vs `bull:analysis`).
-- **Consequences:** Guarantees 100% queue isolation; enables safe staging verification on shared Redis clusters without provisioning duplicate Redis instances.
+- **Consequences:** Provides logical queue key namespace isolation, preventing staging workers from consuming production jobs. Note: Shared Redis resources (memory, connections, CPU) remain shared; complete physical isolation requires dedicated Redis instances.
 
 ---
 
@@ -90,8 +90,8 @@ The core architectural direction for AutoAI Edit has been formally established a
 ### Decision D: Live Rolling Buffer Retention
 - **Resolution:** **30-Minute Rolling Buffer Pilot** (updated from 90m). Unpinned chunks older than 30 minutes are automatically purged during live broadcasts to eliminate unnecessary cloud storage fees during beta testing. Retention is configurable per user tier.
 
-### Decision E: Segment Pinning
-- **Resolution:** **Supported (`LIVE-010`)**. Chunks associated with flagged highlight candidates or creator bookmarks are pinned (`isPinned: true`) and permanently retained, completely exempt from rolling buffer purging.
+### Decision E: Segment Pinning & Reference-Aware Retention
+- **Resolution:** **Supported via Reference Leases (`LIVE-010`)**. Chunks associated with flagged highlight candidates or creator bookmarks receive reference-counted leases (`SegmentPinReference`) and are protected from rolling buffer purging. When edit projects are removed or leases expire, references decrement, preventing indefinite storage accumulation.
 
 ### Decision F: Replayable Evidence Timeline
 - **Resolution:** **Mandatory Core Requirement**. Every AI highlight references exact audio/visual/chat evidence with millisecond timestamps, chat surge percentages, and acoustic metrics, allowing creators to inspect why each clip was chosen.
@@ -99,8 +99,8 @@ The core architectural direction for AutoAI Edit has been formally established a
 ### Decision G: Model-Independent AI Gateway
 - **Resolution:** **Vendor-Agnostic Adapter Pattern**. The system interfaces with an abstract `AiGateway` provider. While Claude 3.5 Sonnet serves as the primary reasoning engine, pluggable adapters support Google Gemini, OpenAI GPT-4o, and self-hosted open-weight LLMs (Ollama/vLLM), with deterministic fallback.
 
-### Decision H: Cloud Provider Flexibility
-- **Resolution:** **Strict Protocol Decoupling**. Core services communicate via standard Docker containers, standard Redis protocols, and S3-compatible APIs. Compute workloads can migrate seamlessly between Render, Oracle Cloud ARM instances, Hetzner, AWS, or RunPod without vendor lock-in.
+### Decision H: Cloud Provider Flexibility & Hardware Architectures
+- **Resolution:** **Strict Protocol Decoupling with Multi-Arch Awareness**. Core services communicate via standard Docker containers, standard Redis protocols, and S3-compatible APIs. Compute workloads can migrate between Render, Oracle Cloud ARM instances, Hetzner, AWS, or RunPod without vendor lock-in. Note: Deploying on ARM64 (e.g. OCI Ampere A1) requires explicit multi-architecture image compilation (`docker buildx`) for native FFmpeg and Prisma binaries.
 
 ### Decision I: Undecided Subscription Pricing & Packaging
 - **Resolution:** **Undecided Pending Empirical Calibration**. Unit economics are modeled as engineering projections. Retail SaaS pricing, free-tier quotas, and packaging remain undecided until empirical costs and abuse controls are measured during the beta.
@@ -109,7 +109,7 @@ The core architectural direction for AutoAI Edit has been formally established a
 - **Resolution:** **Strictly Preserved**. Instant Preview Edit (`EDIT-001`), Explainable AI (`EDIT-002`), and Non-Destructive Version History (`EDIT-003`) must never be degraded or broken.
 
 ### Decision K: Queue Isolation & Multi-Tenancy
-- **Resolution:** **Dynamic Namespacing (`BULL_PREFIX`)**. Enforces 100% queue isolation between staging and production environments on shared Redis clusters.
+- **Resolution:** **Dynamic Namespacing (`BULL_PREFIX`)**. Enforces logical key namespace isolation between staging and production job queues on shared Redis instances.
 
 ### Decision L: Security & BOLA Protection
 - **Resolution:** **Zero Secret Git Policy & BOLA Session Verification**. All third-party tokens encrypted with AES-256-GCM; all upload sessions and media access guarded by database ownership checks.

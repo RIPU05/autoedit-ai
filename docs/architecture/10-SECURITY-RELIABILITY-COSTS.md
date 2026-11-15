@@ -112,11 +112,11 @@ Engineering Cost Model for a 1-Hour Video (5 Clips Produced):
 └────────────────────────────────────────────────────────┘
 ```
 
-### Projected Monthly Cost Models at Varying Usage Scales (Illustrative):
+### Projected Monthly Compute & Infrastructure Cost Models (Illustrative):
 
-| Creator Usage Model | Monthly Videos Processed | Compute & AI Cost | Fixed Infra (Render/DB) | Total Cost / Month | Illustrative Target Price | Projected Gross Margin |
-|---|---|---|---|---|---|---|
-| **Free / Trial** | 2 videos (15m each) | $0.10 | $0.00 (Free tiers) | **$0.10** | $0.00 (Undecided) | N/A (Acquisition) |
-| **Creator Model** | 15 videos (30m each) | $1.25 | $50.00 | **$51.25** | $29.00 / user (x5) (Undecided) | **64.7%** |
-| **Streamer Model** | 40 streams (2h each) | $8.20 | $50.00 | **$58.20** | $79.00 / user (x5) (Undecided) | **85.3%** |
-| **Studio Model** | 200 videos (multi-creator)| $32.50 | $75.00 | **$107.50** | $299.00 / mo (Undecided) | **64.0%** |
+| Creator Usage Model | Monthly Videos Processed | Estimated Compute & AI Cost | Fixed Infra Overhead (Render/DB) | Total Estimated Cost / Month | Retail Pricing Strategy |
+|---|---|---|---|---|---|
+| **Free / Trial Tier** | 2 videos (15m each) | ~$0.10 | $0.00 (Covered by free tiers) | **~$0.10** | TBD (Quota & abuse limit calibration in beta) |
+| **Creator Usage Model** | 15 videos (30m each) | ~$1.25 | $50.00 (Single worker pool) | **~$51.25** | TBD (Pricing finalized post-beta telemetry) |
+| **Streamer Usage Model** | 40 streams (2h each) | ~$8.20 | $50.00 (Dedicated worker pool) | **~$58.20** | TBD (Pricing finalized post-beta telemetry) |
+| **Studio Multi-Seat Model**| 200 videos (multi-seat) | ~$32.50 | $75.00 (Scaled worker pool) | **~$107.50** | TBD (Pricing finalized post-beta telemetry) |
