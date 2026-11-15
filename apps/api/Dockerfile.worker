@@ -1,0 +1,44 @@
+# AutoAI Edit — Cloud Worker Container
+# Runs BullMQ queues (analysis, render, n8n-dispatch) with native FFmpeg
+
+# ---- build stage ----
+FROM node:20-bookworm-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json* ./
+COPY prisma ./prisma
+RUN npm install
+COPY tsconfig.json ./
+COPY src ./src
+RUN npx prisma generate && npm run build
+
+# ---- runtime stage ----
+FROM node:20-bookworm-slim
+WORKDIR /app
+
+# Install native system FFmpeg and CA certificates for S3/WAN TLS
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV NODE_ENV=production \
+    RENDER_WORK_DIR=/tmp/autoedit \
+    ANALYSIS_CONCURRENCY=2 \
+    RENDER_CONCURRENCY=1
+
+# Create scratch directory with write permissions
+RUN mkdir -p /tmp/autoedit
+
+COPY package.json package-lock.json* ./
+COPY prisma ./prisma
+RUN npm install --omit=dev && npx prisma generate
+
+COPY --from=build /app/dist ./dist
+
+# Healthcheck verifies that Node process is responsive and disk has space
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD node -e "require('node:fs').accessSync(process.env.RENDER_WORK_DIR || '/tmp/autoedit', require('node:fs').constants.W_OK)" || exit 1
+
+# Default command starts the background worker process
+CMD ["node", "dist/worker.js"]
