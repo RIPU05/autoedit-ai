@@ -255,7 +255,7 @@ export const analysisWorker = new Worker<AnalysisJobData>(
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
 },
-{ connection, concurrency: env.ANALYSIS_CONCURRENCY, lockDuration: env.ANALYSIS_LOCK_DURATION_MS },
+{ connection, concurrency: env.ANALYSIS_CONCURRENCY, lockDuration: env.ANALYSIS_LOCK_DURATION_MS, prefix: env.BULL_PREFIX },
 );
 
 analysisWorker.on('failed', async (job, err) => {

@@ -49,6 +49,7 @@ const schema = z.object({
   MAX_UPLOAD_BYTES: z.coerce.number().default(5_368_709_120),
 
   // queue + worker controls (Phase 6)
+  BULL_PREFIX: z.string().default('bull'),
   ANALYSIS_CONCURRENCY: z.coerce.number().default(2),
   ANALYSIS_LOCK_DURATION_MS: z.coerce.number().default(1000 * 60 * 15),
   RENDER_CONCURRENCY: z.coerce.number().default(1),
@@ -58,6 +59,7 @@ const schema = z.object({
   // Transcription sidecar (services/whisper)
   WHISPER_URL: z.string().url().default('http://localhost:9000'),
   WHISPER_MODEL: z.string().default('base'),
+  WHISPER_SECRET: z.string().optional(),
 }).superRefine((value, ctx) => {
   if (value.AI_PROVIDER === 'claude' && value.ANTHROPIC_API_KEY.trim().length === 0) {
     ctx.addIssue({

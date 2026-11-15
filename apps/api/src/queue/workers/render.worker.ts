@@ -207,7 +207,7 @@ export const renderWorker = new Worker<RenderJobData>(
       await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
     }
   },
-  { connection, concurrency: env.RENDER_CONCURRENCY }, // scale horizontally, not per-process
+  { connection, concurrency: env.RENDER_CONCURRENCY, prefix: env.BULL_PREFIX }, // scale horizontally, not per-process
 );
 
 renderWorker.on('failed', async (job, err) => {

@@ -25,6 +25,12 @@ from pydantic import BaseModel
 # ── Modal Infrastructure Definition ──────────────────────────────────────────
 app = modal.App("autoedit-whisper")
 
+def download_base_model():
+    from faster_whisper import WhisperModel
+    # Pre-download base model weights into container image layers
+    WhisperModel("base", device="cpu", compute_type="int8")
+
+
 # Build image with system FFmpeg and CUDA-accelerated faster-whisper
 whisper_image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -36,6 +42,7 @@ whisper_image = (
         "faster-whisper==1.0.3",
         "requests==2.32.3",
     )
+    .run_function(download_base_model)
 )
 
 web_app = FastAPI(title="AutoEdit Serverless Whisper API", version="2.0.0")

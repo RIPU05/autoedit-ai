@@ -1,5 +1,6 @@
 import { Queue } from 'bullmq';
 import { bullConnection as connection } from '../lib/redis.js';
+import { env } from '../config/env.js';
 
 export const ANALYSIS_QUEUE = 'analysis';
 export const RENDER_QUEUE = 'render';
@@ -25,14 +26,14 @@ export interface N8nJobData {
   payload: Record<string, unknown>;
 }
 
-export const analysisQueue = new Queue<AnalysisJobData>(ANALYSIS_QUEUE, { connection });
-export const renderQueue = new Queue<RenderJobData>(RENDER_QUEUE, { connection });
-export const n8nQueue = new Queue<N8nJobData>(N8N_QUEUE, { connection });
+export const analysisQueue = new Queue<AnalysisJobData>(ANALYSIS_QUEUE, { connection, prefix: env.BULL_PREFIX });
+export const renderQueue = new Queue<RenderJobData>(RENDER_QUEUE, { connection, prefix: env.BULL_PREFIX });
+export const n8nQueue = new Queue<N8nJobData>(N8N_QUEUE, { connection, prefix: env.BULL_PREFIX });
 
 // Dead-letter queue: jobs that exhaust all retries are parked here for
 // inspection / manual replay instead of vanishing (Phase 6).
 export const DEAD_LETTER_QUEUE = 'dead-letter';
-export const deadLetterQueue = new Queue(DEAD_LETTER_QUEUE, { connection });
+export const deadLetterQueue = new Queue(DEAD_LETTER_QUEUE, { connection, prefix: env.BULL_PREFIX });
 
 export async function moveToDeadLetter(origin: string, data: unknown, error: string) {
   await deadLetterQueue.add(

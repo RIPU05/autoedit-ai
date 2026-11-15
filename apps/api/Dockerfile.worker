@@ -24,17 +24,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV NODE_ENV=production \
     RENDER_WORK_DIR=/tmp/autoedit \
-    ANALYSIS_CONCURRENCY=2 \
+    BULL_PREFIX=staging \
+    ANALYSIS_CONCURRENCY=1 \
     RENDER_CONCURRENCY=1
 
-# Create scratch directory with write permissions
-RUN mkdir -p /tmp/autoedit
+# Create scratch directory with write permissions for unprivileged node user
+RUN mkdir -p /tmp/autoedit && chown -R node:node /tmp/autoedit
 
 COPY package.json package-lock.json* ./
 COPY prisma ./prisma
 RUN npm install --omit=dev && npx prisma generate
 
-COPY --from=build /app/dist ./dist
+COPY --from=build --chown=node:node /app/dist ./dist
+COPY --from=build --chown=node:node /app/node_modules/.prisma ./node_modules/.prisma
+
+# Switch to unprivileged node user
+USER node
 
 # Healthcheck verifies that Node process is responsive and disk has space
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \

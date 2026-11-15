@@ -3,6 +3,7 @@ import { bullConnection as connection } from '../../lib/redis.js';
 import { prisma } from '../../lib/prisma.js';
 import { triggerWebhook } from '../../services/n8n.service.js';
 import { decrypt } from '../../utils/crypto.js';
+import { env } from '../../config/env.js';
 import { N8N_QUEUE, type N8nJobData } from '../queues.js';
 
 export const n8nWorker = new Worker<N8nJobData>(
@@ -24,7 +25,7 @@ export const n8nWorker = new Worker<N8nJobData>(
     });
     return result;
   },
-  { connection, concurrency: 5 },
+  { connection, concurrency: 5, prefix: env.BULL_PREFIX },
 );
 
 n8nWorker.on('failed', async (job, err) => {

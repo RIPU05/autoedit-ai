@@ -26,8 +26,13 @@ export async function transcribeRich(audioPath: string, language?: string): Prom
     form.append('file', new Blob([buf]), path.basename(audioPath));
     if (language) form.append('language', language);
 
+    const headers: Record<string, string> = {};
+    if (env.WHISPER_SECRET) {
+      headers['X-Whisper-Secret'] = env.WHISPER_SECRET;
+    }
+
     const res = await withTimeout(
-      fetch(`${env.WHISPER_URL}/transcribe`, { method: 'POST', body: form }),
+      fetch(`${env.WHISPER_URL}/transcribe`, { method: 'POST', headers, body: form }),
       1000 * 60 * 30, // 30 min ceiling for long podcasts
       'transcription',
     );
@@ -53,7 +58,11 @@ export async function transcribe(audioPath: string, language?: string): Promise<
 
 export async function transcriberHealthy(): Promise<boolean> {
   try {
-    const res = await fetch(`${env.WHISPER_URL}/health`);
+    const headers: Record<string, string> = {};
+    if (env.WHISPER_SECRET) {
+      headers['X-Whisper-Secret'] = env.WHISPER_SECRET;
+    }
+    const res = await fetch(`${env.WHISPER_URL}/health`, { headers });
     return res.ok;
   } catch {
     return false;
