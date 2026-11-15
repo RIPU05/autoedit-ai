@@ -10,6 +10,12 @@ import {
   COOKIE_NAME,
 } from '../utils/auth.js';
 import { requireAuth, asyncHandler, HttpError } from '../middleware/auth.js';
+import {
+  AUTH_REGISTER_LIMITER,
+  AUTH_LOGIN_LIMITER,
+  AUTH_SESSION_LIMITER,
+  AUTH_LOGOUT_LIMITER,
+} from '../middleware/rateLimit.js';
 import { env } from '../config/env.js';
 
 export const authRouter = Router();
@@ -22,6 +28,7 @@ const credSchema = z.object({
 
 authRouter.post(
   '/register',
+  AUTH_REGISTER_LIMITER,
   asyncHandler(async (req, res) => {
     const { email, password, name } = credSchema.parse(req.body);
     const existing = await prisma.user.findUnique({ where: { email } });
@@ -38,6 +45,7 @@ authRouter.post(
 
 authRouter.post(
   '/login',
+  AUTH_LOGIN_LIMITER,
   asyncHandler(async (req, res) => {
     const { email, password } = credSchema.parse(req.body);
     const user = await prisma.user.findUnique({ where: { email } });
@@ -51,13 +59,14 @@ authRouter.post(
   }),
 );
 
-authRouter.post('/logout', (req, res) => {
+authRouter.post('/logout', AUTH_LOGOUT_LIMITER, (req, res) => {
   res.clearCookie(COOKIE_NAME, cookieOptions).json({ ok: true });
 });
 
 authRouter.get(
   '/me',
   requireAuth,
+  AUTH_SESSION_LIMITER,
   asyncHandler(async (req, res) => {
     const user = await prisma.user.findUnique({
       where: { id: req.user!.sub },
@@ -74,7 +83,7 @@ const googleClient =
     ? new OAuth2Client(env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.GOOGLE_CALLBACK_URL)
     : null;
 
-authRouter.get('/google', (_req, res) => {
+authRouter.get('/google', AUTH_LOGIN_LIMITER, (_req, res) => {
   if (!googleClient) throw new HttpError(501, 'google oauth not configured');
   const url = googleClient.generateAuthUrl({
     access_type: 'offline',
@@ -86,6 +95,7 @@ authRouter.get('/google', (_req, res) => {
 
 authRouter.get(
   '/google/callback',
+  AUTH_LOGIN_LIMITER,
   asyncHandler(async (req, res) => {
     if (!googleClient) throw new HttpError(501, 'google oauth not configured');
     const code = z.string().parse(req.query.code);

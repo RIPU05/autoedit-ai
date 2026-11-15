@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { projects as api } from '@/lib/api';
 import { TimelineEditor } from '@/components/TimelineEditor';
 import { VersionSidebar } from '@/components/VersionSidebar';
@@ -9,9 +9,17 @@ import { CompareView } from '@/components/CompareView';
 import { RepurposePanel } from '@/components/RepurposePanel';
 import { FeedbackModal } from '@/components/FeedbackModal';
 
+interface PageError {
+  status: number;
+  message: string;
+}
+
 export default function ProjectPage() {
   const { id } = useParams<{ id: string }>();
+  const router = useRouter();
   const [project, setProject] = useState<any>(null);
+  const [error, setError] = useState<PageError | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
   const [rendering, setRendering] = useState<{ id: string; pct: number; status?: string } | null>(null);
   const [versionRefresh, setVersionRefresh] = useState(0); // sidebar reload (prompt edits + restores)
   const [editorKey, setEditorKey] = useState(0); // remount editor only when working ops change (restore)
@@ -19,9 +27,29 @@ export default function ProjectPage() {
   const [showFeedback, setShowFeedback] = useState(false);
 
   async function load() {
-    const { project } = await api.get(id);
-    setProject(project);
+    try {
+      const res = await api.get(id);
+      if (!res || !res.project) {
+        throw new Error('invalid project response from server');
+      }
+      setProject(res.project);
+      setError(null);
+    } catch (err: any) {
+      const status = typeof err?.status === 'number' ? err.status : 500;
+      const message = err?.message || 'failed to load project';
+
+      // 401 Unauthorized -> redirect to login with return path
+      if (status === 401) {
+        router.push(`/login?next=/projects/${encodeURIComponent(id)}`);
+        return;
+      }
+
+      setError({ status, message });
+    } finally {
+      setIsLoading(false);
+    }
   }
+
   useEffect(() => {
     load();
     const t = setInterval(load, 5000); // refresh while analysis runs
@@ -32,19 +60,125 @@ export default function ProjectPage() {
   useEffect(() => {
     if (!rendering) return;
     const t = setInterval(async () => {
-      const { render } = await api.renderStatus(id, rendering.id);
-      setRendering((r) => (r ? { ...r, pct: render.progress, status: render.status } : r));
-      if (render.status === 'COMPLETED' || render.status === 'FAILED') {
-        clearInterval(t);
-        await load();
-        setRendering(null);
-        if (render.status === 'COMPLETED') setShowFeedback(true);
+      try {
+        const { render } = await api.renderStatus(id, rendering.id);
+        setRendering((r) => (r ? { ...r, pct: render.progress, status: render.status } : r));
+        if (render.status === 'COMPLETED' || render.status === 'FAILED') {
+          clearInterval(t);
+          await load();
+          setRendering(null);
+          if (render.status === 'COMPLETED') setShowFeedback(true);
+        }
+      } catch (err: any) {
+        console.error('Failed to poll render status', err);
       }
     }, 2000);
     return () => clearInterval(t);
   }, [rendering?.id, id]);
 
-  if (!project) return <main className="p-8 text-white/50">Loading…</main>;
+  if (error) {
+    return (
+      <main className="max-w-2xl mx-auto px-6 py-16 text-center">
+        <a href="/dashboard" className="text-sm text-white/40 hover:text-white mb-6 inline-block">
+          ← Back to Dashboard
+        </a>
+        <div className="bg-panel border border-edge rounded-lg p-8 shadow-lg">
+          {error.status === 404 ? (
+            <>
+              <h1 className="font-display text-2xl text-white mb-2">Project Not Found</h1>
+              <p className="text-white/60 text-sm mb-6">
+                The requested project does not exist or has been deleted.
+              </p>
+              <a
+                href="/dashboard"
+                className="inline-block px-5 py-2.5 bg-accent hover:bg-accent/80 text-white rounded font-medium text-sm transition-colors"
+              >
+                Return to Dashboard
+              </a>
+            </>
+          ) : error.status === 403 ? (
+            <>
+              <h1 className="font-display text-2xl text-white mb-2">Access Denied</h1>
+              <p className="text-white/60 text-sm mb-6">
+                You do not have permission to view this project.
+              </p>
+              <a
+                href="/dashboard"
+                className="inline-block px-5 py-2.5 bg-accent hover:bg-accent/80 text-white rounded font-medium text-sm transition-colors"
+              >
+                Return to Dashboard
+              </a>
+            </>
+          ) : error.status === 429 ? (
+            <>
+              <h1 className="font-display text-2xl text-white mb-2">Rate Limit Exceeded</h1>
+              <p className="text-white/60 text-sm mb-6">
+                Too many requests. Please wait a moment before trying again.
+              </p>
+              <button
+                onClick={() => {
+                  setIsLoading(true);
+                  load();
+                }}
+                className="px-5 py-2.5 bg-accent hover:bg-accent/80 text-white rounded font-medium text-sm transition-colors"
+              >
+                Retry Now
+              </button>
+            </>
+          ) : error.status === 408 ? (
+            <>
+              <h1 className="font-display text-2xl text-white mb-2">Request Timed Out</h1>
+              <p className="text-white/60 text-sm mb-6">
+                The server took too long to respond. Please check your connection and try again.
+              </p>
+              <button
+                onClick={() => {
+                  setIsLoading(true);
+                  load();
+                }}
+                className="px-5 py-2.5 bg-accent hover:bg-accent/80 text-white rounded font-medium text-sm transition-colors"
+              >
+                Retry
+              </button>
+            </>
+          ) : (
+            <>
+              <h1 className="font-display text-2xl text-white mb-2">Something Went Wrong</h1>
+              <p className="text-white/60 text-sm mb-6">
+                {error.message || 'An unexpected error occurred while loading this project.'}
+              </p>
+              <div className="flex gap-4 justify-center">
+                <button
+                  onClick={() => {
+                    setIsLoading(true);
+                    load();
+                  }}
+                  className="px-5 py-2.5 bg-accent hover:bg-accent/80 text-white rounded font-medium text-sm transition-colors"
+                >
+                  Retry
+                </button>
+                <a
+                  href="/dashboard"
+                  className="inline-block px-5 py-2.5 bg-panel border border-edge text-white/80 hover:text-white rounded font-medium text-sm transition-colors"
+                >
+                  Dashboard
+                </a>
+              </div>
+            </>
+          )}
+        </div>
+      </main>
+    );
+  }
+
+  if (isLoading || !project) {
+    return (
+      <main className="max-w-5xl mx-auto px-6 py-16 text-center text-white/50">
+        <div className="inline-block animate-spin w-6 h-6 border-2 border-accent border-t-transparent rounded-full mb-3" />
+        <p className="font-mono text-sm">Loading project…</p>
+      </main>
+    );
+  }
   const a = project.analysis;
   const t = project.timeline;
   const completed = (project.renders ?? []).filter((r: any) => r.status === 'COMPLETED');

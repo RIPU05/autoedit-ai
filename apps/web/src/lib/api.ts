@@ -1,26 +1,48 @@
 import type { EditChange, Version, VersionDiff } from './types';
 
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ??
-  (process.env.NODE_ENV === 'production' ? undefined : 'http://localhost:4000');
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  (process.env.NODE_ENV === 'production'
+    ? 'https://autoedit-ai.onrender.com'
+    : 'http://localhost:4000');
 
-if (process.env.NODE_ENV === 'production' && !process.env.NEXT_PUBLIC_API_BASE_URL) {
-  throw new Error('NEXT_PUBLIC_API_BASE_URL is missing');
+export class ApiError extends Error {
+  status: number;
+  data: any;
+
+  constructor(status: number, message: string, data?: any) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.data = data;
+    Object.setPrototypeOf(this, ApiError.prototype);
+  }
 }
 
-console.log('API BASE =', API_BASE_URL);
-
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...(init.headers ?? {}) },
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error ?? `request failed: ${res.status}`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const res = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      signal: init.signal ?? controller.signal,
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', ...(init.headers ?? {}) },
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new ApiError(res.status, body.error ?? `request failed: ${res.status}`, body);
+    }
+    return (await res.json()) as T;
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      throw new ApiError(408, 'request timed out. please check your network connection.');
+    }
+    if (err instanceof ApiError) throw err;
+    throw new ApiError(0, err.message || 'network connection failed');
+  } finally {
+    clearTimeout(timeoutId);
   }
-  return res.json() as Promise<T>;
 }
 
 export const auth = {

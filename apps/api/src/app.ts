@@ -4,7 +4,7 @@ import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import { env } from './config/env.js';
 import { errorHandler, requireAuth } from './middleware/auth.js';
-import { AUTH_LIMITER, GENERAL_API_LIMITER, INTEGRATION_LIMITER, UPLOAD_LIMITER } from './middleware/rateLimit.js';
+import { GENERAL_API_LIMITER, INTEGRATION_LIMITER, UPLOAD_LIMITER } from './middleware/rateLimit.js';
 import { authRouter } from './routes/auth.routes.js';
 import { uploadRouter } from './routes/upload.routes.js';
 import { projectRouter, dashboardRouter } from './routes/projects.routes.js';
@@ -31,7 +31,7 @@ export function createApp() {
     }),
   );
 
-  app.use('/api/auth', AUTH_LIMITER, authRouter);
+  app.use('/api/auth', authRouter);
   app.use('/api/upload', requireAuth, UPLOAD_LIMITER, uploadRouter);
   app.use('/api/projects', requireAuth, GENERAL_API_LIMITER, projectRouter);
   app.use('/api/dashboard', requireAuth, GENERAL_API_LIMITER, dashboardRouter);

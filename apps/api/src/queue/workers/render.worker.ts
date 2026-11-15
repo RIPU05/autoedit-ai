@@ -39,21 +39,37 @@ export const renderWorker = new Worker<RenderJobData>(
   RENDER_QUEUE,
   async (job) => {
     const { projectId, renderId, format } = job.data;
-    const workDir = path.join(env.RENDER_WORK_DIR, projectId, renderId);
-    await fs.mkdir(workDir, { recursive: true });
+    const safeProject = projectId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeRenderId = renderId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const baseDir = path.resolve(env.RENDER_WORK_DIR);
+    const workDir = path.resolve(baseDir, 'renders', safeProject, safeRenderId);
 
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      include: { analysis: true, timeline: true, sourceAsset: true },
-    });
-    if (!project?.analysis || !project.timeline || !project.sourceAsset) {
-      throw new Error('project not ready for render');
+    if (!workDir.startsWith(baseDir)) {
+      throw new Error('path traversal detected in render scratch directory');
     }
 
-    await prisma.render.update({
-      where: { id: renderId },
-      data: { status: 'RUNNING', startedAt: new Date() },
-    });
+    await fs.mkdir(workDir, { recursive: true });
+
+    try {
+      await prisma.job
+        .updateMany({
+          where: { projectId, type: 'RENDER', bullId: job.id },
+          data: { status: 'ACTIVE' },
+        })
+        .catch(() => {});
+
+      const project = await prisma.project.findUnique({
+        where: { id: projectId },
+        include: { analysis: true, timeline: true, sourceAsset: true },
+      });
+      if (!project?.analysis || !project.timeline || !project.sourceAsset) {
+        throw new Error('project not ready for render');
+      }
+
+      await prisma.render.update({
+        where: { id: renderId },
+        data: { status: 'RUNNING', startedAt: new Date() },
+      });
 
     // 1. pull source
     const localVideo = path.join(workDir, 'source.mp4');
@@ -178,9 +194,18 @@ export const renderWorker = new Worker<RenderJobData>(
       });
     }
 
-    // cleanup scratch files
-    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
-    return { outKey };
+      await prisma.job
+        .updateMany({
+          where: { projectId, type: 'RENDER', bullId: job.id },
+          data: { status: 'COMPLETED' },
+        })
+        .catch(() => {});
+
+      return { outKey };
+    } finally {
+      // cleanup scratch files on both success and failure
+      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    }
   },
   { connection, concurrency: env.RENDER_CONCURRENCY }, // scale horizontally, not per-process
 );
@@ -189,23 +214,43 @@ renderWorker.on('failed', async (job, err) => {
   if (!job) return;
   const category = /timed out/i.test(err.message) ? 'RENDER_TIMEOUT' : 'FFMPEG';
   await captureError(category, err, { projectId: job.data.projectId, jobId: job.id });
-  await prisma.render
-    .update({ where: { id: job.data.renderId }, data: { status: 'FAILED', error: err.message } })
-    .catch(() => {});
-  const project = await prisma.project.findUnique({
-    where: { id: job.data.projectId },
-    select: { userId: true, title: true },
-  });
-  if (project) {
-    void dispatchIntegrationEvent(project.userId, 'render.failed', {
-      projectId: job.data.projectId,
-      renderId: job.data.renderId,
-      renderFormat: job.data.format,
-      projectTitle: project.title,
-      metadata: { error: err.message },
+
+  const isFinalAttempt = job.attemptsMade >= (job.opts.attempts ?? 1);
+  if (isFinalAttempt) {
+    await prisma.render
+      .update({ where: { id: job.data.renderId }, data: { status: 'FAILED', error: err.message } })
+      .catch(() => {});
+    await prisma.job
+      .updateMany({
+        where: { projectId: job.data.projectId, type: 'RENDER', bullId: job.id },
+        data: { status: 'FAILED', error: err.message },
+      })
+      .catch(() => {});
+    const project = await prisma.project.findUnique({
+      where: { id: job.data.projectId },
+      select: { userId: true, title: true },
     });
-  }
-  if (job.attemptsMade >= (job.opts.attempts ?? 1)) {
+    if (project) {
+      void dispatchIntegrationEvent(project.userId, 'render.failed', {
+        projectId: job.data.projectId,
+        renderId: job.data.renderId,
+        renderFormat: job.data.format,
+        projectTitle: project.title,
+        metadata: { error: err.message },
+      });
+    }
     await moveToDeadLetter(RENDER_QUEUE, job.data, err.message).catch(() => {});
+  } else {
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        msg: 'render.retry_scheduled',
+        projectId: job.data.projectId,
+        renderId: job.data.renderId,
+        attempt: job.attemptsMade,
+        maxAttempts: job.opts.attempts ?? 1,
+        error: err.message,
+      }),
+    );
   }
 });

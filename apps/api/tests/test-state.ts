@@ -63,6 +63,16 @@ function makeModel(table: Row[], prefix: string) {
       Object.assign(row, args.data, { updatedAt: new Date() });
       return selectRow(row, args.select);
     }),
+    updateMany: vi.fn(async (args: Row) => {
+      let count = 0;
+      for (const row of table) {
+        if (matches(row, args.where)) {
+          Object.assign(row, args.data, { updatedAt: new Date() });
+          count++;
+        }
+      }
+      return { count };
+    }),
     upsert: vi.fn(async (args: Row) => {
       const row = table.find((item) => matches(item, args.where));
       if (row) {

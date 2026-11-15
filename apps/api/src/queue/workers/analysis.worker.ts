@@ -50,11 +50,26 @@ export const analysisWorker = new Worker<AnalysisJobData>(
   ANALYSIS_QUEUE,
   async (job) => {
     const { projectId, s3Key } = job.data;
-    const workDir = path.join(env.RENDER_WORK_DIR, projectId);
+    const safeProject = projectId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeJobId = (job.id ?? 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const baseDir = path.resolve(env.RENDER_WORK_DIR);
+    const workDir = path.resolve(baseDir, 'analysis', safeProject, safeJobId);
+
+    if (!workDir.startsWith(baseDir)) {
+      throw new Error('path traversal detected in worker scratch directory');
+    }
+
     await fs.mkdir(workDir, { recursive: true });
     const localVideo = path.join(workDir, 'source.mp4');
 
-    await prisma.project.update({ where: { id: projectId }, data: { status: 'ANALYZING' } });
+    try {
+      await prisma.project.update({ where: { id: projectId }, data: { status: 'ANALYZING' } });
+      await prisma.job
+        .updateMany({
+          where: { projectId, type: 'ANALYZE', status: 'QUEUED' },
+          data: { status: 'ACTIVE' },
+        })
+        .catch(() => {});
 
     // 1. pull source from S3
     const sourceUrl = await presignDownload(s3Key);
@@ -228,18 +243,46 @@ export const analysisWorker = new Worker<AnalysisJobData>(
       });
     }
 
+    await prisma.job
+      .updateMany({
+        where: { projectId, type: 'ANALYZE', status: 'ACTIVE' },
+        data: { status: 'COMPLETED' },
+      })
+      .catch(() => {});
+
     return { highlights: result.highlights.length, agents: result.agentLog.length, provider: ai.provider, fallback: ai.fallback };
-  },
-  { connection, concurrency: env.ANALYSIS_CONCURRENCY, lockDuration: env.ANALYSIS_LOCK_DURATION_MS },
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+},
+{ connection, concurrency: env.ANALYSIS_CONCURRENCY, lockDuration: env.ANALYSIS_LOCK_DURATION_MS },
 );
 
 analysisWorker.on('failed', async (job, err) => {
   if (!job) return;
   const category = isInvalidJsonError(err) ? 'INVALID_JSON' : 'CLAUDE';
   await captureError(category, err, { projectId: job.data.projectId, jobId: job.id });
-  await prisma.project.update({ where: { id: job.data.projectId }, data: { status: 'FAILED' } }).catch(() => {});
-  // out of retries → park in the dead-letter queue for inspection/replay
-  if (job.attemptsMade >= (job.opts.attempts ?? 1)) {
+
+  const isFinalAttempt = job.attemptsMade >= (job.opts.attempts ?? 1);
+  if (isFinalAttempt) {
+    await prisma.project.update({ where: { id: job.data.projectId }, data: { status: 'FAILED' } }).catch(() => {});
+    await prisma.job
+      .updateMany({
+        where: { projectId: job.data.projectId, type: 'ANALYZE' },
+        data: { status: 'FAILED', error: err.message },
+      })
+      .catch(() => {});
     await moveToDeadLetter(ANALYSIS_QUEUE, job.data, err.message).catch(() => {});
+  } else {
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        msg: 'analysis.retry_scheduled',
+        projectId: job.data.projectId,
+        attempt: job.attemptsMade,
+        maxAttempts: job.opts.attempts ?? 1,
+        error: err.message,
+      }),
+    );
   }
 });
