@@ -16,6 +16,9 @@ In accordance with Stage 2, Milestone 0A of the AutoAI Edit Master Architecture 
 
 Milestone 0A is strictly restricted to **shared types, domain interfaces, and runtime Zod validation schemas**. It introduces zero breaking changes to existing production APIs, executes zero database migrations, provisions zero paid cloud infrastructure, and preserves all core product invariants (**Instant Preview Edit**, **Explainable AI**, **Non-Destructive Version History**).
 
+> [!IMPORTANT]
+> **Branch Separation Invariant:** The actual implementation source code, build configuration, and test suite for `@autoedit/contracts` (`packages/contracts/`) reside exclusively on the dedicated implementation branch `feature/stage2-milestone0a-shared-contracts` (commit `1657597`). The `docs/*` branches serve strictly as architectural governance and specification documents, and do NOT contain unmerged application source code.
+
 ---
 
 ## 2. Package Structure & Monorepo Integration

@@ -430,24 +430,67 @@ To avoid unsustainable GPU and VLM cloud costs, reference processing is partitio
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 7.1 Stage A: Reference Analysis (Cost-Optimized)
+### 7.1 Stage A: Reference Analysis (Cost-Optimized & Benchmarked)
+
+> [!NOTE]
+> **Performance Benchmarks Disclaimer:** Latency figures, processing multiples (e.g., $40\times$ realtime), and inference durations below represent **engineering target hypotheses and architectural benchmarks**. Actual production metrics will be empirically measured during Milestone 4B testing.
+
 1. **Sha-256 Deduplication & Shared Caching:**
    - Every uploaded or linked reference video is hashed: `hash = sha256(referenceBytes or canonicalSourceUrl)`.
-   - If a popular influencer edit or viral TikTok template is referenced by 100 creators, the analysis job is executed **exactly once**. Subsequent requests return the cached `ReferenceStyleProfile` in $<20\text{ms}$.
+   - If a popular influencer edit or viral TikTok template is referenced by multiple creators, the analysis job is executed **exactly once**. Subsequent requests return the cached `ReferenceStyleProfile` from Redis/PostgreSQL in target sub-50ms cache hits.
 2. **Deterministic Pre-Filtering:**
-   - FFmpeg runs at $40\times$ realtime speed to log shot boundaries and audio dynamics.
-   - Eliminates need for continuous frame-by-frame AI model analysis.
+   - FFmpeg executes scene cut detection (`select='gt(scene,0.3)'`) and audio dynamics logging with high throughput, avoiding costly full-frame AI passes.
 3. **Selective Keyframe Sampling:**
-   - Instead of streaming video into expensive Vision-Language Models (VLM), the worker extracts **one single keyframe per detected shot** (e.g., 15 frames for a 30s reel).
-   - Lightweight OCR extracts text coordinates in $<1.2$ seconds total CPU time.
+   - Instead of streaming the full video into expensive Vision-Language Models (VLM), the worker extracts **one single keyframe per detected shot** (e.g., ~15 frames for a 30s reel).
+   - Lightweight OCR extracts text coordinates and styling metrics in minimal CPU time.
 
-### 7.2 Stage B: Style Application (Procedural & Instantaneous)
-1. **Mathematical Operation Mapping:**
-   - Translates target ASL (e.g., 1.4s) into rhythmic cuts mapped against the source video's natural sentence pauses and acoustic peaks.
-   - Injects `EditOperationZoom` nodes at timestamps where source speech volume spikes coincide with reference pacing intervals.
-2. **Zero Cloud Transcode During Editing:**
+### 7.2 Stage B: Content-Aware Reference Mapping (Adapting Patterns, Not Copying Timestamps)
+
+A fatal flaw in naive reference editing tools is **blind timestamp copying** (e.g., rigidly cutting source footage at exactly $t=1.4\text{s}, 2.8\text{s}, 4.2\text{s}$ simply because the reference video had cuts at those intervals). This produces fragmented dialogue, cut-off words, and disorienting visual jumps.
+
+AutoAI Edit enforces **Content-Aware Reference Mapping**, where extracted reference patterns act as structural targets that adapt organically to the source footage's acoustic, speech, visual, and semantic landmarks:
+
+```mermaid
+flowchart TD
+    subgraph RefProfile["Reference Style Targets (Archetype)"]
+        TargetASL["Target Shot Cadence: ASL = 1.4s"]
+        TargetZoom["Zoom Style: 1.25x Punch on Peak"]
+        TargetSub["Caption Style: Bouncing Yellow Text"]
+    end
+
+    subgraph SourceMedia["Source Footage Content Landmarks"]
+        WordBounds["Word & Sentence Pauses (Faster-Whisper)"]
+        AudioPeaks["Acoustic Excitement Spikes (EBU R128)"]
+        MotionPeaks["Action / Scene Changes (Optical Flow)"]
+        SemanticArc["Narrative Setup → Climax → Reaction"]
+    end
+
+    subgraph ContentAwareEngine["Content-Aware Adaptation Engine"]
+        RefProfile --> ContentAwareEngine
+        SourceMedia --> ContentAwareEngine
+        ContentAwareEngine --> SnapCut["1. Speech-Boundary Snapping (±0.35s tolerance)"]
+        ContentAwareEngine --> AlignZoom["2. Acoustic Peak Alignment (Zooms on Real Shouts/Laughs)"]
+        ContentAwareEngine --> MotionSync["3. Visual Action Sync (Cuts on Gameplay Hits)"]
+        ContentAwareEngine --> NarrativeMap["4. Semantic Arc Mapping (Preserve Hook & Payoff)"]
+    end
+
+    ContentAwareEngine --> FinalPlan["Synthesized EditTimelinePlan (JSON)"]
+```
+
+1. **Speech-Boundary Snapping (Phoneme & Word Guardrails):**
+   - When the reference profile targets an Average Shot Length of $1.4\text{s}$, the engine establishes a search window $[1.05\text{s}, 1.75\text{s}]$.
+   - It snaps the cut point to the nearest natural word or sentence pause identified by Faster-Whisper timestamps or FFmpeg `silencedetect`.
+   - **Hard Invariant:** The engine will **never cut a speaker mid-word** to satisfy a reference pacing target.
+2. **Acoustic & Reaction Peak Alignment:**
+   - If the reference exhibits punch zooms on excitement moments, the engine does not zoom at the reference's exact timestamps.
+   - Instead, it scans the source audio for genuine volume surges, laughter, or vocal emphasis, anchoring the $1.25\times$ punch zoom directly to the creator's real emotional reactions.
+3. **Visual Action & Saliency Snapping:**
+   - In gaming or action footage, cut points align with in-game eliminations, visual scene changes, or camera motion vectors in the source video rather than an artificial metronome.
+4. **Semantic Arc & Narrative Structuring:**
+   - Reference hook structures (e.g., a 3-second provocative hook followed by rapid montage and a 4-second punchline) are mapped onto the source video's narrative landmarks, preserving setup, climax, and payoff.
+5. **Zero Cloud Transcode During Editing:**
    - The output of Stage B is pure JSON (`EditTimelinePlan`).
-   - The user scrubs, previews, and tests edits locally in the browser via HTML5 canvas, consuming **$0.00 in cloud compute** until final export.
+   - The creator scrubs, previews, and tests edits locally in the browser via HTML5 canvas, consuming **$0.00 in cloud compute** until final export.
 
 ---
 

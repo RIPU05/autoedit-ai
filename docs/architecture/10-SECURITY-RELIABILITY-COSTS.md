@@ -96,14 +96,14 @@ if (!workDir.startsWith(baseDir)) {
 ## 5. Engineering Cost Projections & Unit Economics
 
 > [!NOTE]
-> **Pricing & Tier Packaging Disclaimer:** The unit costs below represent **theoretical engineering cost projections** based on current cloud provider pricing (Modal GPU, Render CPU, Anthropic/Google tokens, AWS S3/Cloudflare R2 storage). **Retail subscription pricing, free-tier limits, and packaging remain undecided** and will be finalized only after empirical cost tracking, fraud prevention testing, and user feedback during the Milestone 4/5 beta.
+> **Pricing, Cost & Latency Claims Disclaimer:** All unit costs (e.g. ~$0.03/clip, ~$0.11/clip), processing multiples, inference durations, and infrastructure cost estimates below represent **theoretical engineering cost hypotheses and target benchmarks**. **Retail subscription pricing, free-tier quotas, and packaging remain undecided** and will be finalized only after empirical cost tracking, fraud prevention testing, and user telemetry during the Milestone 4/5 beta.
 
 AutoAI Edit's unit economics distinguish between **LITE Mode** (zero AI inference compute) and **PRO Mode** (multimodal GPU + LLM inference) as detailed in [`ARCH-018: LITE & PRO Processing Architecture`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/18-LITE-AND-PRO-PROCESSING-ARCHITECTURE.md):
 
 ```
-Engineering Cost Comparison per Rendered Clip:
+Target Engineering Cost Benchmark Comparison per Rendered Clip (Hypothesis):
 ┌──────────────────────────────────────┬──────────────────────────────────────┐
-│       LITE MODE (~$0.0306 / clip)    │       PRO MODE (~$0.1146 / clip)     │
+│  LITE MODE BENCHMARK (~$0.03 / clip) │  PRO MODE BENCHMARK (~$0.11 / clip)  │
 ├──────────────────────────────────────┼──────────────────────────────────────┤
 │ CPU Transcode (720p FFmpeg): $0.0180 │ CPU Transcode (1080p60):    $0.0350  │
 │ Cloud Ingress / Buffer:      $0.0070 │ Modal GPU Whisper (45s audio):$0.0450│
@@ -113,16 +113,17 @@ Engineering Cost Comparison per Rendered Clip:
 └──────────────────────────────────────┴──────────────────────────────────────┘
 ```
 
-### 5.1 Quota Strategy & Double-Charge Protection
-1. **Idempotent Reservations:** All export and AI inference requests acquire an atomic `UsageReservation` in Redis keyed by `hash(tenantId, jobId, timestamp)` with a 15-minute TTL.
-2. **Failure Protection:** If a transcode worker or GPU container crashes, the reservation is automatically released (`RELEASED`), immediately restoring tenant balance with zero financial or quota penalty. Retries with the same idempotency key never incur secondary deductions.
-3. **Decoupled Metric Allowances:** Chat monitoring hours (virtually free cloud bandwidth) are tracked independently from video ingestion hours and rendered export credits.
+### 5.1 Quota Strategy, Double-Charge Protection & Safety Invariant
+1. **Quotas Ahead of Public Cloud Compute (Critical Safety Gate):** Server-side entitlement enforcement, durable quota tracking, and spend circuit breakers (`SAAS-009`, `AUTH-005`) are deployed in Milestone 1, strictly *ahead* of enabling public Free-tier cloud processing or high-throughput live ingest.
+2. **Idempotent Reservations:** All export and AI inference requests acquire an atomic `UsageReservation` in Redis keyed by `hash(tenantId, jobId, timestamp)` with a 15-minute TTL.
+3. **Failure Protection:** If a transcode worker or GPU container crashes, the reservation is automatically released (`RELEASED`), immediately restoring tenant balance with zero financial or quota penalty. Retries with the same idempotency key never incur secondary deductions.
+4. **Decoupled Metric Allowances:** Chat monitoring hours (virtually free cloud bandwidth) are tracked independently from video ingestion hours and rendered export credits.
 
-### 5.2 Projected Monthly Compute & Infrastructure Cost Models (Illustrative):
+### 5.2 Projected Monthly Compute & Infrastructure Cost Models (Hypothetical Benchmarks):
 
 | Creator Usage Model | Monthly Videos Processed | Estimated Compute & AI Cost | Fixed Infra Overhead (Render/DB) | Total Estimated Cost / Month | Retail Pricing Strategy |
 |---|---|---|---|---|---|
 | **Free / LITE Tier** | 5 clips (from 2h stream) | ~$0.15 | $0.00 (Covered by free tiers) | **~$0.15** | Free (Quota & abuse limit calibration in beta) |
-| **Creator PRO Model** | 30 clips (from 15h media) | ~$3.45 | $50.00 (Single worker pool) | **~$53.45** | Paid SaaS (Pricing finalized post-beta telemetry) |
-| **Streamer PRO Model** | 120 clips (from 40h streams) | ~$13.75 | $50.00 (Dedicated worker pool) | **~$63.75** | Paid SaaS (Pricing finalized post-beta telemetry) |
-| **Studio Multi-Seat Model**| 500 clips (multi-seat) | ~$57.30 | $75.00 (Scaled worker pool) | **~$132.30** | Paid SaaS (Pricing finalized post-beta telemetry) |
+| **Creator PRO Model** | 30 clips (from 15h media) | ~$3.45 | $50.00 (Single worker pool) | **~$53.45** | Paid SaaS (Pricing TBD post-beta telemetry) |
+| **Streamer PRO Model** | 120 clips (from 40h streams) | ~$13.75 | $50.00 (Dedicated worker pool) | **~$63.75** | Paid SaaS (Pricing TBD post-beta telemetry) |
+| **Studio Multi-Seat Model**| 500 clips (multi-seat) | ~$57.30 | $75.00 (Scaled worker pool) | **~$132.30** | Paid SaaS (Pricing TBD post-beta telemetry) |
