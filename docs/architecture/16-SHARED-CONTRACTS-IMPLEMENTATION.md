@@ -200,6 +200,23 @@ The `@autoedit/contracts` test suite (`packages/contracts/tests/contracts.test.t
 
 ---
 
-## 8. Conclusion
+## 8. Proposed Future Contracts: Reference-Based AI Editing (Milestone 0C)
+
+In accordance with [`ARCH-019: Reference-Based AI Editing`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/19-REFERENCE-BASED-AI-EDITING.md), the following schemas are planned for addition to `@autoedit/contracts` in Milestone 0C:
+
+- `ReferenceMediaAsset`: Direct upload or public URL reference footage metadata, duration, dimensions, and Sha-256 content hash.
+- `ReferenceAnalysisJob`: BullMQ background job state tracking Stage A video decomposition progress.
+- `ReferenceStyleProfile`: Reusable style profile containing Average Shot Length (ASL), shot count, and extracted feature array.
+- `ReferenceStyleFeature`: Individual style dimension (pacing, zooms, typography, color) with confidence score (0.0–1.0) and reproducibility flag.
+- `ReferenceStyleSelection`: Granular creator toggles specifying which dimensions to apply.
+- `ReferenceStyleApplicationRequest`: Request binding a style profile, user directives, and target project timeline with idempotency key.
+- `StyleMatchReport`: Transparent explainability report itemizing matched, adapted, and unsupported characteristics.
+
+> [!NOTE]
+> **Status:** The above contracts are currently **Proposed Specifications** in `ARCH-019` and will be implemented in `packages/contracts/src/reference.ts` during Milestone 0C with dedicated Vitest suites.
+
+---
+
+## 9. Conclusion
 
 `@autoedit/contracts` provides a production-grade, type-safe foundation for all future AutoAI Edit capabilities. It is fully compiled, tested, and ready to support Milestone 0B (Reviewed Database Evolution) and Milestone 1 (Cloud Worker Deployment).

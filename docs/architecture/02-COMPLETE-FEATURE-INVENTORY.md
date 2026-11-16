@@ -14,25 +14,26 @@ Every capability in the AutoAI Edit platform is assigned a permanent, standardiz
 
 - **Category A (`AUTH-xxx`):** User Authentication, Security & Account Management (4 features)
 - **Category B (`PROJ-xxx`):** Project Management, Asset Library & Media Ingestion (6 features)
-- **Category C (`EDIT-xxx`):** AI Video Editing, Timeline Studio & Core Invariants (12 features)
+- **Category C (`EDIT-xxx`):** AI Video Editing, Timeline Studio & Core Invariants (13 features)
 - **Category D (`PROD-xxx`):** Video Production, Transcoding & Subtitle Systems (10 features)
 - **Category E (`VOD-xxx`):** Recorded Livestream Ingestion & VOD Analysis (8 features)
-- **Category F (`LIVE-xxx`):** Real-Time Livestream Ingestion, OBS & Gateway Infrastructure (14 features)
+- **Category F (`LIVE-xxx`):** Real-Time Livestream Ingestion, OBS & Gateway Infrastructure (15 features)
 - **Category G (`PLAT-xxx`):** Third-Party Platform Integrations (Twitch, YouTube, Kick) (8 features)
 - **Category H (`AI-xxx`):** AI Gateway, Models, Prompts & Multimodal Highlight Engines (8 features)
 - **Category I (`INFRA-xxx`):** Cloud Processing, BullMQ Queues & Storage Systems (10 features)
-- **Category J (`SAAS-xxx`):** SaaS Monetization, Metering, Quotas & Operations (8 features)
+- **Category J (`SAAS-xxx`):** SaaS Monetization, Metering, Quotas & Operations (9 features)
 - **Category K (`PUB-xxx`):** Automated Publishing & External Webhooks (6 features)
+- **Category L (`REF-xxx`):** Reference-Based AI Editing & Style Transfer (8 features)
 
-**Total Unique Features:** **94 Features**
+**Total Unique Features:** **105 Features**
 
 > [!NOTE]
 > **Verification Level Definition & E2E Rigor:**
 > - **Active in Production (Unit / Route Tested & Smoke Verified):** 40 features running live on production infrastructure (`autoedit-ai.vercel.app` and `autoedit-ai.onrender.com`), verified by 43 automated passing tests in `apps/api` and manual smoke checks. Note: Full end-to-end browser automation (`tests/integration/e2e.test.ts`) is currently skipped pending staging cloud credentials.
 > - **Verified in Staging:** 11 features validated via containerized worker & Modal GPU test harnesses on dedicated staging branches (51 passing tests).
-> - **Partially Implemented:** 7 features with partial route coverage or mocked services.
+> - **Partially Implemented:** 10 features with partial route coverage, mocked services, or shared contracts validation.
 > - **Missing Foundations:** 1 feature (`AUTH-005` project/duration quotas) requiring database schema support.
-> - **Planned Only:** 35 features specified in architecture and scheduled for Stage 2 Milestones 0 through 6.
+> - **Planned Only:** 43 features specified in architecture and scheduled for Stage 2 Milestones 0 through 6.
 
 ---
 
@@ -210,22 +211,37 @@ Every capability in the AutoAI Edit platform is assigned a permanent, standardiz
 
 ---
 
-## 13. Reconciled Feature Metrics & Verification Breakdown
+## 13. Category L: Reference-Based AI Editing (8 Features)
 
-Across all 11 categories (A:4, B:6, C:13, D:10, E:8, F:15, G:8, H:8, I:10, J:9, K:6), the **97 unique features** break down into the following mutually exclusive totals:
+| Feature ID | Feature Name | Description & Acceptance Criteria | Dependencies | Source Code Path | Test Coverage | Primary Status | Verification Level |
+|---|---|---|---|---|---|---|---|
+| **REF-001** | Reference Media Ingest & Video Probe | Ingests reference video via direct upload or supported public link; extracts stream metadata. | S3, FFprobe | `apps/api/src/routes/reference.routes.ts` | Unit Mocks | **Planned Only** | **Planned Only** |
+| **REF-002** | Shot Rhythm & Cut Pacing Analyzer | Deterministic calculation of scene cuts, Average Shot Length (ASL), and shot cadence. | FFmpeg Scene | `apps/api/src/services/reference-analysis.service.ts` | Unit Mocks | **Planned Only** | **Planned Only** |
+| **REF-003** | Subtitle Typography & OCR Extractor | Extracts subtitle bounding box coordinates, font styling, color palette, and word pacing. | OCR Engine | `apps/api/src/services/reference-ocr.service.ts` | Unit Mocks | **Planned Only** | **Planned Only** |
+| **REF-004** | Optical Zoom & Motion Pattern Detector | Detects punch zooms, zoom scale intensity (1.1x–1.4x), and camera panning vectors. | CV / FFmpeg | `apps/api/src/services/reference-motion.service.ts` | Unit Mocks | **Planned Only** | **Planned Only** |
+| **REF-005** | Reusable Style Profile & Hash Cache | Stores reusable `ReferenceStyleProfile` keyed by Sha-256 content hash in Redis/Postgres. | Redis Cache | `apps/api/src/services/style-profile.service.ts` | Unit Mocks | **Planned Only** | **Planned Only** |
+| **REF-006** | Selective Style Matching Engine | Provides creator toggles for pacing, zooms, subtitles, and color with conflict resolution. | Rules Engine | `apps/api/src/services/style-matcher.service.ts` | Unit Mocks | **Planned Only** | **Planned Only** |
+| **REF-007** | Style-to-Timeline Plan Mapper | Maps reference style profile parameters onto source footage generating `EditTimelinePlan`. | Timeline Core | `apps/api/src/services/timeline-synthesizer.service.ts` | Unit Mocks | **Planned Only** | **Planned Only** |
+| **REF-008** | Explainable Style Match Report | Generates transparent breakdown detailing matched, adapted, and unsupported characteristics. | AI Gateway | `apps/api/src/services/style-report.service.ts` | Unit Mocks | **Planned Only** | **Planned Only** |
+
+---
+
+## 14. Reconciled Feature Metrics & Verification Breakdown
+
+Across all 12 categories (A:4, B:6, C:13, D:10, E:8, F:15, G:8, H:8, I:10, J:9, K:6, L:8), the **105 unique features** break down into the following mutually exclusive totals:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                      RECONCILED FEATURE STATUS TOTALS                  │
 └────────────────────────────────────────────────────────────────────────┘
-  ├── 1. Active in Production (Master release 799dca2):     40 (41.2%)
-  ├── 2. Verified in Staging (Feature branches only):       11 (11.3%)
-  ├── 3. Partially Implemented (Foundational code/contracts):10 (10.3%)
+  ├── 1. Active in Production (Master release 799dca2):     40 (38.1%)
+  ├── 2. Verified in Staging (Feature branches only):       11 (10.5%)
+  ├── 3. Partially Implemented (Foundational code/contracts):10 (9.5%)
   ├── 4. Missing Foundations (Zero code authored):           1  (1.0%)
-  └── 5. Planned Only (Specifications finalized):           35 (36.1%)
+  └── 5. Planned Only (Specifications finalized):           43 (41.0%)
   ────────────────────────────────────────────────────────────────────────
-  TOTAL UNIQUE FEATURES:                                    97 (100.0%)
+  TOTAL UNIQUE FEATURES:                                   105 (100.0%)
 ```
 
-- **Combined Implementation Progress:** **51 features (52.6%)** are fully implemented in code, with 40 live in production and 11 validated in staging test harnesses.
-- **Pending Implementation:** **46 features (47.4%)** are scheduled across Milestones 0 through 6 (35 planned, 10 partial, 1 missing).
+- **Combined Implementation Progress:** **51 features (48.6%)** are fully implemented in code, with 40 live in production and 11 validated in staging test harnesses.
+- **Pending Implementation:** **54 features (51.4%)** are scheduled across Milestones 0 through 6 (43 planned, 10 partial, 1 missing).

@@ -169,3 +169,20 @@ All video outputs are encoded to meet strict mobile playback and social platform
 
 > [!IMPORTANT]
 > **Web & Mobile Streaming (`+faststart`):** Every FFmpeg export command appends `-movflags +faststart`. This moves the MP4 file index (`moov` atom) to the front of the file, allowing mobile browsers and social feeds to begin playback instantly without waiting for the full video to download.
+
+---
+
+## 8. Composable Editing Paradigms (AUTO, PROMPT, REFERENCE, MANUAL)
+
+The editing engine supports four composable editorial inputs that all compile into the unified `EditTimelinePlan` (see [`ARCH-019: Reference-Based AI Editing`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/19-REFERENCE-BASED-AI-EDITING.md)):
+
+1. **AUTO EDIT:** Algorithmic highlight detection and silence elimination generating baseline keep/cut operations.
+2. **PROMPT EDIT:** Conversational natural-language modification ("Make the intro faster", "No zooms").
+3. **REFERENCE EDIT:** Procedural style extraction from an exemplar video (ASL cut pacing, subtitle placement, punch zooms).
+4. **MANUAL EDIT:** Direct pixel-level timeline trimming, cropping, and caption adjustments on the HTML5 canvas.
+
+### Deterministic Precedence Hierarchy
+When multiple operations collide on the same timeline timestamp, conflicts are resolved deterministically:
+$$\text{MANUAL PINNED EDITS} \succ \text{USER PROMPT OVERRIDES} \succ \text{REFERENCE STYLE PROFILE} \succ \text{AUTOMATIC BASELINE}$$
+
+This guarantees that creator intent is never silently overwritten, while preserving instant client-side preview and non-destructive version snapshots.

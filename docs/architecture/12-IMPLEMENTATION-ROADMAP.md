@@ -50,6 +50,7 @@ The AutoAI Edit engineering roadmap is sequenced to maximize code reuse, preserv
 - **Phasing Structure:**
   - **Milestone 0A (Shared Contracts Package):** Author `@autoedit/contracts` with strict TypeScript types, Zod schemas, discriminated unions, and tenant-aware references for media, livestreams, platform connectors, highlights, and jobs. Zero database migrations.
   - **Milestone 0B (Reviewed Database Evolution):** Generate, review, and test non-destructive Prisma schema additions (`MediaSource`, `LiveSession`, `MediaSegment`, `RetentionPolicy`, `ChatEvent`, `HighlightCandidate`) with zero-downtime safety checks before any database application.
+  - **Milestone 0C (Reference Style Contracts):** Author `packages/contracts/src/reference.ts` defining schemas for `ReferenceMediaAsset`, `ReferenceStyleProfile`, `ReferenceStyleFeature`, `ReferenceStyleSelection`, `ReferenceStyleApplicationRequest`, and `StyleMatchReport`.
 - **Dependencies:** None (Internal code foundation).
 - **Acceptance Tests:**
   - 100% of existing automated tests continue to pass without regression.
@@ -107,19 +108,24 @@ The AutoAI Edit engineering roadmap is sequenced to maximize code reuse, preserv
 
 ---
 
-## 6. Milestone 4: PRO Multimodal AI Engine & Upgrade Refinement
+## 6. Milestone 4: PRO Multimodal AI Engine, Upgrade Refinement & Reference Editing
 
-- **Objective:** Augment LITE candidate clusters with Faster-Whisper GPU transcription, Claude/Gemini semantic reasoning, and 1-click in-studio upgrade refinement.
+- **Objective:** Augment LITE candidate clusters with Faster-Whisper GPU transcription, Claude/Gemini semantic reasoning, 1-click in-studio upgrade refinement, and reference-conditioned style transfer.
 - **Scope of Changes:**
   - Connect Modal Faster-Whisper serverless GPU to transcribe prioritized highlight candidate audio windows.
   - Author Multi-Agent LLM reasoning pipeline (Director, Hook, Social Copy agents) delivering 0–100 virality scores and explainable editorial strategies.
   - Implement **Lite-to-Pro Upgrade Refinement** (`EDIT-013`): in-studio 1-click upgrade that extracts segment audio, runs GPU/LLM analysis, and non-destructively attaches word-level transcripts and hooks without altering manual trims.
+  - Implement **Reference-Based AI Editing Engine** (`REF-001` through `REF-008`):
+    - Stage A: FFmpeg cut pacing (ASL), keyframe OCR subtitle typography, and Sha-256 Redis profile cache.
+    - Stage B: Style-to-timeline operation mapper, prompt override interpreter, and 4-tier conflict resolution engine.
+    - Studio UI: Style match report drawer, attribute toggles, and instant HTML5 canvas preview.
   - Calibrate heuristic signal weight vectors against empirical creator datasets across gaming, podcast, and tutorial genres.
   - Dynamic context expansion (pre-roll setup and post-roll resolution).
 - **Acceptance Tests:**
   - PRO pipeline produces word-level timestamps, virality score, and 3 platform-optimized hooks for flagged candidate.
   - Upgrading an existing LITE clip produces an immutable new `EditVersion` snapshot with word-level subtitles while retaining user trim offsets.
-- **Definition of Done:** Creators can freely use LITE highlights or upgrade individual clips to PRO with transparent evidence.
+  - Applying a 30s reference video produces an updated `EditTimelinePlan` matching reference ASL and subtitle styling in HTML5 canvas preview.
+- **Definition of Done:** Creators can freely combine AUTO highlights, REFERENCE style transfer, PROMPT refinements, and MANUAL trims within one unified studio timeline.
 
 ---
 
