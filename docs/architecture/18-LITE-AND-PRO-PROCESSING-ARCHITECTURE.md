@@ -335,31 +335,35 @@ stateDiagram-v2
 
 ---
 
-## 8. Cloud Unit Economics & Cost Drivers
+## 8. Cloud Unit Economics & Target Cost Drivers (Hypotheses)
 
-### 8.1 Detailed Cost Breakdown per Component
+> [!NOTE]
+> **Engineering Cost Hypotheses & Benchmark Targets:** The cost models, inference latencies (e.g. ~3.2s for 45s audio), and transcode durations below represent **theoretical engineering hypotheses and design benchmarks** based on cloud provider pricing. **Retail subscription pricing, free-tier limits, and packaging remain undecided** and will be calibrated during Milestone 4/5 beta testing.
 
-| Component | Cost Driver | LITE Mode Cost per Clip | PRO Mode Cost per Clip | Optimization / Mitigation |
+### 8.1 Benchmark Cost Breakdown per Component (Target Hypothesis)
+
+| Component | Cost Driver | LITE Mode Target Benchmark | PRO Mode Target Benchmark | Optimization / Mitigation |
 | :--- | :--- | :--- | :--- | :--- |
 | **Ingress Bandwidth** | MediaMTX RTMP/SRT stream ingest | $0.005 (AWS/Cloudflare free ingress) | $0.005 | Cloudflare R2 / Render zero-cost ingress |
 | **Rolling Buffer** | 30m ephemeral chunk storage (S3/R2) | $0.002 (30-min TTL lifecycle rule) | $0.004 (Higher bitrate / 1080p) | Auto-deleted via S3 lifecycle after 2 hours |
 | **Signal Ingest** | WebSockets/IRC chat connection | $0.0001 (Multiplexed connections) | $0.0001 | Single process monitors 500+ chats via asyncio/Node |
 | **Highlight Engine** | EWMA velocity & silence calculation | $0.0005 (CPU memory arithmetic) | $0.0005 | Performed in-memory during ingest |
-| **GPU Inference** | Faster-Whisper transcription | **$0.0000 (Not used in LITE)** | **$0.0450 (Modal A10G @ $0.00028/sec)** | 45-second segment transcribed in ~3.2 seconds |
+| **GPU Inference** | Faster-Whisper transcription | **$0.0000 (Not used in LITE)** | **$0.0450 (Modal A10G @ $0.00028/sec)** | 45-second segment transcribed in ~3.2s benchmark |
 | **LLM Inference** | Claude 3.5 Haiku / Gemini 1.5 Flash | **$0.0000 (Not used in LITE)** | **$0.0150 (Tokens for transcript & hooks)** | Structured output caching & compact prompt |
-| **CPU Transcode** | FFmpeg vertical crop + static captions | $0.0180 (Render CPU worker: 35s transcode) | $0.0350 (1080p60 + multi-layer transcode) | FFmpeg `-threads 2 -preset veryfast` |
+| **CPU Transcode** | FFmpeg vertical crop + static captions | $0.0180 (Render CPU worker: ~35s transcode) | $0.0350 (1080p60 + multi-layer transcode) | FFmpeg `-threads 2 -preset veryfast` |
 | **Egress Bandwidth** | User download of final MP4 | $0.0040 (Cloudflare R2 zero-egress CDN) | $0.0080 | R2 storage eliminates S3 egress penalty |
 | **Storage Lease** | 7-day retention of exported MP4 | $0.0010 (50MB MP4) | $0.0020 (150MB MP4) | Lease expiration deletes raw assets after 7 days |
-| **Total Cost / Clip**| **Fully loaded cloud unit cost** | **~$0.0306 per clip** | **~$0.1146 per clip** | **~3.7x cost efficiency for LITE** |
+| **Total Benchmark Cost**| **Fully loaded target unit cost** | **~$0.03 per clip (Target)** | **~$0.11 per clip (Target)** | **~3.7x cost efficiency for LITE** |
 
 ### 8.2 Working Hypotheses for Free / LITE Tier Quotas
 To ensure economic sustainability without runaway cloud bills, the following initial free-tier caps are established as operational hypotheses:
+- **Mandatory Safety Precondition:** Durable quota enforcement and server-side entitlement validation (`SAAS-009`, `AUTH-005`) are deployed in Milestone 1 *prior* to opening any public free cloud processing.
 - **Monthly Video Capture Limit:** 2 hours total streaming / video upload per calendar month.
 - **Chat Monitoring Allowance:** 20 hours total chat monitoring per month.
 - **Highlight Generation:** Unlimited LITE candidate detection.
 - **Monthly Rendered Exports:** 5 watermarked 720p clips per month.
 - **Storage Lease:** Exported clips retained for 72 hours (with email reminder prior to reclamation).
-- **Economic Safety Factor:** Maximum cloud cost exposure per active free user = `~$0.25/month`.
+- **Economic Safety Factor:** Maximum cloud cost exposure per active free user = `~$0.25/month` (target hypothesis).
 
 ---
 
@@ -371,17 +375,19 @@ Because livestream and video editing involves private assets, stream keys, and u
 2. **Stream Key Obfuscation:** Ingest stream keys (`rtmp://ingest.autoedit.com/live/{streamKey}`) are cryptographically random 256-bit tokens hashed via SHA-256 in the database.
 3. **Ephemeral Pre-Signed URLs:** S3/R2 download URLs for preview chunks and exported MP4s have a maximum expiration of 15 minutes and require valid session cookies.
 
-### 9.2 Platform API & Terms of Service Boundaries
-AutoAI Edit maintains strict adherence to third-party developer policies:
-1. **Twitch API & IRC Guidelines:**
-   - Chat monitoring utilizes sanctioned IRC/EventSub protocols under creator authorization.
-   - Stream video is captured only when the broadcaster connects their own channel via Twitch OAuth or streams directly via OBS.
-   - **Critical Boundary:** The system never promises or displays rendered video clips if only chat events exist without authorized video ingress. If video capture is disabled or forbidden, the UI explicitly renders a "Chat Activity Timeline" without fabricating video cuts.
-2. **Kick Platform Boundaries:**
-   - Adheres to public Pusher WebSocket connection guidelines.
-   - Does not attempt to bypass Cloudflare Turnstile or scrape restricted internal endpoints.
-3. **YouTube Data API & Terms:**
+### 9.2 Platform API & Terms of Service Boundaries (Link-First vs. Identity)
+AutoAI Edit maintains strict adherence to third-party developer policies across all platforms (see [`ARCH-006: 6-Facet Boundary Analysis`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/06-LIVESTREAM-INGESTION-ARCHITECTURE.md)):
+1. **Link-First Access Decoupled from Identity:** Users can paste public livestream or video URLs (Twitch, YouTube, Kick) or upload files without connecting personal platform accounts. Account OAuth is requested only where a specific platform operation requires it.
+2. **Twitch API & IRC Guidelines:**
+   - Public chat monitoring utilizes open IRC WebSocket protocols (`irc.chat.twitch.tv:6667`).
+   - Broadcaster EventSub and clip creation require explicit OAuth tokens.
+   - **Critical Boundary:** The system never promises or displays rendered video clips if only chat events exist without authorized video ingress (via OBS or user upload). If video capture is disabled or forbidden, the UI explicitly renders a "Chat Activity Timeline" without fabricating video cuts.
+3. **Kick Platform Boundaries:**
+   - Connects to public Pusher WebSocket streams for chat spike analysis without login.
+   - Does not attempt to bypass Cloudflare Turnstile or scrape restricted internal endpoints. Full video rendering requires direct OBS broadcast or user file upload.
+4. **YouTube Data API & Terms:**
    - Adheres strictly to YouTube quota limits.
+   - Does not attempt automated raw video file downloads (which violates YouTube ToS Section 5.B). Video rendering requires direct OBS feed or user video upload.
    - Respects all content takedown and deletion notifications via webhook within 24 hours.
 
 ---

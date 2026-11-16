@@ -13,7 +13,14 @@
 
 **AutoAI Edit** is an enterprise-grade, cloud-native content automation platform that transforms raw video content—both pre-recorded long-form videos (podcasts, tutorials, interviews) and live interactive broadcasts (Twitch, YouTube, Kick, direct OBS streams)—into high-engagement, publishable short-form video assets (YouTube Shorts, Instagram Reels, TikTok, LinkedIn clips).
 
-The central design breakthrough of AutoAI Edit is **a unified media and event processing paradigm**: live broadcasts and pre-recorded uploads share the exact same underlying timeline representation, editing primitives, caption generators, AI ranking models, and cloud rendering pipelines. Whether a creator streams for 4 hours via OBS or uploads a 1-hour 4K MP4 file, the system converts incoming media into time-synchronized evidence streams (transcripts, audio excitement, chat activity, visual scene changes) and presents the creator with a non-destructive, explainable editorial timeline that can be previewed instantly and rendered across multiple aspect ratios on demand.
+The central design breakthrough of AutoAI Edit is **a unified media and event processing paradigm**: live broadcasts, public video links, and pre-recorded uploads share the exact same underlying timeline representation, editing primitives, caption generators, AI ranking models, and cloud rendering pipelines.
+
+AutoAI Edit is built as **one unified application** for independent clippers, esports enthusiasts, streamers, digital creators, and ordinary users:
+- **Link-First Access & Video Uploads:** Any user can paste a supported public livestream/video link (Twitch, YouTube, Kick) or upload their own MP4/MOV file.
+- **Identity Decoupled from Media Access:** Platform OAuth accounts are **never mandatory for ordinary editing**. Authorization is requested only when a specific action strictly requires it (such as personal OBS stream keys, private VOD access, or direct social API publishing).
+- **Four Composable Editing Paradigms:** Users can combine **AUTO EDIT** (algorithmic highlight sieve), **PROMPT EDIT** (natural-language directives), **REFERENCE EDIT** (content-aware style transfer), and **MANUAL EDIT** (pixel-level canvas trimming) within a single non-destructive creative studio.
+
+Whether a creator streams for 4 hours via OBS or uploads a 1-hour 4K MP4 file, the system converts incoming media into time-synchronized evidence streams (transcripts, audio excitement, chat activity, visual scene changes) and presents the creator with a non-destructive, explainable editorial timeline that can be previewed instantly and rendered across multiple aspect ratios on demand.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -105,6 +112,10 @@ The entire system architecture is anchored around three non-negotiable user expe
    - The platform provides a single Web Studio where creators can edit automatically via highlight/silence detection, describe edits through natural-language prompts, apply exemplar styles via reference video analysis, or tweak timeline cuts manually.
    - All four paradigms compile into a unified `EditTimelinePlan` with deterministic conflict resolution, preserving instant HTML5 canvas preview and non-destructive version history.
 
+8. **Safety Invariant — Quotas Ahead of Public Cloud Compute:**
+   - Durable server-side entitlement enforcement (`SAAS-009`) and strict project duration / concurrent pipeline limits (`AUTH-005`) are non-negotiable safety prerequisites that precede opening cloud workers to public Free-tier workloads.
+   - Cloud rendering and GPU inference pipelines fail closed if a user's quota is exhausted, preventing runaway infrastructure expenditure and ensuring sustainable unit economics.
+
 ---
 
 ## 4. Master Blueprint Directory Roadmap
@@ -127,7 +138,7 @@ The complete architecture specification is partitioned into 20 focused, cross-re
 | **ARCH-012** | [`12-IMPLEMENTATION-ROADMAP.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/12-IMPLEMENTATION-ROADMAP.md) | Phased delivery schedule (Milestones 0 through 6) with definitions of done and rollback plans. |
 | **ARCH-013** | [`13-ARCHITECTURE-DECISIONS-AND-OPEN-QUESTIONS.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/13-ARCHITECTURE-DECISIONS-AND-OPEN-QUESTIONS.md) | Architectural Decision Records (ADRs 001–008) and product questions requiring user input. |
 | **ARCH-014** | [`14-VERIFICATION-MATRIX.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/14-VERIFICATION-MATRIX.md) | End-to-end traceability matrix linking features, data models, APIs, screens, and tests. |
-| **ARCH-015** | [`15-BLUEPRINT-REVIEW-AND-APPROVAL.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/15-BLUEPRINT-REVIEW-AND-APPROVAL.md) | Formal architecture sign-off, feature inventory reconciliation (94 features), and stage transition gates. |
+| **ARCH-015** | [`15-BLUEPRINT-REVIEW-AND-APPROVAL.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/15-BLUEPRINT-REVIEW-AND-APPROVAL.md) | Formal architecture sign-off, feature inventory reconciliation (105 features), and stage transition gates. |
 | **ARCH-016** | [`16-SHARED-CONTRACTS-IMPLEMENTATION.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/16-SHARED-CONTRACTS-IMPLEMENTATION.md) | Reusable domain contracts package (`@autoedit/contracts`) specification and runtime validation. |
 | **ARCH-017** | [`17-COMPETITIVE-ANALYSIS-AND-RESEARCH-REGISTER.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/17-COMPETITIVE-ANALYSIS-AND-RESEARCH-REGISTER.md) | Competitive benchmark (Stakeout Clips, StreamLadder, Opus Clip) and cloud-first positioning. |
 | **ARCH-018** | [`18-LITE-AND-PRO-PROCESSING-ARCHITECTURE.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/18-LITE-AND-PRO-PROCESSING-ARCHITECTURE.md) | Dual-tier processing specification (LITE deterministic vs PRO multimodal AI), quotas, and upgrade refinement. |

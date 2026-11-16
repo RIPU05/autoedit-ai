@@ -7,9 +7,18 @@
 
 ---
 
-## 1. Dependency Graph & Critical Path
+## 1. Product Vision & Dependency Graph
 
-The AutoAI Edit engineering roadmap is sequenced to maximize code reuse, preserve existing working functionality, and eliminate premature infrastructure spending:
+### 1.1 Core Product Vision
+**AutoAI Edit is one unified web application** serving independent clippers, streamers, video podcasters, digital content creators, and ordinary users.
+
+- **Link-First & Upload Access:** Any user can paste a supported public livestream/video URL (Twitch, YouTube, Kick) or upload their own video file (MP4/MOV).
+- **No Mandatory Platform Lock-In:** Platform account connections (OAuth) are **never mandatory for ordinary editing**. Authorization is requested only where a particular platform action strictly requires it (e.g. personal OBS stream key generation, private VOD access, or direct social media API publishing).
+- **Four Composable Editing Paradigms:** Creators can edit automatically via highlight/silence detection (**AUTO EDIT**), instruct changes in natural language (**PROMPT EDIT**), transfer exemplar pacing and aesthetics (**REFERENCE EDIT**), or adjust timeline blocks directly (**MANUAL EDIT**). All four compile into a single non-destructive `EditTimelinePlan`.
+
+### 1.2 Engineering Dependency Graph & Safety Invariant
+> [!IMPORTANT]
+> **Safety Invariant (Quotas Ahead of Public Cloud Compute):** To eliminate the risk of runaway cloud bills or malicious API abuse, **server-side entitlement enforcement, durable quota accounting, and hard spend limits (`SAAS-009`, `AUTH-005`) are deployed in Milestone 1**, strictly *ahead* of enabling public free-tier cloud processing or high-throughput live ingest.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
@@ -17,30 +26,36 @@ The AutoAI Edit engineering roadmap is sequenced to maximize code reuse, preserv
 └────────────────────────────────────────────────────────────────────────────────────────┘
 
   [MILESTONE 0: FOUNDATIONS & CONTRACTS]
-  ├── Shared TypeScript Contracts & Schemas
-  └── Prisma Schema Extensions (Non-destructive)
+  ├── Milestone 0A: Shared Contracts Package (@autoedit/contracts)
+  ├── Milestone 0B: Non-Destructive Database Schema Evolution
+  └── Milestone 0C: Reference Style Contracts (Proposed in ARCH-019)
          │
          ▼
-  [MILESTONE 1: CLOUD WORKER & GPU DEPLOYMENT] ◄── [PREREQUISITE: STAGE 2 APPROVAL]
-  ├── Modal Serverless Faster-Whisper GPU
-  └── Render Background Worker (Headless Docker)
+  [MILESTONE 1: CLOUD WORKER FOUNDATION & QUOTA ENFORCEMENT GATE] ◄── [PREREQUISITE]
+  ├── Server-Side Entitlement & Usage Reservation Engine (SAAS-009, AUTH-005)
+  ├── Modal Serverless Faster-Whisper GPU (Target Benchmark: A10G Scale-to-Zero)
+  └── Render Background Worker (Headless Docker with Hard Spend Limits)
          │
          ├────────────────────────────────────────┐
          ▼                                        ▼
-  [MILESTONE 2: CAPTION & AUDIO POLISH]    [MILESTONE 3: LIVE STREAM INGEST (OBS)]
-  ├── ASS Animated Karaoke Subtitles       ├── MediaMTX RTMP/SRT Gateway
-  └── EBU R128 Loudness Normalization      └── 6-Second Rolling Chunk Buffer
+  [MILESTONE 2: CAPTION & AUDIO POLISH]    [MILESTONE 3: LINK-FIRST INGEST & LITE ENGINE]
+  ├── ASS Animated Karaoke Subtitles       ├── MediaMTX RTMP/SRT Gateway (OBS)
+  └── EBU R128 Loudness Normalization      ├── Link-First Public Chat Monitor (Twitch/Kick)
+         │                                 └── Deterministic LITE Sieve (EWMA Chat & Peaks)
          │                                        │
-         ▼                                        ▼
-  [MILESTONE 4: MULTIMODAL HIGHLIGHT ENGINE & CHAT SPIKE DETECTOR]
-  ├── Twitch / YouTube Live Chat Listeners
-  └── Unified Highlight Candidate Ranking
+         └───────────────────┬────────────────────┘
+                             │
+                             ▼
+  [MILESTONE 4: PRO MULTIMODAL AI & CONTENT-AWARE REFERENCE EDITING]
+  ├── Faster-Whisper GPU Audio Slices & Claude/Gemini Virality Scoring (0-100)
+  ├── 1-Click Lite-to-Pro Non-Destructive Upgrade Refinement (EDIT-013)
+  └── Content-Aware Reference Style Transfer Engine (REF-001..REF-008)
          │
          ├────────────────────────────────────────┐
          ▼                                        ▼
-  [MILESTONE 5: SAAS BILLING & QUOTAS]     [MILESTONE 6: SOCIAL PUBLISHING AUTOMATION]
-  ├── Stripe Tiered Subscription Plans     ├── YouTube Shorts & TikTok APIs
-  └── Video Minute Usage Metering          └── n8n Multi-Channel Automation
+  [MILESTONE 5: COMMERCIAL SAAS & BILLING] [MILESTONE 6: SOCIAL PUBLISHING AUTOMATION]
+  ├── Stripe Billing (Pricing TBD Post-Beta)├── YouTube Shorts & TikTok APIs
+  └── Automated Customer Invoice History   └── n8n Multi-Channel Automation Webhooks
 ```
 
 ---
@@ -60,18 +75,21 @@ The AutoAI Edit engineering roadmap is sequenced to maximize code reuse, preserv
 
 ---
 
-## 3. Milestone 1: Cloud Worker & Serverless Whisper Production Deployment
+## 3. Milestone 1: Cloud Worker Foundation & Critical Quota Enforcement Gate
 
-- **Objective:** Achieve complete cloud independence, allowing users to upload and process videos entirely on cloud infrastructure without requiring the developer's workstation.
+- **Objective:** Deploy cloud worker compute and serverless Faster-Whisper with **mandatory server-side entitlement gates and durable quota accounting (`SAAS-009`, `AUTH-005`)** in place *before* any public free-tier cloud processing can run.
 - **Prerequisite:** Explicit user authorization of the Stage 2 Staging Deployment Approval Gate.
 - **Scope of Changes:**
-  - Deploy `services/whisper/modal_app.py` to Modal Labs under service name `autoedit-whisper`.
-  - Deploy `apps/api/Dockerfile.worker` to Render as a dedicated background worker with `BULL_PREFIX=staging`.
+  - Implement server-side Entitlement Manager and Redis-backed two-phase reservation pattern (`UsageReservation` via `SAAS-009`) preventing double-charging on worker failure.
+  - Implement project count and duration quota gates (`AUTH-005`) blocking unauthorized compute dispatch.
+  - Deploy `services/whisper/modal_app.py` to Modal Labs under service name `autoedit-whisper` (NVIDIA T4 / A10G scale-to-zero).
+  - Deploy `apps/api/Dockerfile.worker` to Render as a dedicated background worker with `BULL_PREFIX=staging` and hard spend limits.
   - Configure production environment variables (`WHISPER_URL`, `WHISPER_SECRET`, `REDIS_URL`, `AWS_ACCESS_KEY_ID`).
-  - Execute end-to-end cloud staging test with an authorized 15-second test video while developer PC worker processes are stopped.
+  - Execute end-to-end cloud staging test with an authorized test video while developer PC worker processes are stopped.
 - **Acceptance Tests:**
+  - Quota Gate rejects jobs exceeding tenant allocation before enqueuing to BullMQ.
   - Upload -> BullMQ -> Render Worker -> Modal GPU Whisper -> Claude AI -> FFmpeg Render completes end-to-end in cloud.
-  - Local worker terminal shows 0 processed jobs.
+  - Local developer worker terminal shows 0 processed jobs.
 - **Rollback Approach:** Suspend Render background worker with one click; un-deploy Modal service; clear `BULL_PREFIX`.
 
 ---
@@ -84,65 +102,65 @@ The AutoAI Edit engineering roadmap is sequenced to maximize code reuse, preserv
   - Integrate EBU R128 loudness filter (`loudnorm=I=-14:TP=-1.5:LRA=7`) into FFmpeg rendering pipeline (`PROD-006`).
   - Add automated voice ducking (`sidechaincompress`) for background music tracks.
 - **Acceptance Tests:**
-  - Rendered MP4 exhibits true-peak $\le -1.5\text{ dBTP}$ and integrated loudness within $\pm 0.5\text{ LUFS}$ of $-14\text{ LUFS}$.
+  - Rendered MP4 exhibits true-peak $\le -1.5\text{ dBTP}$ and integrated loudness within $\pm 0.5\text{ LUFS}$ of $-14\text{ LUFS}$ (benchmark target).
   - Subtitle words animate in sync with Faster-Whisper word timestamps.
 - **Definition of Done:** Subtitle styles preview accurately in `VideoPreview.tsx` and burn into exported MP4.
 
 ---
 
-## 5. Milestone 3: Real-Time Livestream Ingest & LITE Clipping Engine
+## 5. Milestone 3: Link-First Livestream Ingest & LITE Clipping Engine
 
-- **Objective:** Enable creators to stream directly from OBS or connect Twitch/Kick channels, capturing footage with rolling buffer segmentation and zero-LLM LITE highlight detection.
+- **Objective:** Enable clippers and creators to paste public stream URLs or stream directly from OBS, capturing footage with rolling buffer segmentation and zero-LLM LITE highlight detection under strict quota allowances.
 - **Scope of Changes:**
-  - Provision lightweight MediaMTX gateway on dedicated edge instance (`LIVE-002`, `LIVE-003`).
+  - Implement **Link-First Access**: users can paste public Twitch/YouTube/Kick URLs without connecting a platform account.
+  - Provision lightweight MediaMTX gateway on dedicated edge instance for direct OBS streaming (`LIVE-002`, `LIVE-003`).
   - Implement stream key generation and SHA-256 webhook authentication (`POST /api/live/auth/stream-key`).
   - Configure MediaMTX to slice incoming streams into 6-second MPEG-TS chunks and sync to S3 (`LIVE-005`).
   - Implement rolling buffer cleanup cron purging unpinned chunks older than 30 minutes (configurable pilot buffer), preserving chunks with active reference-counted pin leases (`SegmentPinReference`).
-  - Implement Cloud Chat Monitor for Twitch IRC and Kick Pusher WebSockets (`LIVE-006`).
+  - Implement Cloud Chat Monitor for public Twitch IRC and Kick Pusher WebSockets (`LIVE-006`).
   - Author the **LITE Detection Engine** (`LIVE-015`): sliding EWMA chat velocity, emote surge scoring (`KEKW`, `POG`), and FFmpeg `silencedetect` audio peaks generating highlight candidates at $0.00 AI inference cost.
 - **Acceptance Tests:**
+  - Public livestream URL loads chat spike timeline without requiring user platform login.
   - OBS connects to `rtmps://ingest.autoedit.ai/live` using valid stream key and streams for 30 minutes without dropped frames.
-  - Simulated chat surge (+400% msgs/sec) flags LITE candidate highlight within 2 seconds of occurrence at zero AI cost.
+  - Simulated chat surge (+400% msgs/sec) flags LITE candidate highlight within target 2 seconds of occurrence at zero AI cost.
   - Chunks stream into S3; unpinned chunks auto-delete after window expires.
 - **Definition of Done:** Stream sessions and LITE highlights appear in real time on the dashboard and web studio.
 
 ---
 
-## 6. Milestone 4: PRO Multimodal AI Engine, Upgrade Refinement & Reference Editing
+## 6. Milestone 4: PRO Multimodal AI Engine, Upgrade Refinement & Content-Aware Reference Editing
 
-- **Objective:** Augment LITE candidate clusters with Faster-Whisper GPU transcription, Claude/Gemini semantic reasoning, 1-click in-studio upgrade refinement, and reference-conditioned style transfer.
+- **Objective:** Augment LITE candidate clusters with Faster-Whisper GPU transcription, Claude/Gemini semantic reasoning, 1-click in-studio upgrade refinement, and content-aware reference style transfer.
 - **Scope of Changes:**
   - Connect Modal Faster-Whisper serverless GPU to transcribe prioritized highlight candidate audio windows.
   - Author Multi-Agent LLM reasoning pipeline (Director, Hook, Social Copy agents) delivering 0–100 virality scores and explainable editorial strategies.
   - Implement **Lite-to-Pro Upgrade Refinement** (`EDIT-013`): in-studio 1-click upgrade that extracts segment audio, runs GPU/LLM analysis, and non-destructively attaches word-level transcripts and hooks without altering manual trims.
-  - Implement **Reference-Based AI Editing Engine** (`REF-001` through `REF-008`):
+  - Implement **Content-Aware Reference-Based AI Editing Engine** (`REF-001` through `REF-008`):
     - Stage A: FFmpeg cut pacing (ASL), keyframe OCR subtitle typography, and Sha-256 Redis profile cache.
-    - Stage B: Style-to-timeline operation mapper, prompt override interpreter, and 4-tier conflict resolution engine.
+    - Stage B: Content-Aware mapping engine that snaps cut intervals to speech pauses ($\pm 0.35\text{s}$ tolerance), aligns punch zooms with acoustic volume surges, and maps reference hook structure onto source video narrative arcs.
+    - 4-Tier Conflict Resolution: Manual Pinned Edits > Prompt Overrides > Reference Profile > Auto Baseline.
     - Studio UI: Style match report drawer, attribute toggles, and instant HTML5 canvas preview.
   - Calibrate heuristic signal weight vectors against empirical creator datasets across gaming, podcast, and tutorial genres.
   - Dynamic context expansion (pre-roll setup and post-roll resolution).
 - **Acceptance Tests:**
   - PRO pipeline produces word-level timestamps, virality score, and 3 platform-optimized hooks for flagged candidate.
   - Upgrading an existing LITE clip produces an immutable new `EditVersion` snapshot with word-level subtitles while retaining user trim offsets.
-  - Applying a 30s reference video produces an updated `EditTimelinePlan` matching reference ASL and subtitle styling in HTML5 canvas preview.
+  - Applying a 30s reference video adapts to source speech boundaries without cutting words mid-phoneme.
 - **Definition of Done:** Creators can freely combine AUTO highlights, REFERENCE style transfer, PROMPT refinements, and MANUAL trims within one unified studio timeline.
 
 ---
 
-## 7. Milestone 5: SaaS Monetization, Configuration-Driven Entitlements & Quotas
+## 7. Milestone 5: Commercial SaaS Monetization & Stripe Billing
 
-- **Objective:** Transform AutoAI Edit into a commercially viable SaaS product with automated billing and zero-trust quota enforcement.
+- **Objective:** Transform AutoAI Edit into a commercially viable SaaS product with automated billing and self-serve tier upgrades.
 - **Scope of Changes:**
-  - Implement configuration-driven Entitlement Manager and server-side policy enforcement (`SAAS-009`).
-  - Implement two-phase idempotent quota reservation pattern (`UsageReservation`) in Redis with automatic rollback on worker failure to prevent double-charging.
-  - Establish independent allowances: generous chat monitoring hours vs strictly bounded video capture hours and export limits.
-  - Integrate Stripe Billing (Free/LITE, Creator PRO $29/mo, Streamer PRO $79/mo).
+  - Integrate Stripe Billing (Free/LITE, Creator PRO, Streamer PRO — retail prices TBD post-beta telemetry).
+  - Connect Stripe webhooks for subscription creation, upgrades, cancellations, and payment failures.
   - Add user billing portal and invoice history in `/settings`.
 - **Acceptance Tests:**
-  - Server rejects unauthorized PRO execution requests from LITE tenants with HTTP 403.
-  - Worker crash during transcode releases reservation TTL without deducting tenant export quota.
   - Stripe webhook creates and updates subscription records reliably.
-- **Definition of Done:** End-to-end checkout, upgrade, and quota enforcement verified via Stripe test mode with zero double-charge risk.
+  - Plan upgrade immediately refreshes tenant entitlements in Redis and expands monthly export limits.
+- **Definition of Done:** End-to-end checkout, upgrade, and invoice management verified via Stripe test mode with zero double-charge risk.
 
 ---
 

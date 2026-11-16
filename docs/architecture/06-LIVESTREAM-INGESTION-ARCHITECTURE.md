@@ -51,28 +51,37 @@ To support content creators across diverse streaming workflows, AutoAI Edit defi
 
 ---
 
-## 2. Path A: Connected Platforms (Twitch, Kick, YouTube)
+## 2. Link-First Media Access Framework (Decoupled from User Identity)
 
-### Reality Check & API Boundary Analysis
-A common misconception in video SaaS development is assuming that authenticating via platform OAuth grants unrestricted direct access to raw livestream MP4 files. Platform capabilities must be strictly evaluated against documented terms and APIs:
+### 2.1 Product Paradigm: Media Access Independent of Account Ownership
+AutoAI Edit is designed as **one unified application** for independent clippers, esports enthusiasts, gaming creators, stream moderators, and everyday video editors. 
 
-| Platform | OAuth & Identity | Live Stream Status | Real-Time Chat Ingestion | Completed VOD Metadata | Raw Video Download Permitted? |
-|---|---|---|---|---|---|
-| **Twitch** | **Fully Supported** (OAuth2 `user:read:email`, `channel:read:subscriptions`) | **Supported** via EventSub (`stream.online`, `stream.offline`) | **Supported** via Twitch IRC WebSocket / EventSub (`channel.chat.message`) | **Supported** via `Get Videos` API (Title, duration, thumbnail) | **RESTRICTED / NO DIRECT API.** Twitch does not provide a direct MP4 download endpoint. Downloading subscriber-only or arbitrary VODs without creator partner scopes violates ToS unless using authorized creator exports. |
-| **YouTube** | **Fully Supported** (Google OAuth2 `youtube.readonly`, `youtube.force-ssl`) | **Supported** via YouTube Data API v3 (`liveBroadcasts.list`) | **Supported** via `liveChatMessages.list` (Subject to strict 10,000 unit/day quota) | **Supported** via `videos.list` | **RESTRICTED.** YouTube does not provide raw MP4 video streams via API. Media must be ingested directly from OBS or uploaded by the creator. |
-| **Kick** | **Partially Documented** (Public developer portal in beta) | **Supported** via public channel polling | **Supported** via Pusher WebSocket listener (`chatrooms.{id}.v2`) | **Supported** via public channel recordings API | **UNOFFICIAL / FRAGILE.** Direct HLS stream extraction exists on Kick CDNs, but has no guaranteed long-term API contract. |
+A central architectural mandate is that **platform account connection (OAuth) is NOT mandatory for ordinary use**:
+- Any user can paste a supported public livestream or video URL (Twitch, YouTube, Kick) or upload their own MP4/MOV file.
+- The user is **never** required to prove ownership of the broadcasted channel simply to analyze chat spikes, inspect public telemetry, or draft edits.
+- Platform OAuth authentication is requested **only where a specific action strictly requires it** (e.g., streaming to AutoAI Edit via personal OBS stream key, accessing private subscriber-only VODs, managing brand channel assets, or dispatching direct social media uploads).
 
-### Architectural Directive for Ingestion Pathways:
-1. **Both Pathways are First-MVP Requirements:** Creators require both direct live broadcasting and platform integrations. To deliver maximum reliability, the implementation is phased:
-   - **Phase 1 Priority:** Path B (Direct OBS Ingest via MediaMTX) is implemented first to establish end-to-end streaming control, zero-latency chunking, and deterministic timestamp alignment.
-   - **Phase 2 Follow-up:** Path A (Twitch/YouTube/Kick Platform Connectors) connects to ingest live chat velocity, stream status, and metadata, pairing with OBS video.
-2. **Chat & Telemetry Pairing:** For video footage, creators on Twitch/YouTube/Kick either:
-   - Stream simultaneously to AutoAI Edit via OBS multi-streaming (Path B).
-   - Or upload the completed stream recording directly to AutoAI Edit once the broadcast concludes.
+### 2.2 Granular Platform Access Matrix (6-Facet Boundary Analysis)
+To prevent legal exposure, rate-limit bans, and architectural failure, the system strictly separates media capabilities into six distinct facets across each platform:
+
+| Platform | 1. Public Metadata | 2. Public Chat Access | 3. Platform-Native Clip Creation | 4. Authorized Source Media Retrieval | 5. Standalone MP4 Rendering | 6. Required Rights & Permissions |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Twitch** | **Public & Open:** Channel status, stream title, game category, viewer count, and VOD metadata via Helix/GQL without user auth. | **Public & Open:** Real-time chat messages via Twitch IRC WebSocket (`irc.chat.twitch.tv:6667`) on public channels without broadcaster auth. | **OAuth Required:** Twitch Clip API (`POST /clips`) requires authorized user token with `clips:edit` scope, or manual web clip creation. | **Restricted / No Direct API:** Twitch does not provide a raw MP4 download API. Subscriber VODs require creator OAuth. Never assume public stream is freely downloadable. | **Conditional:** Only rendered if video chunks were ingested via OBS (Path B) or uploaded as authorized MP4/MOV by creator/clipper. | Broadcaster owns broadcast copyright. Clippers must comply with Twitch ToS and creator fair use permissions. |
+| **YouTube** | **Public & Open:** Video title, description, tags, duration, and channel metadata via YouTube Data API v3 (`videos.list`). | **Restricted Quota:** `liveChatMessages.list` available via API key, but heavily constrained by 10,000 units/day default project quota. | **Web Only:** YouTube native clips are web-only shareable bookmarks; no direct raw media export via API. | **Strictly Forbidden via API:** YouTube Data API does NOT permit raw video file downloads. Downloading third-party videos violates YouTube ToS Section 5.B. | **Conditional:** Rendered only if video was ingested via direct OBS stream (Path B) or uploaded as local MP4/MOV by the user. | Video uploader retains copyright. Re-use requires creator licensing or Creative Commons attribution. |
+| **Kick** | **Public & Open:** Public channel status, stream title, category, and viewer metrics via Kick public endpoints. | **Public & Open:** Real-time chat via Pusher WebSocket (`chatrooms.{id}.v2`) with zero account login. | **Web Only:** Kick native clips created via browser interface; no official third-party clip API. | **Unofficial / Fragile:** Public HLS manifests exist on Kick CDNs, but are unauthenticated, volatile, and gated by Cloudflare Turnstile bot challenges. | **Conditional:** Rendered only if video was ingested via OBS or uploaded by user as MP4/MOV. | Streamer owns broadcast copyright. Commercial clipping requires broadcaster approval. |
+| **Direct OBS / Uploads (Native Path)** | **Native & Complete:** Exact framerate, resolution, audio channels, and bitrate extracted directly via FFprobe. | **Optional / Paired:** Chat stream can be linked from any public channel URL (Twitch/Kick) or uploaded as a chat JSON/CSV log. | **Native:** Instant candidate clips extracted with millisecond PTS accuracy directly from rolling chunk buffer. | **100% Authorized & Direct:** Full-quality source media streamed directly to cloud MediaMTX or uploaded to S3. | **100% Unrestricted:** Cloud FFmpeg renders high-fidelity 720p/1080p/4K MP4 exports on demand with zero platform gates. | User possesses full ownership and rights over their own direct broadcast or uploaded source files. |
+
+> [!IMPORTANT]
+> **The Golden Rule of Media Ingestion:**
+> **Never assume a playable public URL is automatically downloadable or redistributable.** If a creator or clipper connects a public channel URL for chat activity analysis but does not provide an authorized video stream (via OBS ingest or file upload), AutoAI Edit generates an interactive **Chat Activity & Spike Timeline**, but **will never promise, fabricate, or attempt unauthorized scraping of raw video files**.
 
 ---
 
-## 3. Path B: Direct Live Broadcast (OBS, RTMP/RTMPS, SRT)
+## 3. Path A: Platform Connectors & Chat Telemetry
+
+---
+
+## 4. Path B: Direct Live Broadcast (OBS, RTMP/RTMPS, SRT)
 
 Direct live ingestion gives AutoAI Edit 100% control over video quality, timestamp precision, and zero-latency segment access.
 
@@ -103,7 +112,7 @@ To avoid storing hundreds of gigabytes of unedited dead air from a multi-hour st
 
 ---
 
-## 4. Disconnection & Reconnection Recovery
+## 5. Disconnection & Reconnection Recovery
 
 Streaming creators frequently encounter brief Wi-Fi hiccups or OBS crashes. AutoAI Edit implements a robust **Session Bridging Policy**:
 
@@ -125,7 +134,7 @@ Streaming creators frequently encounter brief Wi-Fi hiccups or OBS crashes. Auto
 
 ---
 
-## 5. Storage Economics & Ingestion Cost Projections
+## 6. Storage Economics & Ingestion Cost Projections
 
 *(Note: Storage figures are heuristic engineering projections based on 6.0 Mbps 1080p60 H.264 streams; empirical bandwidth and storage will be calibrated during Milestone 3 beta testing).*
 
