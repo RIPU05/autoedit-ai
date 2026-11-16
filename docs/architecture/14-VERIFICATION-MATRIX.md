@@ -98,8 +98,11 @@ The 94 product features cataloged in `02-COMPLETE-FEATURE-INVENTORY.md` map to t
 | **LIVE-002** | MediaMTX RTMP Ingest | `MediaSegment` | `rtmps://ingest.../live` | `SCR-017` (`/live`) | Stage 2 Prerequisite | **PLANNED ONLY** |
 | **LIVE-004** | Stream Key Auth | `LiveSession` | `POST /api/live/auth/stream-key`| `SCR-017` (`/live`) | Stage 2 Prerequisite | **PLANNED ONLY** |
 | **LIVE-005** | 6-Second Rolling Chunks | `MediaSegment` | S3 Ephemeral Buffer | Backend Pipeline | Stage 2 Prerequisite | **PLANNED ONLY** |
+| **LIVE-015** | LITE Chat Spike Engine | `HighlightCandidate` | EWMA Velocity / Emote Sieve | `SCR-018` (`/live/[id]`) | `packages/contracts/tests/contracts.test.ts` | **PARTIALLY VERIFIED IN CODE (CONTRACTS)** |
 | **VOD-004** | Chat Velocity Spike | `HighlightSignal` | Signal Processing Engine | `SCR-018` (`/live/[id]`) | Stage 2 Prerequisite | **PLANNED ONLY** |
+| **EDIT-013** | Lite-to-Pro Upgrade | `UpgradeRefinementRequest` | `POST /api/highlights/:id/refine` | `SCR-008` (Studio Drawer) | `packages/contracts/tests/contracts.test.ts` | **PARTIALLY VERIFIED IN CODE (CONTRACTS)** |
 | **SAAS-001** | Stripe Subscriptions | `Subscription` | Stripe Webhooks | `SCR-013` (`/settings`) | Stage 2 Prerequisite | **PLANNED ONLY** |
+| **SAAS-009** | Entitlements & Reservations | `UsageReservation` | Entitlement Middleware | Backend Core | `packages/contracts/tests/contracts.test.ts` | **PARTIALLY VERIFIED IN CODE (CONTRACTS)** |
 
 ---
 

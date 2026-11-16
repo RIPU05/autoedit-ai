@@ -11,33 +11,36 @@
 
 Video AI clipping systems that stream every minute of a 6-hour video directly through an LLM are economically non-viable: a 6-hour stream contains ~360 minutes of audio, costing $50+ in continuous token fees and saturating API rate limits.
 
-AutoAI Edit employs a **Tiered Multimodal Sieve**:
-1. **Tier 1 (Deterministic & Inexpensive Signals):** High-throughput mathematics detect candidate clusters based on chat velocity spikes, audio loudness peaks, and speech density without incurring LLM costs ($0.00 compute).
-2. **Tier 2 (Acoustic & Semantic Transcripts):** Faster-Whisper GPU runs only on audio streams, generating word-level timestamps and segment confidence.
-3. **Tier 3 (Multi-Agent LLM Reasoning):** Claude 3.5 Sonnet / Ollama evaluates only the top candidate clusters, extracting viral hooks, narrative context, and editorial reasoning.
+AutoAI Edit employs a **Tiered Multimodal Sieve** operating across two distinct processing modes (see [`ARCH-018: LITE & PRO Processing Architecture`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/18-LITE-AND-PRO-PROCESSING-ARCHITECTURE.md)):
+1. **Tier 1 (Deterministic & Inexpensive Signals — LITE Mode Engine):** High-throughput mathematics detect candidate clusters based on chat velocity spikes, emote density, audio loudness peaks, and silence boundaries without incurring LLM or GPU costs ($0.00 inference compute). This tier powers our generous Free/LITE tier at ~$0.03/clip.
+2. **Tier 2 (Acoustic & Semantic Transcripts — PRO Mode Augmentation):** Serverless Faster-Whisper GPU runs on prioritized candidate audio streams, generating word-level timestamps and segment confidence.
+3. **Tier 3 (Multi-Agent LLM Reasoning — PRO Mode Augmentation):** Claude 3.5 Sonnet / Gemini 1.5 Flash evaluates candidate clusters, extracting viral hooks, narrative context, and algorithmic virality scores. Tiers 2 & 3 power PRO Mode and on-demand Lite-to-Pro Upgrade Refinements at ~$0.13/clip.
 
 ```
 Raw Livestream / VOD (100% of duration)
   │
   ▼
-[TIER 1: DETERMINISTIC FILTERING] (Fast C++ / Math)
+[TIER 1: DETERMINISTIC FILTERING — LITE MODE ENGINE] (Fast C++ / Math / Zero-LLM)
   - Chat Velocity Spikes (Messages / sec > 3x moving avg)
+  - Emote Density Bursts (KEKW, POG, W, LUL)
   - Audio Loudness (EBU R128 momentary peaks > -12 LUFS)
   - Silence Boundaries (FFmpeg silencedetect)
   │
-  ▼ (Reduces search space to ~15% of total runtime)
-[TIER 2: ACOUSTIC & WORD TRANSCRIPTION] (Faster-Whisper GPU)
-  - Word Timestamps & Speech Pacing (WPM > 175)
-  - Emote Density & Keyword Clustering
+  ├──► [LITE HIGHLIGHT CANDIDATES] ──► Instant Web Studio Preview & Export ($0.03/clip)
   │
-  ▼ (Reduces search space to ~5% top candidate clusters)
-[TIER 3: MULTI-AGENT LLM REASONING] (Claude 3.5 Sonnet)
-  - Hook Extraction & Virality Scoring
-  - Narrative Arc Validation (Setup → Climax → Punchline)
-  - Explainable AI Synthesis (Editorial Strategy)
+  ▼ (PRO Mode or Upgrade Refinement: isolates top ~5% candidate clusters)
+[TIER 2: ACOUSTIC & WORD TRANSCRIPTION] (Modal Faster-Whisper GPU)
+  - Word Timestamps & Speech Pacing (WPM > 175)
+  - Word-level synchronization for animated karaoke captions
   │
   ▼
-Final Curated Highlights (1% of duration: 5–10 viral short-form clips)
+[TIER 3: MULTI-AGENT LLM REASONING] (Claude 3.5 Sonnet / Gemini 1.5)
+  - Hook Extraction & Virality Scoring (0-100)
+  - Narrative Arc Validation (Setup → Climax → Punchline)
+  - Explainable AI Synthesis (Editorial Strategy & Social Hooks)
+  │
+  ▼
+[PRO HIGHLIGHT CANDIDATES] ──► Instant Web Studio Preview, Smart Crop & Whitelabel Export ($0.13/clip)
 ```
 
 ---
