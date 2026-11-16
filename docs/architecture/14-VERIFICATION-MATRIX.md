@@ -103,6 +103,14 @@ The 94 product features cataloged in `02-COMPLETE-FEATURE-INVENTORY.md` map to t
 | **EDIT-013** | Lite-to-Pro Upgrade | `UpgradeRefinementRequest` | `POST /api/highlights/:id/refine` | `SCR-008` (Studio Drawer) | `packages/contracts/tests/contracts.test.ts` | **PARTIALLY VERIFIED IN CODE (CONTRACTS)** |
 | **SAAS-001** | Stripe Subscriptions | `Subscription` | Stripe Webhooks | `SCR-013` (`/settings`) | Stage 2 Prerequisite | **PLANNED ONLY** |
 | **SAAS-009** | Entitlements & Reservations | `UsageReservation` | Entitlement Middleware | Backend Core | `packages/contracts/tests/contracts.test.ts` | **PARTIALLY VERIFIED IN CODE (CONTRACTS)** |
+| **REF-001** | Reference Media Ingest | `ReferenceMediaAsset` | `POST /api/reference/upload` | `SCR-005` (Studio) | Proposed Schema | **PLANNED ONLY** |
+| **REF-002** | Shot Rhythm & Pacing | `ReferenceStyleProfile` | FFmpeg Scene Detector | `SCR-005` (Studio) | Proposed Schema | **PLANNED ONLY** |
+| **REF-003** | Subtitle Typography OCR | `ReferenceStyleFeature` | Keyframe OCR Engine | `SCR-005` (Studio) | Proposed Schema | **PLANNED ONLY** |
+| **REF-004** | Optical Zoom & Motion | `ReferenceStyleFeature` | Farneback Optical Flow | `SCR-005` (Studio) | Proposed Schema | **PLANNED ONLY** |
+| **REF-005** | Style Profile Hash Cache | `ReferenceStyleProfile` | Redis Sha-256 Cache | Backend Core | Proposed Schema | **PLANNED ONLY** |
+| **REF-006** | Selective Style Matching | `ReferenceStyleSelection` | Rules Precedence Matrix | `SCR-008` (Style Drawer) | Proposed Schema | **PLANNED ONLY** |
+| **REF-007** | Style-to-Timeline Mapper | `EditTimelinePlan` | Procedural Plan Synthesis | Backend Pipeline | Proposed Schema | **PLANNED ONLY** |
+| **REF-008** | Explainable Style Report | `StyleMatchReport` | `GET /api/reference/:id/report`| `SCR-008` (Style Drawer) | Proposed Schema | **PLANNED ONLY** |
 
 ---
 

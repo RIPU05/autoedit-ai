@@ -101,16 +101,20 @@ The entire system architecture is anchored around three non-negotiable user expe
    - Heuristic thresholds (chat velocity multipliers, audio loudness gates, clip duration clamping) serve as engineering baselines that will be empirically calibrated against ground-truth creator data in Milestone 4.
    - Subscription pricing, free-tier quotas, and retail packaging remain undecided pending measured unit economics and abuse controls in beta.
 
+7. **Unified Composable Editing Studio (AUTO, PROMPT, REFERENCE, MANUAL):**
+   - The platform provides a single Web Studio where creators can edit automatically via highlight/silence detection, describe edits through natural-language prompts, apply exemplar styles via reference video analysis, or tweak timeline cuts manually.
+   - All four paradigms compile into a unified `EditTimelinePlan` with deterministic conflict resolution, preserving instant HTML5 canvas preview and non-destructive version history.
+
 ---
 
 ## 4. Master Blueprint Directory Roadmap
 
-The complete architecture specification is partitioned into 19 focused, cross-referenced documents within `docs/architecture/`:
+The complete architecture specification is partitioned into 20 focused, cross-referenced documents within `docs/architecture/`:
 
 | Document ID | File Name | Focus & Scope |
 |---|---|---|
 | **ARCH-001** | [`01-EXISTING-SYSTEM-AUDIT.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/01-EXISTING-SYSTEM-AUDIT.md) | Exhaustive audit of existing code, branches, database models, and test matrices. |
-| **ARCH-002** | [`02-COMPLETE-FEATURE-INVENTORY.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/02-COMPLETE-FEATURE-INVENTORY.md) | Itemized catalog of 94 product features across Categories A through J with stable IDs. |
+| **ARCH-002** | [`02-COMPLETE-FEATURE-INVENTORY.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/02-COMPLETE-FEATURE-INVENTORY.md) | Itemized catalog of 105 product features across Categories A through L with stable IDs. |
 | **ARCH-003** | [`03-APPLICATION-SCREENS-AND-UX.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/03-APPLICATION-SCREENS-AND-UX.md) | UX workflows, component hierarchies, loading/empty/error states for all 18+ application screens. |
 | **ARCH-004** | [`04-SERVICES-AND-API-CONTRACTS.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/04-SERVICES-AND-API-CONTRACTS.md) | Complete REST & WebSocket API schemas, BullMQ payload contracts, and error structures. |
 | **ARCH-005** | [`05-DATA-MODEL-AND-EVENT-TIMELINE.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/05-DATA-MODEL-AND-EVENT-TIMELINE.md) | Unified relational Prisma schema, event models, time synchronization, and diffs. |
@@ -127,3 +131,4 @@ The complete architecture specification is partitioned into 19 focused, cross-re
 | **ARCH-016** | [`16-SHARED-CONTRACTS-IMPLEMENTATION.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/16-SHARED-CONTRACTS-IMPLEMENTATION.md) | Reusable domain contracts package (`@autoedit/contracts`) specification and runtime validation. |
 | **ARCH-017** | [`17-COMPETITIVE-ANALYSIS-AND-RESEARCH-REGISTER.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/17-COMPETITIVE-ANALYSIS-AND-RESEARCH-REGISTER.md) | Competitive benchmark (Stakeout Clips, StreamLadder, Opus Clip) and cloud-first positioning. |
 | **ARCH-018** | [`18-LITE-AND-PRO-PROCESSING-ARCHITECTURE.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/18-LITE-AND-PRO-PROCESSING-ARCHITECTURE.md) | Dual-tier processing specification (LITE deterministic vs PRO multimodal AI), quotas, and upgrade refinement. |
+| **ARCH-019** | [`19-REFERENCE-BASED-AI-EDITING.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/19-REFERENCE-BASED-AI-EDITING.md) | Reference-based AI editing, style extraction, conflict resolution, and composable timeline synthesis. |

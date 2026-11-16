@@ -172,6 +172,7 @@ flowchart TD
 | **EXPORT** | Maximum Resolution & Framerate | 720p @ 30fps or 1080p @ 30fps | 1080p @ 60fps or 4K @ 60fps |
 | **EXPORT** | Platform Watermark | Tasteful AutoAI Edit corner badge | Zero Watermark (100% Whitelabel) |
 | **EXPORT** | Direct Social Publishing | Manual MP4 download | Direct 1-Click Publishing to TikTok / YouTube |
+| **REFERENCE** | Reference Style Transfer | Basic: $\le 60\text{s}$ ref video, 3 analyses/mo, ASL pacing & preset captions | Advanced: $\le 10\text{min}$ ref video, 50 analyses/mo, full OCR typography, optical zooms, profile library |
 | **SAAS** | Cloud Processing Economics | Free / Ultra-Low-Cost Tier | Paid Monthly / Annual Subscription |
 | **SAAS** | Render Queue Priority | Standard CPU Queue | High-Priority Express Worker Queue |
 
