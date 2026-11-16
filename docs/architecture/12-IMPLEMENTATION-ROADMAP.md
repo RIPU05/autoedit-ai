@@ -89,49 +89,54 @@ The AutoAI Edit engineering roadmap is sequenced to maximize code reuse, preserv
 
 ---
 
-## 5. Milestone 3: Real-Time Livestream Ingest & Direct OBS Gateway
+## 5. Milestone 3: Real-Time Livestream Ingest & LITE Clipping Engine
 
-- **Objective:** Enable creators to stream directly from OBS into AutoAI Edit with rolling buffer segmentation.
+- **Objective:** Enable creators to stream directly from OBS or connect Twitch/Kick channels, capturing footage with rolling buffer segmentation and zero-LLM LITE highlight detection.
 - **Scope of Changes:**
   - Provision lightweight MediaMTX gateway on dedicated edge instance (`LIVE-002`, `LIVE-003`).
   - Implement stream key generation and SHA-256 webhook authentication (`POST /api/live/auth/stream-key`).
   - Configure MediaMTX to slice incoming streams into 6-second MPEG-TS chunks and sync to S3 (`LIVE-005`).
   - Implement rolling buffer cleanup cron purging unpinned chunks older than 30 minutes (configurable pilot buffer), preserving chunks with active reference-counted pin leases (`SegmentPinReference`).
+  - Implement Cloud Chat Monitor for Twitch IRC and Kick Pusher WebSockets (`LIVE-006`).
+  - Author the **LITE Detection Engine** (`LIVE-015`): sliding EWMA chat velocity, emote surge scoring (`KEKW`, `POG`), and FFmpeg `silencedetect` audio peaks generating highlight candidates at $0.00 AI inference cost.
 - **Acceptance Tests:**
   - OBS connects to `rtmps://ingest.autoedit.ai/live` using valid stream key and streams for 30 minutes without dropped frames.
+  - Simulated chat surge (+400% msgs/sec) flags LITE candidate highlight within 2 seconds of occurrence at zero AI cost.
   - Chunks stream into S3; unpinned chunks auto-delete after window expires.
-- **Definition of Done:** Stream sessions appear in real time on the dashboard.
+- **Definition of Done:** Stream sessions and LITE highlights appear in real time on the dashboard and web studio.
 
 ---
 
-## 6. Milestone 4: Multimodal Highlight Engine & Chat Spike Detector
+## 6. Milestone 4: PRO Multimodal AI Engine & Upgrade Refinement
 
-- **Objective:** Unify chat velocity, audio peaks, and transcript context into automated highlight candidate proposals.
+- **Objective:** Augment LITE candidate clusters with Faster-Whisper GPU transcription, Claude/Gemini semantic reasoning, and 1-click in-studio upgrade refinement.
 - **Scope of Changes:**
-  - Implement Twitch IRC and YouTube Live chat WebSocket listeners (`LIVE-006`).
-  - Author sliding-window chat velocity detector (`VOD-004`) and emote surge analyzer (`VOD-005`).
-  - Implement composite scoring equation combining chat, audio, and speech density.
-  - Add dynamic context expansion (pre-roll setup and post-roll resolution).
-  - Surface highlight candidate cards in Studio UI with 1-click preview and render.
+  - Connect Modal Faster-Whisper serverless GPU to transcribe prioritized highlight candidate audio windows.
+  - Author Multi-Agent LLM reasoning pipeline (Director, Hook, Social Copy agents) delivering 0–100 virality scores and explainable editorial strategies.
+  - Implement **Lite-to-Pro Upgrade Refinement** (`EDIT-013`): in-studio 1-click upgrade that extracts segment audio, runs GPU/LLM analysis, and non-destructively attaches word-level transcripts and hooks without altering manual trims.
+  - Calibrate heuristic signal weight vectors against empirical creator datasets across gaming, podcast, and tutorial genres.
+  - Dynamic context expansion (pre-roll setup and post-roll resolution).
 - **Acceptance Tests:**
-  - Simulated chat surge (+400% msgs/sec) flags candidate highlight within 2 seconds of occurrence.
-  - Candidates display transparent Explainable AI narrative in Studio UI.
-- **Definition of Done:** Highlighting operates identically for both live broadcasts and uploaded VODs.
+  - PRO pipeline produces word-level timestamps, virality score, and 3 platform-optimized hooks for flagged candidate.
+  - Upgrading an existing LITE clip produces an immutable new `EditVersion` snapshot with word-level subtitles while retaining user trim offsets.
+- **Definition of Done:** Creators can freely use LITE highlights or upgrade individual clips to PRO with transparent evidence.
 
 ---
 
-## 7. Milestone 5: SaaS Monetization, Usage Metering & Quotas
+## 7. Milestone 5: SaaS Monetization, Configuration-Driven Entitlements & Quotas
 
-- **Objective:** Transform AutoAI Edit into a commercially viable SaaS product with automated billing.
+- **Objective:** Transform AutoAI Edit into a commercially viable SaaS product with automated billing and zero-trust quota enforcement.
 - **Scope of Changes:**
-  - Integrate Stripe Billing (Free, Creator $29/mo, Pro $79/mo).
-  - Implement video processing minute tracking (`SAAS-002`) and usage metering.
-  - Enforce tiered feature gates (export resolution caps, max monthly minutes).
+  - Implement configuration-driven Entitlement Manager and server-side policy enforcement (`SAAS-009`).
+  - Implement two-phase idempotent quota reservation pattern (`UsageReservation`) in Redis with automatic rollback on worker failure to prevent double-charging.
+  - Establish independent allowances: generous chat monitoring hours vs strictly bounded video capture hours and export limits.
+  - Integrate Stripe Billing (Free/LITE, Creator PRO $29/mo, Streamer PRO $79/mo).
   - Add user billing portal and invoice history in `/settings`.
 - **Acceptance Tests:**
+  - Server rejects unauthorized PRO execution requests from LITE tenants with HTTP 403.
+  - Worker crash during transcode releases reservation TTL without deducting tenant export quota.
   - Stripe webhook creates and updates subscription records reliably.
-  - Users exceeding monthly minute quotas receive upgrade prompt before queuing renders.
-- **Definition of Done:** End-to-end checkout, upgrade, and quota enforcement verified via Stripe test mode.
+- **Definition of Done:** End-to-end checkout, upgrade, and quota enforcement verified via Stripe test mode with zero double-charge risk.
 
 ---
 

@@ -93,7 +93,11 @@ The entire system architecture is anchored around three non-negotiable user expe
 4. **Cloud Independence:**
    - The platform operates 100% in the cloud without requiring the developer's workstation or any local GPU. When a creator uploads a video or broadcasts a stream, the cloud backend handles ingestion, analysis, AI clipping, rendering, and storage end-to-end.
 
-5. **Empirical Calibration & Flexible Pricing:**
+5. **Dual Processing Architecture (LITE vs PRO Modes):**
+   - The platform delivers both **LITE Mode** (cost-effective, high-velocity deterministic signal processing via chat EWMA and audio peaks at ~$0.03/clip) and **PRO Mode** (deep multimodal AI with Faster-Whisper GPU transcription, Gemini/Claude narrative reasoning, and animated karaoke captions at ~$0.13/clip) inside ONE unified application without code bifurcation.
+   - Highlights generated in LITE mode can be non-destructively refined with PRO AI on demand without losing manual edits.
+
+6. **Empirical Calibration & Flexible Pricing:**
    - Heuristic thresholds (chat velocity multipliers, audio loudness gates, clip duration clamping) serve as engineering baselines that will be empirically calibrated against ground-truth creator data in Milestone 4.
    - Subscription pricing, free-tier quotas, and retail packaging remain undecided pending measured unit economics and abuse controls in beta.
 
@@ -101,7 +105,7 @@ The entire system architecture is anchored around three non-negotiable user expe
 
 ## 4. Master Blueprint Directory Roadmap
 
-The complete architecture specification is partitioned into 15 focused, cross-referenced documents within `docs/architecture/`:
+The complete architecture specification is partitioned into 19 focused, cross-referenced documents within `docs/architecture/`:
 
 | Document ID | File Name | Focus & Scope |
 |---|---|---|
@@ -119,3 +123,7 @@ The complete architecture specification is partitioned into 15 focused, cross-re
 | **ARCH-012** | [`12-IMPLEMENTATION-ROADMAP.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/12-IMPLEMENTATION-ROADMAP.md) | Phased delivery schedule (Milestones 0 through 6) with definitions of done and rollback plans. |
 | **ARCH-013** | [`13-ARCHITECTURE-DECISIONS-AND-OPEN-QUESTIONS.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/13-ARCHITECTURE-DECISIONS-AND-OPEN-QUESTIONS.md) | Architectural Decision Records (ADRs 001–008) and product questions requiring user input. |
 | **ARCH-014** | [`14-VERIFICATION-MATRIX.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/14-VERIFICATION-MATRIX.md) | End-to-end traceability matrix linking features, data models, APIs, screens, and tests. |
+| **ARCH-015** | [`15-BLUEPRINT-REVIEW-AND-APPROVAL.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/15-BLUEPRINT-REVIEW-AND-APPROVAL.md) | Formal architecture sign-off, feature inventory reconciliation (94 features), and stage transition gates. |
+| **ARCH-016** | [`16-SHARED-CONTRACTS-IMPLEMENTATION.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/16-SHARED-CONTRACTS-IMPLEMENTATION.md) | Reusable domain contracts package (`@autoedit/contracts`) specification and runtime validation. |
+| **ARCH-017** | [`17-COMPETITIVE-ANALYSIS-AND-RESEARCH-REGISTER.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/17-COMPETITIVE-ANALYSIS-AND-RESEARCH-REGISTER.md) | Competitive benchmark (Stakeout Clips, StreamLadder, Opus Clip) and cloud-first positioning. |
+| **ARCH-018** | [`18-LITE-AND-PRO-PROCESSING-ARCHITECTURE.md`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/18-LITE-AND-PRO-PROCESSING-ARCHITECTURE.md) | Dual-tier processing specification (LITE deterministic vs PRO multimodal AI), quotas, and upgrade refinement. |

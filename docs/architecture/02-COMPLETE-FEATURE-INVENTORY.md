@@ -60,7 +60,7 @@ Every capability in the AutoAI Edit platform is assigned a permanent, standardiz
 
 ---
 
-## 4. Category C: AI Video Editing & Studio Invariants (12 Features)
+## 4. Category C: AI Video Editing & Studio Invariants (13 Features)
 
 | Feature ID | Feature Name | Description & Acceptance Criteria | Dependencies | Source Code Path | Test Coverage | Primary Status | Verification Level |
 |---|---|---|---|---|---|---|---|
@@ -76,6 +76,7 @@ Every capability in the AutoAI Edit platform is assigned a permanent, standardiz
 | **EDIT-010** | Repurposing Social Copy Panel | AI-generated titles, hashtags, and social descriptions for Shorts, TikTok, Reels, and LinkedIn. | Model Gateway | `apps/web/src/components/RepurposePanel.tsx` | Next.js Build | **Implemented** | **Active in Production (Unit / Route Tested)** |
 | **EDIT-011** | Hook Score & Candidate Ranking | Scoring algorithm identifying the single most viral opening moment within the first 3 seconds. | AI Gateway | `apps/api/src/ai/providers.ts` | `tests/worker-regression.test.ts` | **Partially Implemented** | **Partially Verified in Code** |
 | **EDIT-012** | Creator Style Adaptation | Machine learning memory adjusting future edit decisions based on manual timeline trims. | CreatorProfile | `apps/api/src/services/creator-memory.service.ts` | `tests/creator-memory.test.ts` | **Partially Implemented** | **Partially Verified in Code** |
+| **EDIT-013** | Lite-to-Pro Upgrade Refinement | Non-destructive 1-click in-studio enhancement elevating a LITE candidate to PRO multimodal AI preserving manual trims. | Contracts, Modal | `packages/contracts/src/editing.ts` | `packages/contracts/tests/contracts.test.ts` | **Partially Implemented** | **Partially Verified in Code (Contracts)** |
 
 ---
 
@@ -111,7 +112,7 @@ Every capability in the AutoAI Edit platform is assigned a permanent, standardiz
 
 ---
 
-## 7. Category F: Real-Time Livestreams & Direct OBS Ingest (14 Features)
+## 7. Category F: Real-Time Livestreams & Direct OBS Ingest (15 Features)
 
 | Feature ID | Feature Name | Description & Acceptance Criteria | Dependencies | Source Code Path | Test Coverage | Primary Status | Verification Level |
 |---|---|---|---|---|---|---|---|
@@ -129,6 +130,7 @@ Every capability in the AutoAI Edit platform is assigned a permanent, standardiz
 | **LIVE-012** | Stream Health & Telemetry Monitor | Displays real-time bitrate, dropped frames, audio levels, and buffer latency on dashboard. | WebSockets | *None / Not yet created* | None | **Planned Only** | **Planned Only** |
 | **LIVE-013** | Automatic Post-Stream VOD Creation | Automatically seals completed broadcast chunks into a unified project when stream ends. | Worker Pipeline | *None / Not yet created* | None | **Planned Only** | **Planned Only** |
 | **LIVE-014** | Ephemeral Buffer Lifecycle Cleanup | Deletes unpinned rolling buffer chunks older than configured retention window (initial 30m pilot). | S3 Lifecycle | *None / Not yet created* | None | **Planned Only** | **Planned Only** |
+| **LIVE-015** | LITE Chat Velocity & Emote Spike Engine | Calculates EWMA chat message velocity and emote surges (`KEKW`, `POG`) generating highlights at $0 AI cost. | Contracts, Live | `packages/contracts/src/highlight.ts` | `packages/contracts/tests/contracts.test.ts` | **Partially Implemented** | **Partially Verified in Code (Contracts)** |
 
 ---
 
@@ -179,7 +181,7 @@ Every capability in the AutoAI Edit platform is assigned a permanent, standardiz
 
 ---
 
-## 11. Category J: SaaS Operations & Monetization (8 Features)
+## 11. Category J: SaaS Operations & Monetization (9 Features)
 
 | Feature ID | Feature Name | Description & Acceptance Criteria | Dependencies | Source Code Path | Test Coverage | Primary Status | Verification Level |
 |---|---|---|---|---|---|---|---|
@@ -191,6 +193,7 @@ Every capability in the AutoAI Edit platform is assigned a permanent, standardiz
 | **SAAS-006** | Admin Feedback & Review Portal | Administrative dashboard reviewing user feedback ratings, bug reports, and praise. | Next.js UI | `apps/web/src/app/admin/feedback/page.tsx` | Next.js Build | **Implemented** | **Active in Production (Unit / Route Tested)** |
 | **SAAS-007** | Security Audit Logging | Records authentication events, integration updates, and access denials in `ActivityLog`. | Prisma DB | `apps/api/src/routes/auth.routes.ts` | `tests/route-regression.test.ts` | **Implemented** | **Active in Production (Unit / Route Tested)** |
 | **SAAS-008** | Automated Storage Retention Policies | Reference-counted lease expiration on raw media assets after configured retention period. | S3 Lifecycle | *None / Not yet created* | None | **Planned Only** | **Planned Only** |
+| **SAAS-009** | Configuration-Driven Entitlements & Reservations | Server-side enforcement of LITE vs PRO policies, idempotent reservations, and double-charge prevention. | Contracts, Redis | `packages/contracts/src/usage.ts` | `packages/contracts/tests/contracts.test.ts` | **Partially Implemented** | **Partially Verified in Code (Contracts)** |
 
 ---
 
@@ -209,20 +212,20 @@ Every capability in the AutoAI Edit platform is assigned a permanent, standardiz
 
 ## 13. Reconciled Feature Metrics & Verification Breakdown
 
-Across all 11 categories, the **94 unique features** break down into the following mutually exclusive totals:
+Across all 11 categories (A:4, B:6, C:13, D:10, E:8, F:15, G:8, H:8, I:10, J:9, K:6), the **97 unique features** break down into the following mutually exclusive totals:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                      RECONCILED FEATURE STATUS TOTALS                  │
 └────────────────────────────────────────────────────────────────────────┘
-  ├── 1. Active in Production (Master release 799dca2):     40 (42.6%)
-  ├── 2. Verified in Staging (Feature branches only):       11 (11.7%)
-  ├── 3. Partially Implemented (Foundational code/mocks):    7  (7.4%)
-  ├── 4. Missing Foundations (Zero code authored):           1  (1.1%)
-  └── 5. Planned Only (Specifications finalized):           35 (37.2%)
+  ├── 1. Active in Production (Master release 799dca2):     40 (41.2%)
+  ├── 2. Verified in Staging (Feature branches only):       11 (11.3%)
+  ├── 3. Partially Implemented (Foundational code/contracts):10 (10.3%)
+  ├── 4. Missing Foundations (Zero code authored):           1  (1.0%)
+  └── 5. Planned Only (Specifications finalized):           35 (36.1%)
   ────────────────────────────────────────────────────────────────────────
-  TOTAL UNIQUE FEATURES:                                    94 (100.0%)
+  TOTAL UNIQUE FEATURES:                                    97 (100.0%)
 ```
 
-- **Combined Implementation Progress:** **51 features (54.3%)** are fully implemented in code, with 40 live in production and 11 validated in staging test harnesses.
-- **Pending Implementation:** **43 features (45.7%)** are scheduled across Milestones 0 through 6 (35 planned, 7 partial, 1 missing).
+- **Combined Implementation Progress:** **51 features (52.6%)** are fully implemented in code, with 40 live in production and 11 validated in staging test harnesses.
+- **Pending Implementation:** **46 features (47.4%)** are scheduled across Milestones 0 through 6 (35 planned, 10 partial, 1 missing).

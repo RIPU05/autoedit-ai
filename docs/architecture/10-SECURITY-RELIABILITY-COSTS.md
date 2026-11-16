@@ -96,27 +96,33 @@ if (!workDir.startsWith(baseDir)) {
 ## 5. Engineering Cost Projections & Unit Economics
 
 > [!NOTE]
-> **Pricing & Tier Packaging Disclaimer:** The unit costs below represent **theoretical engineering cost projections** based on current cloud provider pricing (Modal GPU, Render CPU, Anthropic tokens, AWS S3 storage). **Retail subscription pricing, free-tier limits, and packaging remain undecided** and will be finalized only after empirical cost tracking, fraud prevention testing, and user feedback during the Milestone 4/5 beta.
+> **Pricing & Tier Packaging Disclaimer:** The unit costs below represent **theoretical engineering cost projections** based on current cloud provider pricing (Modal GPU, Render CPU, Anthropic/Google tokens, AWS S3/Cloudflare R2 storage). **Retail subscription pricing, free-tier limits, and packaging remain undecided** and will be finalized only after empirical cost tracking, fraud prevention testing, and user feedback during the Milestone 4/5 beta.
 
-AutoAI Edit's projected unit economics demonstrate strong commercial margins across all content formats:
+AutoAI Edit's unit economics distinguish between **LITE Mode** (zero AI inference compute) and **PRO Mode** (multimodal GPU + LLM inference) as detailed in [`ARCH-018: LITE & PRO Processing Architecture`](file:///c:/Users/RIPS/Desktop/autoeditAI/autoedit-ai/docs/architecture/18-LITE-AND-PRO-PROCESSING-ARCHITECTURE.md):
 
 ```
-Engineering Cost Model for a 1-Hour Video (5 Clips Produced):
-┌────────────────────────────────────────────────────────┐
-│ Anthropic Claude 3.5 Sonnet:          $0.0900 (65.7%)  │
-│ AWS S3 Storage & Data Transfer:       $0.0320 (23.4%)  │
-│ Modal Serverless GPU Faster-Whisper:  $0.0118  (8.6%)  │
-│ Render CPU Worker (Amortized):        $0.0028  (2.3%)  │
-├────────────────────────────────────────────────────────┤
-│ TOTAL VARIABLE COST PER VIDEO:        $0.1366 (100.0%) │
-└────────────────────────────────────────────────────────┘
+Engineering Cost Comparison per Rendered Clip:
+┌──────────────────────────────────────┬──────────────────────────────────────┐
+│       LITE MODE (~$0.0306 / clip)    │       PRO MODE (~$0.1146 / clip)     │
+├──────────────────────────────────────┼──────────────────────────────────────┤
+│ CPU Transcode (720p FFmpeg): $0.0180 │ CPU Transcode (1080p60):    $0.0350  │
+│ Cloud Ingress / Buffer:      $0.0070 │ Modal GPU Whisper (45s audio):$0.0450│
+│ Egress / Storage Lease:      $0.0050 │ Claude/Gemini LLM Reasoning: $0.0150 │
+│ Signal Detection (EWMA):     $0.0006 │ Cloud Ingress & Buffer:      $0.0090 │
+│ GPU / LLM AI Inference:      $0.0000 │ Egress & 7-Day Lease:        $0.0106 │
+└──────────────────────────────────────┴──────────────────────────────────────┘
 ```
 
-### Projected Monthly Compute & Infrastructure Cost Models (Illustrative):
+### 5.1 Quota Strategy & Double-Charge Protection
+1. **Idempotent Reservations:** All export and AI inference requests acquire an atomic `UsageReservation` in Redis keyed by `hash(tenantId, jobId, timestamp)` with a 15-minute TTL.
+2. **Failure Protection:** If a transcode worker or GPU container crashes, the reservation is automatically released (`RELEASED`), immediately restoring tenant balance with zero financial or quota penalty. Retries with the same idempotency key never incur secondary deductions.
+3. **Decoupled Metric Allowances:** Chat monitoring hours (virtually free cloud bandwidth) are tracked independently from video ingestion hours and rendered export credits.
+
+### 5.2 Projected Monthly Compute & Infrastructure Cost Models (Illustrative):
 
 | Creator Usage Model | Monthly Videos Processed | Estimated Compute & AI Cost | Fixed Infra Overhead (Render/DB) | Total Estimated Cost / Month | Retail Pricing Strategy |
 |---|---|---|---|---|---|
-| **Free / Trial Tier** | 2 videos (15m each) | ~$0.10 | $0.00 (Covered by free tiers) | **~$0.10** | TBD (Quota & abuse limit calibration in beta) |
-| **Creator Usage Model** | 15 videos (30m each) | ~$1.25 | $50.00 (Single worker pool) | **~$51.25** | TBD (Pricing finalized post-beta telemetry) |
-| **Streamer Usage Model** | 40 streams (2h each) | ~$8.20 | $50.00 (Dedicated worker pool) | **~$58.20** | TBD (Pricing finalized post-beta telemetry) |
-| **Studio Multi-Seat Model**| 200 videos (multi-seat) | ~$32.50 | $75.00 (Scaled worker pool) | **~$107.50** | TBD (Pricing finalized post-beta telemetry) |
+| **Free / LITE Tier** | 5 clips (from 2h stream) | ~$0.15 | $0.00 (Covered by free tiers) | **~$0.15** | Free (Quota & abuse limit calibration in beta) |
+| **Creator PRO Model** | 30 clips (from 15h media) | ~$3.45 | $50.00 (Single worker pool) | **~$53.45** | Paid SaaS (Pricing finalized post-beta telemetry) |
+| **Streamer PRO Model** | 120 clips (from 40h streams) | ~$13.75 | $50.00 (Dedicated worker pool) | **~$63.75** | Paid SaaS (Pricing finalized post-beta telemetry) |
+| **Studio Multi-Seat Model**| 500 clips (multi-seat) | ~$57.30 | $75.00 (Scaled worker pool) | **~$132.30** | Paid SaaS (Pricing finalized post-beta telemetry) |
