@@ -59,12 +59,11 @@ export function validateLocalE2EEnvironment(envMap: Record<string, string | unde
         errors.push(`DATABASE_URL host "${u.hostname}" is not local loopback (${sanitizeUrl(dbUrl)}).`);
       }
       const pathname = u.pathname.replace(/^\//, '').toLowerCase();
-      if (
-        !pathname.includes('autoedit_local') &&
-        !pathname.includes('autoedit_test') &&
-        !pathname.includes('test')
-      ) {
-        errors.push(`DATABASE_URL database name "${pathname}" is not an authorized local test database.`);
+      const allowedDatabases = ['autoedit_local', 'autoedit_test'];
+      if (!allowedDatabases.includes(pathname)) {
+        errors.push(
+          `DATABASE_URL database name "${pathname}" is not an authorized local test database (allowed: ${allowedDatabases.join(', ')}).`,
+        );
       }
     } catch {
       errors.push(`DATABASE_URL is malformed: ${sanitizeUrl(dbUrl)}`);

@@ -1,29 +1,14 @@
 import { Queue } from 'bullmq';
 import { bullConnection as connection } from '../lib/redis.js';
+import type { AnalysisJobPayload, RenderJobPayload, N8nJobPayload } from '@autoedit/contracts';
 
 export const ANALYSIS_QUEUE = 'analysis';
 export const RENDER_QUEUE = 'render';
 export const N8N_QUEUE = 'n8n-dispatch';
 
-export interface AnalysisJobData {
-  projectId: string;
-  s3Key: string;
-  bucket: string;
-  userPrompt?: string;
-}
-
-export interface RenderJobData {
-  projectId: string;
-  renderId: string;
-  format: 'reel' | 'short' | 'landscape';
-}
-
-export interface N8nJobData {
-  connectionId: string;
-  workflowRunId: string;
-  webhookPath: string;
-  payload: Record<string, unknown>;
-}
+export type AnalysisJobData = AnalysisJobPayload;
+export type RenderJobData = RenderJobPayload;
+export type N8nJobData = N8nJobPayload;
 
 export const analysisQueue = new Queue<AnalysisJobData>(ANALYSIS_QUEUE, { connection });
 export const renderQueue = new Queue<RenderJobData>(RENDER_QUEUE, { connection });

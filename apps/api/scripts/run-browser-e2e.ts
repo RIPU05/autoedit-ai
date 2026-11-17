@@ -42,12 +42,14 @@ process.on('SIGTERM', () => {
   process.exit(143);
 });
 
-async function checkUrl(url: string, timeoutMs = 2000): Promise<boolean> {
+async function checkApiHealth(url = 'http://localhost:4000/health', timeoutMs = 3000): Promise<boolean> {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, { signal: controller.signal });
-    return res.status >= 200 && res.status < 400;
+    if (!res.ok) return false;
+    const body: any = await res.json().catch(() => null);
+    return Boolean(body && body.ok === true && body.db?.ok === true && body.redis?.ok === true && body.s3?.ok === true);
   } catch {
     return false;
   } finally {
@@ -55,11 +57,26 @@ async function checkUrl(url: string, timeoutMs = 2000): Promise<boolean> {
   }
 }
 
-async function waitForUrl(url: string, maxWaitMs = 30000, desc = ''): Promise<boolean> {
+async function checkWebFrontend(url = 'http://localhost:3000', timeoutMs = 3000): Promise<boolean> {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) return false;
+    const text = await res.text().catch(() => '');
+    return text.includes('AutoEdit') || text.includes('autoedit') || text.includes('__NEXT_DATA__');
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function waitForCondition(checkFn: () => Promise<boolean>, maxWaitMs = 30000, desc = ''): Promise<boolean> {
   const start = Date.now();
-  process.stdout.write(`Waiting for ${desc || url} to be ready... `);
+  process.stdout.write(`Waiting for ${desc} to be ready... `);
   while (Date.now() - start < maxWaitMs) {
-    if (await checkUrl(url)) {
+    if (await checkFn()) {
       console.log('READY');
       return true;
     }
@@ -82,8 +99,8 @@ async function checkWorkerRunning(): Promise<boolean> {
 async function ensureLocalServices() {
   console.log('=== Checking Local Test Infrastructure ===');
 
-  // 1. Check API
-  let apiRunning = await checkUrl('http://localhost:4000/health');
+  // 1. Check API with verified service identity probe
+  let apiRunning = await checkApiHealth('http://localhost:4000/health');
   if (!apiRunning) {
     console.log('Starting local API server on port 4000...');
     const apiProc = spawn('node', ['dist/index.js'], {
@@ -92,14 +109,14 @@ async function ensureLocalServices() {
       shell: process.platform === 'win32',
     });
     spawnedProcesses.push(apiProc);
-    apiRunning = await waitForUrl('http://localhost:4000/health', 25000, 'API server');
+    apiRunning = await waitForCondition(() => checkApiHealth('http://localhost:4000/health'), 25000, 'API server');
     if (!apiRunning) {
       throw new Error(
         'API server failed to start within 25 seconds. Ensure local postgres and redis containers are running.',
       );
     }
   } else {
-    console.log('✓ API server is already running on http://localhost:4000');
+    console.log('✓ API server is already running on http://localhost:4000 (verified local health)');
   }
 
   // 2. Check BullMQ Worker
@@ -117,8 +134,8 @@ async function ensureLocalServices() {
     await new Promise((r) => setTimeout(r, 2000));
   }
 
-  // 3. Check Next.js Web Frontend
-  let webRunning = await checkUrl('http://localhost:3000');
+  // 3. Check Next.js Web Frontend with verified HTML signature
+  let webRunning = await checkWebFrontend('http://localhost:3000');
   if (!webRunning) {
     console.log('Starting Next.js frontend on port 3000...');
     const webProc = spawn('npm', ['run', 'start', '--prefix', 'apps/web'], {
@@ -127,22 +144,20 @@ async function ensureLocalServices() {
       shell: process.platform === 'win32',
     });
     spawnedProcesses.push(webProc);
-    webRunning = await waitForUrl('http://localhost:3000', 30000, 'Next.js frontend');
+    webRunning = await waitForCondition(() => checkWebFrontend('http://localhost:3000'), 30000, 'Next.js frontend');
     if (!webRunning) {
       throw new Error('Next.js frontend failed to start within 30 seconds.');
     }
   } else {
-    console.log('✓ Next.js frontend is already running on http://localhost:3000');
+    console.log('✓ Next.js frontend is already running on http://localhost:3000 (verified app signature)');
   }
 
-  // Clear any leftover local rate limits in Redis to avoid cross-test lockout
+  // Reset only disposable test-owned registration rate limits in Redis
   try {
     const { connection: redis } = await import('../src/lib/redis.js');
-    const keys = await redis.keys('rl:*');
-    if (keys.length > 0) {
-      await redis.del(...keys);
-      console.log(`✓ Cleared ${keys.length} rate limit key(s) for clean E2E execution.`);
-    }
+    const testKeys = ['rl:auth:reg:ip:::1', 'rl:auth:reg:ip:127.0.0.1'];
+    await redis.del(...testKeys);
+    console.log('✓ Reset disposable local test registration rate-limit keys.');
   } catch {
     // Handled
   }

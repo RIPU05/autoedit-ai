@@ -1,0 +1,19 @@
+{
+  "name": "autoedit-ai",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build:contracts": "npm run build --prefix packages/contracts",
+    "build:api": "npm run build --prefix apps/api",
+    "build:web": "npm run build --prefix apps/web",
+    "build": "npm run build:contracts && npm run build:api && npm run build:web",
+    "test:contracts": "npm test --prefix packages/contracts",
+    "test:api": "npm test --prefix apps/api",
+    "test": "npm run test:contracts && npm run test:api",
+    "test:e2e": "npm run test:e2e --prefix apps/api"
+  }
+}
