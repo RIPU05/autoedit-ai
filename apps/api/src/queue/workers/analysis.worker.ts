@@ -14,7 +14,7 @@ import { timeStage, captureError, isInvalidJsonError } from '../../lib/observabi
 import { moveToDeadLetter } from '../queues.js';
 import { env } from '../../config/env.js';
 import { ANALYSIS_QUEUE, type AnalysisJobData, enqueueRender } from '../queues.js';
-import { runAiProvider } from '../../ai/providers.js';
+import { runAiProvider, sanitizeLogSecret } from '../../ai/providers.js';
 import { dispatchIntegrationEvent, getConnectedClaudeApiKey } from '../../services/integration-events.service.js';
 
 async function download(url: string, dest: string) {
@@ -114,7 +114,7 @@ export const analysisWorker = new Worker<AnalysisJobData>(
             level: 'warn',
             msg: 'transcription.unavailable',
             projectId,
-            error: err instanceof Error ? err.message : String(err),
+            error: sanitizeLogSecret(err instanceof Error ? err.message : String(err)),
           }),
         );
         await captureError('WHISPER', err, { projectId, jobId: job.id }).catch(() => {});
@@ -311,7 +311,7 @@ analysisWorker.on('failed', async (job, err) => {
         projectId: job.data.projectId,
         attempt: job.attemptsMade,
         maxAttempts: job.opts.attempts ?? 1,
-        error: err.message,
+        error: sanitizeLogSecret(err.message),
       }),
     );
   }

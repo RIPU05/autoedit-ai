@@ -7,6 +7,7 @@ import {
   isApiKeyMarkedInvalid,
   resetInvalidApiKeyCache,
   isAuthenticationError,
+  sanitizeLogSecret,
 } from '../ai/providers.js';
 
 export {
@@ -15,6 +16,7 @@ export {
   isApiKeyMarkedInvalid,
   resetInvalidApiKeyCache,
   isAuthenticationError,
+  sanitizeLogSecret,
 } from '../ai/providers.js';
 
 import {
@@ -263,7 +265,7 @@ export async function regenerateSocialCopy(summary: string, tone: string) {
         JSON.stringify({
           level: 'warn',
           msg: 'regenerateSocialCopy.fallback',
-          reason: err instanceof Error ? err.message : String(err),
+          reason: sanitizeLogSecret(err instanceof Error ? err.message : String(err)),
         }),
       );
       return generateDeterministicSocialCopy(summary, tone);
@@ -429,7 +431,7 @@ export async function editTimelineWithPrompt(input: PromptEditInput): Promise<Ed
         JSON.stringify({
           level: 'warn',
           msg: 'editTimelineWithPrompt.fallback',
-          reason: err instanceof Error ? err.message : String(err),
+          reason: sanitizeLogSecret(err instanceof Error ? err.message : String(err)),
         }),
       );
       return applyDeterministicPromptEdit(input);
@@ -490,7 +492,7 @@ export async function explainClip(input: ExplainClipInput): Promise<{ explanatio
         JSON.stringify({
           level: 'warn',
           msg: 'explainClip.fallback',
-          reason: err instanceof Error ? err.message : String(err),
+          reason: sanitizeLogSecret(err instanceof Error ? err.message : String(err)),
         }),
       );
       return explainClipDeterministic(input);
