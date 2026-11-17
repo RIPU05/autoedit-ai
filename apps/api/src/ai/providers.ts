@@ -1,8 +1,43 @@
+import { z } from 'zod';
 import { env } from '../config/env.js';
 import { runEditorialPipeline, type PipelineResult } from '../agents/orchestrator.js';
 import type { VideoMeta, TranscriptCue, SilenceSegment } from '../services/claude.service.js';
 
 export type AiProviderName = 'claude' | 'ollama' | 'fallback';
+
+export type AiErrorCategory =
+  | 'MISSING_CREDENTIALS'
+  | 'AUTHENTICATION'
+  | 'RATE_LIMIT'
+  | 'CONNECTION'
+  | 'TIMEOUT'
+  | 'MALFORMED_RESPONSE'
+  | 'INVALID_OPERATION'
+  | 'PROGRAMMING_ERROR';
+
+export class AiProviderError extends Error {
+  readonly category: AiErrorCategory;
+  readonly provider: AiProviderName;
+  readonly status?: number;
+  readonly isFallbackEligible: boolean;
+
+  constructor(opts: {
+    message: string;
+    category: AiErrorCategory;
+    provider: AiProviderName;
+    status?: number;
+    cause?: unknown;
+    isFallbackEligible?: boolean;
+  }) {
+    super(opts.message);
+    this.name = 'AiProviderError';
+    this.category = opts.category;
+    this.provider = opts.provider;
+    this.status = opts.status;
+    this.isFallbackEligible = opts.isFallbackEligible ?? (opts.category !== 'PROGRAMMING_ERROR');
+    if (opts.cause) this.cause = opts.cause;
+  }
+}
 
 export interface AiProviderInput {
   meta: VideoMeta;
@@ -11,6 +46,7 @@ export interface AiProviderInput {
   goal?: string;
   creatorProfile?: string;
   claudeApiKey?: string;
+  provider?: string;
 }
 
 export interface AiProvider {
@@ -26,7 +62,16 @@ export interface AiProviderResult {
   provider: AiProviderName;
   result: PipelineResult;
   fallback: boolean;
+  category?: AiErrorCategory;
   reason?: string;
+}
+
+export function sanitizeLogSecret(input: string): string {
+  if (typeof input !== 'string') return String(input);
+  return input
+    .replace(/sk-ant-[a-zA-Z0-9_-]{15,}/g, 'sk-ant-***')
+    .replace(/Bearer\s+[a-zA-Z0-9_.-]{15,}/gi, 'Bearer ***')
+    .replace(/(?:api[_-]?key[:=]\s*)["']?[a-zA-Z0-9_.-]{15,}["']?/gi, 'apiKey=***');
 }
 
 function errorMessage(err: unknown) {
@@ -84,6 +129,108 @@ export function isExternalAiUnavailable(err: unknown) {
     message,
   );
 }
+
+export function classifyAiError(err: unknown, provider: AiProviderName = 'fallback'): AiProviderError {
+  if (err instanceof AiProviderError) return err;
+
+  const msg = errorMessage(err);
+  const status = (err as any)?.status ?? (err as any)?.statusCode;
+  const name = (err as any)?.name ?? '';
+
+  if (isAuthenticationError(err)) {
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'AUTHENTICATION',
+      provider,
+      status: 401,
+      cause: err,
+    });
+  }
+
+  if (status === 429 || name === 'RateLimitError' || /rate.?limit/i.test(msg)) {
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'RATE_LIMIT',
+      provider,
+      status: 429,
+      cause: err,
+    });
+  }
+
+  if (
+    name === 'APIConnectionTimeoutError' ||
+    name === 'TimeoutError' ||
+    /timeout|timed? ?out|ETIMEDOUT/i.test(msg)
+  ) {
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'TIMEOUT',
+      provider,
+      status: 504,
+      cause: err,
+    });
+  }
+
+  if (
+    name === 'APIConnectionError' ||
+    /ECONNREFUSED|ENOTFOUND|fetch failed|connection error/i.test(msg)
+  ) {
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'CONNECTION',
+      provider,
+      status: 503,
+      cause: err,
+    });
+  }
+
+  if (err instanceof z.ZodError || /malformed|missing (?:response|field)|invalid json|JSON\.parse/i.test(msg)) {
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'MALFORMED_RESPONSE',
+      provider,
+      cause: err,
+    });
+  }
+
+  if (/operation.*exceed|invalid timeline|end <= start|negative/i.test(msg)) {
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'INVALID_OPERATION',
+      provider,
+      cause: err,
+    });
+  }
+
+  if (isExternalAiUnavailable(err)) {
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'CONNECTION',
+      provider,
+      status,
+      cause: err,
+    });
+  }
+
+  if (err instanceof TypeError || err instanceof ReferenceError) {
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'PROGRAMMING_ERROR',
+      provider,
+      cause: err,
+      isFallbackEligible: false,
+    });
+  }
+
+  return new AiProviderError({
+    message: sanitizeLogSecret(msg),
+    category: 'MALFORMED_RESPONSE',
+    provider,
+    cause: err,
+    isFallbackEligible: true,
+  });
+}
+
 
 function subtractSilences(start: number, end: number, silences: SilenceSegment[]) {
   let spans = [{ start, end }];
@@ -251,6 +398,141 @@ export function buildFallbackPipelineResult(input: {
   };
 }
 
+export function createPipelineResultValidator(durationSec: number, hasTranscript: boolean) {
+  const maxDuration = Math.max(0.1, durationSec + 1.0); // allow floating point tolerance
+
+  const OperationSchema = z
+    .object({
+      index: z.number().int().nonnegative(),
+      start: z
+        .number()
+        .finite()
+        .nonnegative()
+        .refine((val) => val <= maxDuration, {
+          message: 'operation start exceeds video duration',
+        }),
+      end: z
+        .number()
+        .finite()
+        .positive()
+        .refine((val) => val <= maxDuration, {
+          message: 'operation end exceeds video duration',
+        }),
+      label: z.string().optional().default('Segment'),
+      keep: z.boolean().default(true),
+      zoom: z.number().finite().positive().default(1.0),
+    })
+    .refine((op) => op.end > op.start, {
+      message: 'operation end must be strictly greater than start',
+    });
+
+  const HighlightSchema = z
+    .object({
+      start: z.number().finite().nonnegative(),
+      end: z.number().finite().positive(),
+      label: z.string().min(1),
+      score: z.number().finite().min(0).max(100),
+    })
+    .refine((h) => h.end > h.start, {
+      message: 'highlight end must be greater than start',
+    });
+
+  const CaptionSchema = z.object({
+    start: z.number().finite().nonnegative(),
+    end: z.number().finite().positive(),
+    text: z.string(),
+  });
+
+  return z.object({
+    summary: z.string().min(1, 'summary is required'),
+    strategy: z.string().min(1, 'strategy is required'),
+    reasoning: z.string().default(''),
+    highlights: z.array(HighlightSchema).default([]),
+    speakers: z
+      .array(
+        z.object({
+          id: z.string(),
+          label: z.string(),
+          segments: z.array(
+            z.object({
+              start: z.number().finite().nonnegative(),
+              end: z.number().finite().positive(),
+            }),
+          ),
+        }),
+      )
+      .default([]),
+    captions: z.array(CaptionSchema).superRefine((captions, ctx) => {
+      if (!hasTranscript && captions.length > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'invented transcript or captions are not permitted when transcript is unavailable',
+        });
+      }
+    }),
+    suggestedTitles: z.array(z.string().min(1)).min(1, 'at least one title required'),
+    socialCopy: z.object({
+      instagram: z.string().default(''),
+      tiktok: z.string().default(''),
+      youtube: z.string().default(''),
+      linkedin: z.string().default(''),
+    }),
+    hook: z.object({
+      hook: z.object({
+        start: z.number().finite().nonnegative(),
+        end: z.number().finite().positive(),
+        text: z.string(),
+      }),
+      alternatives: z.array(z.string()).default([]),
+    }),
+    thumbnail: z.object({
+      concept: z.string().default('Use the opening frame'),
+      overlayText: z.string().default(''),
+      bestFrameSec: z.number().finite().nonnegative().default(0),
+    }),
+    operations: z.array(OperationSchema).min(1, 'at least one timeline operation required'),
+    effects: z.object({
+      subtitles: z.boolean().default(false),
+      zooms: z.boolean().default(false),
+      transitions: z.enum(['fade', 'none']).default('none'),
+      music: z.boolean().default(false),
+      metadata: z.record(z.unknown()).optional(),
+    }),
+    agentLog: z
+      .array(
+        z.object({
+          agent: z.string(),
+          ms: z.number().finite().nonnegative(),
+          summary: z.string(),
+        }),
+      )
+      .default([]),
+    model: z.string().min(1),
+  });
+}
+
+export function validatePipelineResult(
+  raw: unknown,
+  durationSec: number,
+  hasTranscript: boolean,
+  providerName: AiProviderName = 'claude',
+): PipelineResult {
+  const schema = createPipelineResultValidator(durationSec, hasTranscript);
+  const parseResult = schema.safeParse(raw);
+  if (!parseResult.success) {
+    const errorDetails = parseResult.error.issues
+      .map((i) => `${i.path.join('.')}: ${i.message}`)
+      .join('; ');
+    throw new AiProviderError({
+      message: `Invalid AI output: ${errorDetails}`,
+      category: 'MALFORMED_RESPONSE',
+      provider: providerName,
+      cause: parseResult.error,
+    });
+  }
+  return parseResult.data as PipelineResult;
+}
+
 abstract class BaseProvider implements AiProvider {
   abstract name: AiProviderName;
   abstract analyzeTranscript(input: AiProviderInput): Promise<PipelineResult>;
@@ -275,8 +557,25 @@ abstract class BaseProvider implements AiProvider {
 export class ClaudeProvider extends BaseProvider {
   name: AiProviderName = 'claude';
 
-  analyzeTranscript(input: AiProviderInput) {
-    return runEditorialPipeline({ ...input, apiKey: input.claudeApiKey });
+  async analyzeTranscript(input: AiProviderInput): Promise<PipelineResult> {
+    const effectiveKey = (input.claudeApiKey !== undefined ? input.claudeApiKey : env.ANTHROPIC_API_KEY) ?? '';
+    if (!effectiveKey || effectiveKey.trim() === '') {
+      throw new AiProviderError({
+        message: 'Anthropic API key is not configured',
+        category: 'MISSING_CREDENTIALS',
+        provider: 'claude',
+        status: 401,
+      });
+    }
+    if (isApiKeyMarkedInvalid(effectiveKey)) {
+      throw new AiProviderError({
+        message: 'Anthropic API key was marked invalid by a previous request',
+        category: 'AUTHENTICATION',
+        provider: 'claude',
+        status: 401,
+      });
+    }
+    return runEditorialPipeline({ ...input, apiKey: effectiveKey });
   }
 }
 
@@ -289,7 +588,7 @@ export class FallbackProvider extends BaseProvider {
         meta: input.meta,
         transcript: input.transcript,
         silences: input.silences,
-        reason: 'Claude unavailable',
+        reason: 'AI_PROVIDER=fallback',
       }),
     );
   }
@@ -427,6 +726,7 @@ export class OllamaProvider extends BaseProvider {
     ].join('\n');
 
     const started = Date.now();
+    const timeoutMs = env.NODE_ENV === 'test' ? 3000 : 30000;
     const res = await fetch(`${env.OLLAMA_BASE_URL.replace(/\/$/, '')}/api/generate`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -437,6 +737,7 @@ export class OllamaProvider extends BaseProvider {
         format: 'json',
         options: { temperature: 0.1, num_predict: 450 },
       }),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     if (!res.ok) throw new Error(`ollama ${res.status}`);
@@ -448,30 +749,110 @@ export class OllamaProvider extends BaseProvider {
   }
 }
 
-export async function runAiProvider(input: AiProviderInput): Promise<AiProviderResult> {
-  const currentProvider = process.env.AI_PROVIDER ?? env.AI_PROVIDER;
-  const selected: AiProvider =
-    currentProvider === 'ollama' ? new OllamaProvider() : currentProvider === 'fallback' ? new FallbackProvider() : new ClaudeProvider();
+const providerRegistry = new Map<string, AiProvider>();
 
-  if (selected.name === 'fallback') {
-    return { provider: 'fallback', result: await selected.analyzeTranscript(input), fallback: true, reason: 'AI_PROVIDER=fallback' };
+export function registerAiProvider(provider: AiProvider): void;
+export function registerAiProvider(name: string, provider: AiProvider): void;
+export function registerAiProvider(nameOrProvider: string | AiProvider, maybeProvider?: AiProvider): void {
+  if (typeof nameOrProvider === 'string') {
+    if (maybeProvider) {
+      providerRegistry.set(nameOrProvider.toLowerCase(), maybeProvider);
+    }
+  } else if (nameOrProvider && typeof nameOrProvider === 'object' && nameOrProvider.name) {
+    providerRegistry.set(nameOrProvider.name.toLowerCase(), nameOrProvider);
+  }
+}
+
+export function resetAiProviders(): void {
+  providerRegistry.clear();
+}
+
+export function resolveAiProvider(name?: string): AiProvider {
+  const resolvedName = (name ?? process.env.AI_PROVIDER ?? env.AI_PROVIDER).toLowerCase();
+
+  if (providerRegistry.has(resolvedName)) {
+    return providerRegistry.get(resolvedName)!;
   }
 
+  switch (resolvedName) {
+    case 'ollama':
+      return new OllamaProvider();
+    case 'fallback':
+      return new FallbackProvider();
+    case 'claude':
+      return new ClaudeProvider();
+    default:
+      return new FallbackProvider();
+  }
+}
+
+export async function runAiProvider(
+  input: AiProviderInput,
+  options?: { provider?: AiProviderName },
+): Promise<AiProviderResult> {
+  const targetProvider = options?.provider ?? input.provider;
+  let selected: AiProvider;
   try {
-    return { provider: selected.name, result: await selected.analyzeTranscript(input), fallback: false };
+    selected = resolveAiProvider(targetProvider);
   } catch (err) {
-    const selectedName = selected.name === 'ollama' ? 'Ollama' : 'Claude';
-    if (selected.name !== 'ollama' && !isExternalAiUnavailable(err)) throw err;
-    if (isAuthenticationError(err)) {
-      markApiKeyInvalid(input.claudeApiKey || env.ANTHROPIC_API_KEY);
-    }
-    const reason = `${selectedName} unavailable: ${errorMessage(err)}`;
+    const classified = classifyAiError(err, 'fallback');
+    const reason = `Provider selection failed: ${classified.message}`;
     const result = buildFallbackPipelineResult({
       meta: input.meta,
       transcript: input.transcript,
       silences: input.silences,
       reason,
     });
-    return { provider: 'fallback', result, fallback: true, reason };
+    return { provider: 'fallback', result, fallback: true, category: classified.category, reason };
+  }
+
+  if (selected.name === 'fallback') {
+    const result = await selected.analyzeTranscript(input);
+    const validated = validatePipelineResult(result, input.meta.durationSec, input.transcript.length > 0, 'fallback');
+    return { provider: 'fallback', result: validated, fallback: true, reason: 'AI_PROVIDER=fallback' };
+  }
+
+  try {
+    const rawResult = await selected.analyzeTranscript(input);
+    const validatedResult = validatePipelineResult(
+      rawResult,
+      input.meta.durationSec,
+      input.transcript.length > 0,
+      selected.name,
+    );
+    return { provider: selected.name, result: validatedResult, fallback: false };
+  } catch (err: unknown) {
+    const classified = classifyAiError(err, selected.name);
+
+    // If genuine programming error, do not silently suppress it
+    if (!classified.isFallbackEligible) {
+      throw err;
+    }
+
+    if (classified.category === 'AUTHENTICATION') {
+      const activeKey = input.claudeApiKey || env.ANTHROPIC_API_KEY;
+      if (activeKey) markApiKeyInvalid(activeKey);
+    }
+
+    const selectedName = selected.name === 'ollama' ? 'Ollama' : 'Claude';
+    const reason = `${selectedName} unavailable [${classified.category}]: ${classified.message}`;
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        msg: 'analysis.fallback',
+        provider: selected.name,
+        category: classified.category,
+        reason: sanitizeLogSecret(classified.message),
+      }),
+    );
+
+    const result = buildFallbackPipelineResult({
+      meta: input.meta,
+      transcript: input.transcript,
+      silences: input.silences,
+      reason,
+    });
+    return { provider: 'fallback', result, fallback: true, category: classified.category, reason };
   }
 }
+
