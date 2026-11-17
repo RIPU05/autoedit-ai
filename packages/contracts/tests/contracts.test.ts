@@ -4,6 +4,11 @@ import {
   SchemaVersionSchema,
   ApiErrorResponseSchema,
   MediaSourceSchema,
+  CanonicalSourceIdSchema,
+  UniversalMediaSourceSchema,
+  SharedCacheKeyInputSchema,
+  RollingBufferConfigSchema,
+  HighlightWindowCandidateSchema,
   MediaSegmentSchema,
   MediaDiscontinuitySchema,
   MediaTimeRangeSchema,
@@ -736,6 +741,63 @@ describe('AutoAI Edit Shared Contracts Suite', () => {
         to: { id: 'v2', name: 'Edited', durationSec: 45 },
       };
       expect(safeValidateContract(VersionDiffSchema, versionDiff).success).toBe(true);
+    });
+  });
+
+  // 15. Step 3B.4: Universal Media Source, Shared Cache & Rolling Buffer Contracts
+  describe('15. Universal Media Source & Shared Ingestion Contracts (Step 3B.4)', () => {
+    it('validates CanonicalSourceId and UniversalMediaSource schemas', () => {
+      expect(safeValidateContract(CanonicalSourceIdSchema, 'youtube:live:dQw4w9WgXcQ').success).toBe(true);
+      expect(safeValidateContract(CanonicalSourceIdSchema, 'twitch:vod:2284910293').success).toBe(true);
+      expect(safeValidateContract(CanonicalSourceIdSchema, 'kick:live:xqc').success).toBe(true);
+      expect(safeValidateContract(CanonicalSourceIdSchema, 'upload:uploaded:asset_123').success).toBe(true);
+      expect(safeValidateContract(CanonicalSourceIdSchema, 'unknown:vod:123').success).toBe(false);
+
+      const src = {
+        canonicalId: 'youtube:vod:dQw4w9WgXcQ',
+        provider: 'youtube',
+        sourceType: 'vod',
+        externalId: 'dQw4w9WgXcQ',
+        normalizedUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        availability: 'UNKNOWN',
+        acquisitionCapability: 'UNSUPPORTED',
+        rightsStatus: 'UNKNOWN',
+        ingestionStatus: 'PENDING',
+      };
+      expect(safeValidateContract(UniversalMediaSourceSchema, src).success).toBe(true);
+    });
+
+    it('enforces ownerUserId requirement on PRIVATE_USER cache keys', () => {
+      const missingOwner = {
+        artifactKind: 'BASE_CLIP',
+        canonicalSourceId: 'upload:uploaded:asset_1',
+        sourceRevision: 'v1',
+        algorithmVersion: 'v1',
+        rightsScope: 'PRIVATE_USER',
+      };
+      expect(safeValidateContract(SharedCacheKeyInputSchema, missingOwner).success).toBe(false);
+
+      const validPrivate = { ...missingOwner, ownerUserId: 'usr_123' };
+      expect(safeValidateContract(SharedCacheKeyInputSchema, validPrivate).success).toBe(true);
+    });
+
+    it('validates configurable RollingBufferConfig and HighlightWindowCandidate', () => {
+      const defaults = validateContract(RollingBufferConfigSchema, {});
+      expect(defaults.preEventSec).toBe(45);
+      expect(defaults.postEventSec).toBe(15);
+      expect(defaults.segmentDurationSec).toBe(6);
+
+      const candidate = {
+        candidateId: 'hl_1',
+        canonicalSourceId: 'twitch:live:shroud',
+        eventTimestampSec: 120,
+        windowStartSec: 75,
+        windowEndSec: 135,
+        compositeScore: 88.5,
+        contributingSignals: ['AUDIO_ENERGY', 'CHAT_VELOCITY'],
+        pinnedSegmentIndices: [12, 13, 14],
+      };
+      expect(safeValidateContract(HighlightWindowCandidateSchema, candidate).success).toBe(true);
     });
   });
 });
