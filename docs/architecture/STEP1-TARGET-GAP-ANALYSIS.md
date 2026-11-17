@@ -117,7 +117,7 @@ graph TD
 ---
 
 ### Module 8: Reference-Based AI Editing Mode
-- **Current State:** Completely absent from codebase. Architectural blueprint approved in `19-REFERENCE-BASED-AI-EDITING.md`.
+- **Current State:** Completely absent from codebase. Architectural blueprint approved in `19-REFERENCE-BASED-AI-EDITING.md` (unmerged branch `docs/reference-based-ai-editing`, PR #6).
 - **Target Requirements:** Pacing and style extraction from an exemplar video (uploaded MP4 or supported public URL) applied to source footage.
 - **Gap:** 100% gap in implementation (UI, API routes, database models, and style transfer logic).
 - **Recommendation:** **NEW MODULE (STAGED FOR MILESTONE 6).**
@@ -144,7 +144,7 @@ graph TD
 ---
 
 ### Module 11: Shared Stream Coordinator & Ingestion Leases
-- **Current State:** Completely absent from codebase. Blueprint approved in `06-LIVESTREAM-INGESTION-ARCHITECTURE.md`.
+- **Current State:** Completely absent from codebase. Blueprint approved in `06-LIVESTREAM-INGESTION-ARCHITECTURE.md` (unmerged branch `docs/autoai-master-blueprint`).
 - **Target Requirements:** Deduplicated ingestion of live streams. When multiple clippers monitor the same live broadcast, only one stream worker records the broadcast into a shared segment buffer.
 - **Gap:** 100% gap in implementation.
 - **Recommendation:** **DEFER UNTIL MILESTONE 7.**

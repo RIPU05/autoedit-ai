@@ -149,7 +149,7 @@ Enable clippers to paste public YouTube, Twitch, or Kick URLs without requiring 
 ## 7. Milestone 6: Reference-Based AI Editing in Composable Studio
 
 ### 7.1 Goal
-Implement exemplar-conditioned style transfer (ARCH-019), allowing users to upload a reference video and apply its pacing, zooms, and typography to source media.
+Implement exemplar-conditioned style transfer (ARCH-019, defined on unmerged branch `docs/reference-based-ai-editing`, PR #6), allowing users to upload a reference video and apply its pacing, zooms, and typography to source media.
 
 ### 7.2 Key Tasks
 - Implement reference video analyzer (extract cut frequency, zoom intensity, subtitle style).
