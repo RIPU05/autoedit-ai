@@ -22,8 +22,8 @@ describe('S3 Client Configuration (getS3ClientConfig)', () => {
       AWS_SECRET_ACCESS_KEY: 'test-secret-access-key',
       S3_BUCKET: 'test-bucket',
     };
-    delete process.env.S3_ENDPOINT;
-    delete process.env.S3_FORCE_PATH_STYLE;
+    process.env.S3_ENDPOINT = '';
+    process.env.S3_FORCE_PATH_STYLE = '';
   });
 
   afterEach(() => {
@@ -64,6 +64,7 @@ describe('S3 Client Configuration (getS3ClientConfig)', () => {
   });
 
   it('respects explicit S3_FORCE_PATH_STYLE=true when S3_ENDPOINT is absent', async () => {
+    process.env.S3_ENDPOINT = '';
     process.env.S3_FORCE_PATH_STYLE = 'true';
     const { getS3ClientConfig } = await import('../../src/lib/s3.js');
     const config = getS3ClientConfig();
