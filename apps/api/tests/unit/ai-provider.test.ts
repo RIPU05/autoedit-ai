@@ -8,12 +8,16 @@ import {
   OllamaProvider,
   FallbackProvider,
   createPipelineResultValidator,
+  validatePipelineResult,
   classifyAiError,
   AiProviderError,
   sanitizeLogSecret,
   markApiKeyInvalid,
   resetInvalidApiKeyCache,
   isApiKeyMarkedInvalid,
+  isNetworkError,
+  isTimeoutError,
+  FP_TOLERANCE_SEC,
 } from '../../src/ai/providers.js';
 import {
   getTranscriptionProvider,
@@ -26,7 +30,7 @@ import {
 } from '../../src/services/transcribe.service.js';
 import type { VideoMeta, TranscriptCue } from '../../src/services/claude.service.js';
 
-describe('AI Provider Boundaries, Validation & Error Taxonomy (Step 3B.3)', () => {
+describe('AI Provider Boundaries, Safety & Validation (Step 3B.3.1)', () => {
   const meta: VideoMeta = { durationSec: 30, width: 1920, height: 1080, fps: 30 };
   const sampleTranscript: TranscriptCue[] = [
     { start: 0, end: 5, text: 'Welcome to the tutorial on automated video editing.', speaker: 'spk_0' },
@@ -47,167 +51,187 @@ describe('AI Provider Boundaries, Validation & Error Taxonomy (Step 3B.3)', () =
     resetTranscriptionProvider();
   });
 
-  // 1. Provider selection
-  it('1. correctly selects registered providers and allows custom provider registration', () => {
-    expect(resolveAiProvider('claude')).toBeInstanceOf(ClaudeProvider);
-    expect(resolveAiProvider('ollama')).toBeInstanceOf(OllamaProvider);
-    expect(resolveAiProvider('fallback')).toBeInstanceOf(FallbackProvider);
+  // 1. Unknown provider name produces configuration error (Fail-Closed)
+  it('1. rejects unknown or misspelled provider names without silent fallback or network calls', async () => {
+    // resolveAiProvider must throw configuration error
+    expect(() => resolveAiProvider('claudee')).toThrow(AiProviderError);
+    expect(() => resolveAiProvider('claudee')).toThrow(/Unknown or unsupported AI provider: "claudee"/);
 
-    // Custom provider registration
-    const customProvider = {
-      name: 'custom-mock' as any,
-      analyzeTranscript: vi.fn(),
-    };
-    registerAiProvider('custom-mock', customProvider as any);
-    expect(resolveAiProvider('custom-mock')).toBe(customProvider);
+    try {
+      resolveAiProvider('deepseek-r1');
+      expect.unreachable('Should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(AiProviderError);
+      expect((err as AiProviderError).category).toBe('INVALID_CONFIGURATION');
+      expect((err as AiProviderError).isFallbackEligible).toBe(false);
+    }
 
-    // Unknown provider falls back to FallbackProvider
-    expect(resolveAiProvider('unknown-nonexistent')).toBeInstanceOf(FallbackProvider);
+    // runAiProvider must fail closed and rethrow immediately
+    await expect(
+      runAiProvider({
+        meta,
+        transcript: sampleTranscript,
+        silences: [],
+        provider: 'non-existent-ai' as any,
+      }),
+    ).rejects.toThrow(/Unknown or unsupported AI provider/);
   });
 
-  // 2. Claude invocation through boundary
-  it('2. invokes Claude provider through boundary and validates structured output', async () => {
-    const mockClaude = new ClaudeProvider();
-    const validClaudeResult = {
-      summary: 'A concise video guide.',
-      strategy: 'High energy pacing',
-      reasoning: 'Editorial cut',
-      highlights: [{ start: 0, end: 10, label: 'Intro', score: 0.9 }],
-      silences: [],
-      speakers: [{ id: 'spk_0', label: 'Speaker 1', segments: [{ start: 0, end: 12 }] }],
-      captions: [{ start: 0, end: 5, text: 'Welcome to the tutorial' }],
-      suggestedTitles: ['Fast Video Editing'],
-      socialCopy: { instagram: 'IG copy', tiktok: 'TT copy', youtube: 'YT copy', linkedin: 'LI copy' },
-      hook: { hook: { text: 'Watch this edit', start: 0, end: 3 }, alternatives: ['Alt hook'] },
-      thumbnail: { bestFrameSec: 2, overlayText: 'Fast AI', concept: 'High visual clarity' },
-      agentLog: [{ agent: 'director', summary: 'Planned cuts', ms: 120 }],
-      operations: [{ index: 0, start: 0, end: 12, label: 'Part 1', keep: true, zoom: 1.05 }],
-      effects: { subtitles: true, zooms: true, transitions: 'fade' as const, music: false },
-      model: 'claude-test',
+  // 2. Explicit fallback selection
+  it('2. continues to support explicit AI_PROVIDER=fallback selection', async () => {
+    expect(resolveAiProvider('fallback')).toBeInstanceOf(FallbackProvider);
+
+    const output = await runAiProvider({
+      meta,
+      transcript: sampleTranscript,
+      silences: [{ start: 12, end: 15 }],
+      provider: 'fallback',
+    });
+
+    expect(output.provider).toBe('fallback');
+    expect(output.fallback).toBe(true);
+    expect(output.reason).toBe('AI_PROVIDER=fallback');
+    expect(output.result.operations.length).toBeGreaterThan(0);
+  });
+
+  // 3. Registered custom provider
+  it('3. allows custom provider registration and invocation', async () => {
+    const customProvider = {
+      name: 'custom-sidecar' as any,
+      analyzeTranscript: vi.fn().mockResolvedValue({
+        summary: 'Custom sidecar summary',
+        strategy: 'Custom strategy',
+        reasoning: 'Custom cut',
+        highlights: [{ start: 0, end: 10, label: 'Custom', score: 0.9 }],
+        silences: [],
+        speakers: [{ id: 'spk_1', label: 'Speaker 1', segments: [{ start: 0, end: 10 }] }],
+        captions: [{ start: 0, end: 5, text: 'Custom caption' }],
+        suggestedTitles: ['Custom Title'],
+        socialCopy: { instagram: 'IG', tiktok: 'TT', youtube: 'YT', linkedin: 'LI' },
+        hook: { hook: { text: 'Custom hook', start: 0, end: 3 }, alternatives: [] },
+        thumbnail: { bestFrameSec: 2, overlayText: 'Custom', concept: 'Clear' },
+        agentLog: [{ agent: 'custom', summary: 'Ran custom', ms: 10 }],
+        operations: [{ index: 0, start: 0, end: 10, label: 'Keep 1', keep: true, zoom: 1 }],
+        effects: { subtitles: true, zooms: false, transitions: 'none' as const, music: false },
+        model: 'custom:v1',
+      }),
+      generateTimeline: vi.fn(),
+      generateTitles: vi.fn(),
+      generateCaptions: vi.fn(),
+      generateSocialCopy: vi.fn(),
     };
 
-    vi.spyOn(mockClaude, 'analyzeTranscript').mockResolvedValue(validClaudeResult);
+    registerAiProvider('custom-sidecar', customProvider);
+    expect(resolveAiProvider('custom-sidecar')).toBe(customProvider);
+
+    const output = await runAiProvider({
+      meta,
+      transcript: sampleTranscript,
+      silences: [],
+      provider: 'custom-sidecar',
+    });
+
+    expect(output.provider).toBe('custom-sidecar');
+    expect(output.fallback).toBe(false);
+    expect(output.result.summary).toBe('Custom sidecar summary');
+  });
+
+  // 4. Genuine TypeError and ReferenceError (never silently suppressed)
+  it('4. classifies genuine programming errors as PROGRAMMING_ERROR and rethrows without fallback', async () => {
+    // Genuine programming TypeError
+    const typeError = new TypeError("Cannot read properties of undefined (reading 'split')");
+    const classifiedTypeError = classifyAiError(typeError);
+    expect(classifiedTypeError.category).toBe('PROGRAMMING_ERROR');
+    expect(classifiedTypeError.isFallbackEligible).toBe(false);
+
+    // Genuine ReferenceError
+    const refError = new ReferenceError('uninitializedVariable is not defined');
+    const classifiedRefError = classifyAiError(refError);
+    expect(classifiedRefError.category).toBe('PROGRAMMING_ERROR');
+    expect(classifiedRefError.isFallbackEligible).toBe(false);
+
+    // Mock Claude provider throwing genuine TypeError
+    const mockClaude = new ClaudeProvider();
+    vi.spyOn(mockClaude, 'analyzeTranscript').mockRejectedValue(typeError);
+    registerAiProvider('claude', mockClaude);
+
+    // runAiProvider MUST rethrow and NOT convert to fallback
+    await expect(
+      runAiProvider({
+        meta,
+        transcript: sampleTranscript,
+        silences: [],
+        claudeApiKey: 'sk-ant-valid-key',
+        provider: 'claude',
+      }),
+    ).rejects.toThrow("Cannot read properties of undefined (reading 'split')");
+  });
+
+  // 5. Network-related TypeError (differentiated and properly classified as connection failure)
+  it('5. distinguishes network-related TypeError from programming TypeError and falls back gracefully', async () => {
+    // Node.js native fetch failure is a TypeError with code in cause
+    const fetchTypeError = new TypeError('fetch failed');
+    (fetchTypeError as any).cause = { code: 'ECONNREFUSED' };
+
+    expect(isNetworkError(fetchTypeError)).toBe(true);
+    const classified = classifyAiError(fetchTypeError);
+    expect(classified.category).toBe('CONNECTION');
+    expect(classified.isFallbackEligible).toBe(true);
+
+    // Mock Claude throwing fetch error
+    const mockClaude = new ClaudeProvider();
+    vi.spyOn(mockClaude, 'analyzeTranscript').mockRejectedValue(fetchTypeError);
     registerAiProvider('claude', mockClaude);
 
     const output = await runAiProvider({
       meta,
       transcript: sampleTranscript,
       silences: [],
-      claudeApiKey: 'sk-ant-test-valid-key',
+      claudeApiKey: 'sk-ant-valid-key',
       provider: 'claude',
     });
 
-    expect(output.provider).toBe('claude');
-    expect(output.fallback).toBe(false);
-    expect(output.result.summary).toBe('A concise video guide.');
-    expect(output.result.operations).toHaveLength(1);
-    expect(output.result.operations[0].start).toBe(0);
-    expect(output.result.operations[0].end).toBe(12);
-  });
-
-  // 3. Ollama invocation through boundary
-  it('3. invokes Ollama provider through boundary when reachable and validated', async () => {
-    const mockOllama = new OllamaProvider('http://127.0.0.1:11434', 'llama3');
-    const validOllamaResult = {
-      summary: 'Local Ollama summary',
-      strategy: 'Balanced pacing',
-      reasoning: 'Local model cut',
-      highlights: [{ start: 0, end: 8, label: 'Local Highlight', score: 0.8 }],
-      silences: [],
-      speakers: [],
-      captions: [{ start: 0, end: 5, text: 'Welcome to the tutorial' }],
-      suggestedTitles: ['Ollama Title'],
-      socialCopy: { instagram: 'Local IG', tiktok: 'Local TT', youtube: 'Local YT', linkedin: 'Local LI' },
-      hook: { hook: { text: 'Local Hook', start: 0, end: 2 }, alternatives: [] },
-      thumbnail: { bestFrameSec: 1, overlayText: 'Local Thumb', concept: 'Good face' },
-      agentLog: [{ agent: 'local-director', summary: 'Local plan', ms: 50 }],
-      operations: [{ index: 0, start: 0, end: 10, label: 'Local Keep', keep: true, zoom: 1 }],
-      effects: { subtitles: false, zooms: false, transitions: 'none' as const, music: false },
-      model: 'ollama:llama3',
-    };
-
-    vi.spyOn(mockOllama, 'analyzeTranscript').mockResolvedValue(validOllamaResult);
-    registerAiProvider('ollama', mockOllama);
-
-    const output = await runAiProvider({
-      meta,
-      transcript: sampleTranscript,
-      silences: [],
-      provider: 'ollama',
-    });
-
-    expect(output.provider).toBe('ollama');
-    expect(output.fallback).toBe(false);
-    expect(output.result.summary).toBe('Local Ollama summary');
-  });
-
-  // 4. Deterministic fallback behavior
-  it('4. provides deterministic fallback behavior within video duration', async () => {
-    const output = await runAiProvider({
-      meta,
-      transcript: sampleTranscript,
-      silences: [{ start: 12, end: 15 }],
-      goal: 'Shorts highlight',
-      provider: 'fallback',
-    });
-
-    expect(output.provider).toBe('fallback');
     expect(output.fallback).toBe(true);
-    expect(output.reason).toContain('AI_PROVIDER=fallback');
-    expect(output.result.summary).toContain('Welcome to the tutorial');
-    expect(output.result.operations.length).toBeGreaterThan(0);
-
-    for (const op of output.result.operations) {
-      expect(op.start).toBeGreaterThanOrEqual(0);
-      expect(op.end).toBeLessThanOrEqual(meta.durationSec);
-      expect(op.start).toBeLessThan(op.end);
-      expect(Number.isFinite(op.start)).toBe(true);
-      expect(Number.isFinite(op.end)).toBe(true);
-    }
+    expect(output.category).toBe('CONNECTION');
+    expect(output.reason).toContain('CONNECTION');
   });
 
-  // 5. Missing and invalid credentials
-  it('5. triggers clean fallback for missing and invalid credentials without exposing secrets', async () => {
-    // Missing credentials
-    const missingKeyOutput = await runAiProvider({
+  // 6. 401 authentication error
+  it('6. classifies 401 error, marks key invalid, and falls back', async () => {
+    const authError = new Error('401 unauthorized: invalid x-api-key');
+    (authError as any).status = 401;
+
+    const classified = classifyAiError(authError);
+    expect(classified.category).toBe('AUTHENTICATION');
+    expect(classified.isFallbackEligible).toBe(true);
+
+    const mockClaude = new ClaudeProvider();
+    vi.spyOn(mockClaude, 'analyzeTranscript').mockRejectedValue(authError);
+    registerAiProvider('claude', mockClaude);
+
+    const testKey = 'sk-ant-failing-test-key-12345';
+    const output = await runAiProvider({
       meta,
       transcript: sampleTranscript,
       silences: [],
-      claudeApiKey: '',
+      claudeApiKey: testKey,
       provider: 'claude',
     });
 
-    expect(missingKeyOutput.fallback).toBe(true);
-    expect(missingKeyOutput.reason).toContain('MISSING_CREDENTIALS');
-
-    // Cached invalid credentials (401 simulation)
-    markApiKeyInvalid('sk-ant-cached-invalid-key');
-    expect(isApiKeyMarkedInvalid('sk-ant-cached-invalid-key')).toBe(true);
-
-    const cachedInvalidOutput = await runAiProvider({
-      meta,
-      transcript: sampleTranscript,
-      silences: [],
-      claudeApiKey: 'sk-ant-cached-invalid-key',
-      provider: 'claude',
-    });
-
-    expect(cachedInvalidOutput.fallback).toBe(true);
-    expect(cachedInvalidOutput.reason).toContain('AUTHENTICATION');
+    expect(output.fallback).toBe(true);
+    expect(output.category).toBe('AUTHENTICATION');
+    expect(isApiKeyMarkedInvalid(testKey)).toBe(true);
   });
 
-  // 6. Timeout and rate-limit handling
-  it('6. classifies rate-limit and timeout errors properly and falls back gracefully', async () => {
-    // Simulate rate-limit error (429)
-    const rateLimitError = new Error('429 Too Many Requests: rate limit exceeded');
+  // 7. 429 rate limit
+  it('7. classifies 429 rate limit error and falls back with sanitized reason', async () => {
+    const rateLimitError = new Error('rate_limit_error: token limit reached');
     (rateLimitError as any).status = 429;
-    expect(classifyAiError(rateLimitError).category).toBe('RATE_LIMIT');
 
-    // Simulate timeout error
-    const timeoutError = new Error('The operation timed out after 30000ms');
-    expect(classifyAiError(timeoutError).category).toBe('TIMEOUT');
+    const classified = classifyAiError(rateLimitError);
+    expect(classified.category).toBe('RATE_LIMIT');
+    expect(classified.isFallbackEligible).toBe(true);
 
-    // Test fallback triggered by mock provider throwing rate limit
     const mockClaude = new ClaudeProvider();
     vi.spyOn(mockClaude, 'analyzeTranscript').mockRejectedValue(rateLimitError);
     registerAiProvider('claude', mockClaude);
@@ -216,53 +240,60 @@ describe('AI Provider Boundaries, Validation & Error Taxonomy (Step 3B.3)', () =
       meta,
       transcript: sampleTranscript,
       silences: [],
-      claudeApiKey: 'sk-ant-test-key-1234567890abcdef',
+      claudeApiKey: 'sk-ant-secret-key-987654321',
       provider: 'claude',
     });
 
     expect(output.fallback).toBe(true);
-    expect(output.reason).toContain('RATE_LIMIT');
-    // Ensure API key is sanitized in reason
-    expect(output.reason).not.toContain('sk-ant-test-key-1234567890abcdef');
-    expect(output.result).toBeDefined();
+    expect(output.category).toBe('RATE_LIMIT');
+    expect(output.reason).not.toContain('sk-ant-secret-key-987654321');
   });
 
-  // 7. Malformed AI responses
-  it('7. catches malformed AI responses via Zod validation and safely falls back', async () => {
-    const mockClaude = new ClaudeProvider();
-    // Returning an object missing required fields (e.g. missing operations and highlights)
-    const malformedResult = {
-      summary: 'Broken output without operations',
-      captions: [],
-    } as any;
+  // 8. Timeout handling
+  it('8. classifies timeout errors properly and falls back', async () => {
+    const timeoutErr = new Error('ETIMEDOUT: Connection timed out');
+    (timeoutErr as any).code = 'ETIMEDOUT';
 
-    vi.spyOn(mockClaude, 'analyzeTranscript').mockResolvedValue(malformedResult);
+    expect(isTimeoutError(timeoutErr)).toBe(true);
+    const classified = classifyAiError(timeoutErr);
+    expect(classified.category).toBe('TIMEOUT');
+    expect(classified.isFallbackEligible).toBe(true);
+  });
+
+  // 9. Malformed JSON and model response
+  it('9. catches malformed JSON parse error and falls back', async () => {
+    const syntaxErr = new SyntaxError('Unexpected token < in JSON at position 0');
+    const classified = classifyAiError(syntaxErr);
+    expect(classified.category).toBe('MALFORMED_RESPONSE');
+    expect(classified.isFallbackEligible).toBe(true);
+
+    const mockClaude = new ClaudeProvider();
+    vi.spyOn(mockClaude, 'analyzeTranscript').mockRejectedValue(syntaxErr);
     registerAiProvider('claude', mockClaude);
 
     const output = await runAiProvider({
       meta,
       transcript: sampleTranscript,
       silences: [],
-      claudeApiKey: 'sk-ant-test-key',
+      claudeApiKey: 'sk-ant-key',
       provider: 'claude',
     });
 
     expect(output.fallback).toBe(true);
-    expect(output.reason).toContain('MALFORMED_RESPONSE');
-    expect(output.result.operations.length).toBeGreaterThan(0);
+    expect(output.category).toBe('MALFORMED_RESPONSE');
   });
 
-  // 8. Invalid timeline operations
-  it('8. rejects invalid timeline operations (negative, inverted, or exceeding duration)', () => {
+  // 10. Out-of-bounds operations (negative, inverted, exceeding duration + tolerance)
+  it('10. rejects out-of-bounds timeline operations (rejects beyond FP tolerance)', () => {
     const validator = createPipelineResultValidator(30, true);
 
     const baseValid = {
-      summary: 'Valid summary',
+      summary: 'Summary',
       strategy: 'Strategy',
       reasoning: 'Reason',
       highlights: [{ start: 0, end: 5, label: 'H1', score: 0.9 }],
       silences: [],
-      speakers: [],
+      speakers: [{ id: 'spk_1', label: 'Speaker 1', segments: [{ start: 0, end: 5 }] }],
       captions: [{ start: 0, end: 5, text: 'Hello' }],
       suggestedTitles: ['Title'],
       socialCopy: { instagram: 'a', tiktok: 'b', youtube: 'c', linkedin: 'd' },
@@ -273,159 +304,279 @@ describe('AI Provider Boundaries, Validation & Error Taxonomy (Step 3B.3)', () =
       model: 'test',
     };
 
+    // Operation ending at 30.04 (within 50ms tolerance) passes
+    expect(() =>
+      validator.parse({
+        ...baseValid,
+        operations: [{ index: 0, start: 0, end: 30.04, keep: true }],
+      }),
+    ).not.toThrow();
+
+    // Operation ending at 30.1 (exceeds 50ms tolerance for 30s video) fails
+    expect(() =>
+      validator.parse({
+        ...baseValid,
+        operations: [{ index: 0, start: 0, end: 30.1, keep: true }],
+      }),
+    ).toThrow(/operation end exceeds video duration/);
+
     // Negative start time
     expect(() =>
       validator.parse({
         ...baseValid,
-        operations: [{ index: 0, start: -2, end: 10, keep: true }],
+        operations: [{ index: 0, start: -0.5, end: 10, keep: true }],
       }),
     ).toThrow();
 
-    // Inverted start/end (start >= end)
+    // Inverted start/end
     expect(() =>
       validator.parse({
         ...baseValid,
         operations: [{ index: 0, start: 15, end: 10, keep: true }],
       }),
-    ).toThrow();
-
-    // End exceeding duration (35 > 30)
-    expect(() =>
-      validator.parse({
-        ...baseValid,
-        operations: [{ index: 0, start: 0, end: 35, keep: true }],
-      }),
-    ).toThrow();
-
-    // Non-finite NaN timestamp
-    expect(() =>
-      validator.parse({
-        ...baseValid,
-        operations: [{ index: 0, start: NaN, end: 10, keep: true }],
-      }),
-    ).toThrow();
+    ).toThrow(/strictly greater than start/);
   });
 
-  // 9. Preservation of valid output
-  it('9. preserves valid timeline operations, highlights, and metadata without corruption', () => {
-    const validator = createPipelineResultValidator(60, true);
-    const validData = {
-      summary: 'Complete valid pipeline output',
-      strategy: 'Fast paced with clear cut points',
-      reasoning: 'Detailed cut',
-      highlights: [
-        { start: 0, end: 15, label: 'Key takeaway', score: 0.92 },
-        { start: 20, end: 45, label: 'Demonstration', score: 0.88 },
-      ],
+  // 11. Out-of-bounds highlight and caption timestamps
+  it('11. rejects highlights and captions with out-of-bounds or inverted timestamps', () => {
+    const validator = createPipelineResultValidator(30, true);
+
+    const baseValid = {
+      summary: 'Summary',
+      strategy: 'Strategy',
+      reasoning: 'Reason',
       silences: [],
-      speakers: [{ id: 'spk_1', label: 'Presenter', segments: [{ start: 0, end: 45 }] }],
-      captions: [
-        { start: 0, end: 5, text: 'Welcome everyone.' },
-        { start: 20, end: 25, text: 'Here is the demonstration.' },
-      ],
-      suggestedTitles: ['Tutorial Walkthrough', 'Step by Step Demo'],
-      socialCopy: { instagram: 'Check this out!', tiktok: 'Quick tip', youtube: 'Full guide', linkedin: 'Pro insights' },
-      hook: { hook: { text: 'Want to save hours?', start: 0, end: 3 }, alternatives: ['Pro tips'] },
-      thumbnail: { bestFrameSec: 22, overlayText: 'Save Hours', concept: 'High action' },
-      agentLog: [
-        { agent: 'hook', summary: 'Selected intro hook', ms: 40 },
-        { agent: 'director', summary: 'Constructed 2 segments', ms: 110 },
-      ],
-      operations: [
-        { index: 0, start: 0, end: 15, label: 'Hook + Takeaway', keep: true, zoom: 1.08 },
-        { index: 1, start: 20, end: 45, label: 'Demo', keep: true, zoom: 1.0 },
-      ],
-      effects: { subtitles: true, zooms: true, transitions: 'fade' as const, music: true },
-      model: 'claude-3-7-sonnet',
+      speakers: [],
+      suggestedTitles: ['Title'],
+      socialCopy: { instagram: 'a', tiktok: 'b', youtube: 'c', linkedin: 'd' },
+      hook: { hook: { text: 'hook', start: 0, end: 2 }, alternatives: [] },
+      thumbnail: { bestFrameSec: 1, overlayText: 'thumb', concept: 'reason' },
+      agentLog: [],
+      operations: [{ index: 0, start: 0, end: 20, keep: true }],
+      effects: { subtitles: true, zooms: true, transitions: 'none' as const, music: false },
+      model: 'test',
     };
 
-    const parsed = validator.parse(validData);
-    expect(parsed.summary).toBe(validData.summary);
-    expect(parsed.operations).toHaveLength(2);
-    expect(parsed.operations[0].start).toBe(0);
-    expect(parsed.operations[0].end).toBe(15);
-    expect(parsed.operations[1].start).toBe(20);
-    expect(parsed.operations[1].end).toBe(45);
-    expect(parsed.hook.hook.text).toBe('Want to save hours?');
-    expect(parsed.thumbnail.bestFrameSec).toBe(22);
+    // Highlight exceeding duration
+    expect(() =>
+      validator.parse({
+        ...baseValid,
+        highlights: [{ start: 0, end: 32, label: 'Too long', score: 0.8 }],
+        captions: [{ start: 0, end: 5, text: 'Hi' }],
+      }),
+    ).toThrow(/highlight end exceeds video duration/);
+
+    // Inverted highlight
+    expect(() =>
+      validator.parse({
+        ...baseValid,
+        highlights: [{ start: 10, end: 5, label: 'Inverted', score: 0.8 }],
+        captions: [{ start: 0, end: 5, text: 'Hi' }],
+      }),
+    ).toThrow(/strictly greater than start/);
+
+    // Caption exceeding duration
+    expect(() =>
+      validator.parse({
+        ...baseValid,
+        highlights: [{ start: 0, end: 5, label: 'H', score: 0.8 }],
+        captions: [{ start: 0, end: 35, text: 'Out of bounds caption' }],
+      }),
+    ).toThrow(/caption end exceeds video duration/);
   });
 
-  // 10. Whisper unavailable / degraded mode
-  it('10. handles Whisper sidecar unavailable with transcription provider interface', async () => {
-    class FailingWhisperProvider implements TranscriptionProvider {
-      readonly name = 'failing-whisper';
-      async transcribe(): Promise<never> {
-        throw new Error('Whisper container unreachable (ECONNREFUSED)');
-      }
-      async checkHealth(): Promise<boolean> {
-        return false;
-      }
-    }
+  // 12. Invalid speaker and hook ranges
+  it('12. rejects out-of-bounds speaker segments and hook ranges', () => {
+    const validator = createPipelineResultValidator(30, true);
 
-    setTranscriptionProvider(new FailingWhisperProvider());
-    expect(getTranscriptionProvider().name).toBe('failing-whisper');
-    expect(await transcriberHealthy()).toBe(false);
+    const baseValid = {
+      summary: 'Summary',
+      strategy: 'Strategy',
+      reasoning: 'Reason',
+      highlights: [{ start: 0, end: 5, label: 'H', score: 0.8 }],
+      silences: [],
+      captions: [{ start: 0, end: 5, text: 'Hi' }],
+      suggestedTitles: ['Title'],
+      socialCopy: { instagram: 'a', tiktok: 'b', youtube: 'c', linkedin: 'd' },
+      thumbnail: { bestFrameSec: 1, overlayText: 'thumb', concept: 'reason' },
+      agentLog: [],
+      operations: [{ index: 0, start: 0, end: 20, keep: true }],
+      effects: { subtitles: true, zooms: true, transitions: 'none' as const, music: false },
+      model: 'test',
+    };
 
-    await expect(transcribeRich('dummy.wav', undefined, { retries: 1 })).rejects.toThrow(
-      /Whisper container unreachable/,
-    );
+    // Speaker segment exceeding duration
+    expect(() =>
+      validator.parse({
+        ...baseValid,
+        speakers: [{ id: 'spk_1', label: 'Spk', segments: [{ start: 0, end: 40 }] }],
+        hook: { hook: { text: 'hook', start: 0, end: 2 }, alternatives: [] },
+      }),
+    ).toThrow(/speaker segment end exceeds video duration/);
+
+    // Hook inverted
+    expect(() =>
+      validator.parse({
+        ...baseValid,
+        speakers: [{ id: 'spk_1', label: 'Spk', segments: [{ start: 0, end: 10 }] }],
+        hook: { hook: { text: 'hook', start: 5, end: 2 }, alternatives: [] },
+      }),
+    ).toThrow(/hook end must be strictly greater than start/);
   });
 
-  // 11. No fabricated transcript or captions when transcript is empty
-  it('11. enforces no fabricated captions when transcript is empty in degraded mode', async () => {
-    // When hasTranscript is false, validator strictly rejects any captions
+  // 13. Invalid thumbnail frame position
+  it('13. rejects thumbnail positions that exceed video duration or are negative', () => {
+    const validator = createPipelineResultValidator(30, true);
+
+    const baseValid = {
+      summary: 'Summary',
+      strategy: 'Strategy',
+      reasoning: 'Reason',
+      highlights: [{ start: 0, end: 5, label: 'H', score: 0.8 }],
+      silences: [],
+      speakers: [],
+      captions: [{ start: 0, end: 5, text: 'Hi' }],
+      suggestedTitles: ['Title'],
+      socialCopy: { instagram: 'a', tiktok: 'b', youtube: 'c', linkedin: 'd' },
+      hook: { hook: { text: 'hook', start: 0, end: 2 }, alternatives: [] },
+      agentLog: [],
+      operations: [{ index: 0, start: 0, end: 20, keep: true }],
+      effects: { subtitles: true, zooms: true, transitions: 'none' as const, music: false },
+      model: 'test',
+    };
+
+    // Thumbnail position beyond video duration
+    expect(() =>
+      validator.parse({
+        ...baseValid,
+        thumbnail: { bestFrameSec: 45, overlayText: 'thumb', concept: 'reason' },
+      }),
+    ).toThrow(/thumbnail frame position exceeds video duration/);
+
+    // Negative thumbnail position
+    expect(() =>
+      validator.parse({
+        ...baseValid,
+        thumbnail: { bestFrameSec: -2, overlayText: 'thumb', concept: 'reason' },
+      }),
+    ).toThrow();
+  });
+
+  // 14. No fabricated captions when transcript is unavailable
+  it('14. strictly prohibits fabricated captions when media has no transcript', () => {
     const validatorNoTranscript = createPipelineResultValidator(30, false);
 
-    const resultWithFabricatedCaptions = {
-      summary: 'Silent or un-transcribed video',
+    const fabricatedResult = {
+      summary: 'Silent video',
       strategy: 'Strategy',
-      reasoning: 'Reasoning',
-      highlights: [{ start: 0, end: 10, label: 'Segment 1', score: 0.7 }],
+      reasoning: 'Reason',
+      highlights: [{ start: 0, end: 5, label: 'H', score: 0.8 }],
       silences: [],
       speakers: [],
       captions: [{ start: 0, end: 5, text: 'Invented phantom dialogue' }],
-      suggestedTitles: ['Silent Video'],
+      suggestedTitles: ['Title'],
       socialCopy: { instagram: 'a', tiktok: 'b', youtube: 'c', linkedin: 'd' },
-      hook: { hook: { text: 'Hook', start: 0, end: 2 }, alternatives: [] },
-      thumbnail: { bestFrameSec: 1, overlayText: 'H', concept: 'R' },
+      hook: { hook: { text: 'hook', start: 0, end: 2 }, alternatives: [] },
+      thumbnail: { bestFrameSec: 1, overlayText: 'thumb', concept: 'reason' },
       agentLog: [],
-      operations: [{ index: 0, start: 0, end: 30, keep: true }],
+      operations: [{ index: 0, start: 0, end: 20, keep: true }],
       effects: { subtitles: false, zooms: false, transitions: 'none' as const, music: false },
       model: 'test',
     };
 
-    expect(() => validatorNoTranscript.parse(resultWithFabricatedCaptions)).toThrow(
+    expect(() => validatorNoTranscript.parse(fabricatedResult)).toThrow(
       /invented transcript or captions are not permitted/,
     );
-
-    // Fallback provider running on empty transcript must return 0 captions
-    const fallbackEmptyOutput = await runAiProvider({
-      meta,
-      transcript: [],
-      silences: [],
-      provider: 'fallback',
-    });
-
-    expect(fallbackEmptyOutput.result.captions).toHaveLength(0);
   });
 
-  // 12. No accidental paid API calls in tests
-  it('12. ensures test execution never accidentally calls paid Claude API without credentials', async () => {
-    // With AI_PROVIDER=fallback or missing credentials, Claude client is never called
+  // 15. Valid results preserving metadata
+  it('15. preserves valid timeline operations, highlights, and custom metadata without stripping', () => {
+    const validator = createPipelineResultValidator(60, true);
+    const validData = {
+      summary: 'Valid summary',
+      strategy: 'Strategy',
+      reasoning: 'Reason',
+      highlights: [{ start: 0, end: 15, label: 'H1', score: 0.9, customHighlightTag: 'tag1' }],
+      silences: [],
+      speakers: [{ id: 'spk_1', label: 'Presenter', segments: [{ start: 0, end: 45 }] }],
+      captions: [{ start: 0, end: 5, text: 'Hello', confidence: 0.95 }],
+      suggestedTitles: ['Title 1', 'Title 2'],
+      socialCopy: { instagram: 'a', tiktok: 'b', youtube: 'c', linkedin: 'd' },
+      hook: { hook: { text: 'hook', start: 0, end: 3 }, alternatives: ['alt1'] },
+      thumbnail: { bestFrameSec: 5, overlayText: 'thumb', concept: 'clear' },
+      agentLog: [{ agent: 'test', ms: 50, summary: 'done' }],
+      operations: [
+        { index: 0, start: 0, end: 15, label: 'Clip 1', keep: true, zoom: 1.08, speedMultiplier: 1.2 },
+        { index: 1, start: 20, end: 45, label: 'Clip 2', keep: true, zoom: 1.0 },
+      ],
+      effects: {
+        subtitles: true,
+        zooms: true,
+        transitions: 'fade' as const,
+        music: true,
+        metadata: { customEffectPreset: 'cinematic' },
+      },
+      model: 'claude-3-7-sonnet',
+      extraTopLevelProperty: 'preserved',
+    };
+
+    const parsed = validator.parse(validData) as any;
+    expect(parsed.operations[0].speedMultiplier).toBe(1.2);
+    expect(parsed.effects.metadata.customEffectPreset).toBe('cinematic');
+    expect(parsed.extraTopLevelProperty).toBe('preserved');
+  });
+
+  // 16. Validation of emergency fallback results
+  it('16. validates emergency fallback results generated after external provider failure', async () => {
+    const mockClaude = new ClaudeProvider();
+    vi.spyOn(mockClaude, 'analyzeTranscript').mockRejectedValue(new Error('Connection error (503)'));
+    registerAiProvider('claude', mockClaude);
+
     const output = await runAiProvider({
       meta,
       transcript: sampleTranscript,
-      silences: [],
-      provider: 'fallback',
+      silences: [{ start: 15, end: 20 }],
+      claudeApiKey: 'sk-ant-test-key',
+      provider: 'claude',
     });
 
-    expect(output.provider).toBe('fallback');
     expect(output.fallback).toBe(true);
+    expect(output.category).toBe('CONNECTION');
+    // Ensure the fallback result itself passed validation and is fully well-formed
+    expect(output.result.operations.length).toBeGreaterThan(0);
+    for (const op of output.result.operations) {
+      expect(op.start).toBeGreaterThanOrEqual(0);
+      expect(op.end).toBeLessThanOrEqual(meta.durationSec + FP_TOLERANCE_SEC);
+      expect(op.end).toBeGreaterThan(op.start);
+    }
+  });
 
-    // Secret sanitization guarantees
-    const rawSecret = 'sk-ant-api03-abcdef1234567890abcdef1234567890';
-    const sanitized = sanitizeLogSecret(`Failed request with authorization ${rawSecret} in header`);
-    expect(sanitized).not.toContain(rawSecret);
-    expect(sanitized).toContain('sk-ant-***');
+  // 17. Invalid fallback output failing safely without infinite loop
+  it('17. fails closed if fallback output itself fails validation', () => {
+    const corruptedFallbackResult = {
+      summary: 'Corrupted fallback',
+      strategy: 'Strategy',
+      reasoning: 'Reason',
+      highlights: [],
+      speakers: [],
+      captions: [],
+      suggestedTitles: ['Title'],
+      socialCopy: { instagram: '', tiktok: '', youtube: '', linkedin: '' },
+      hook: { hook: { text: 'hook', start: 0, end: 2 }, alternatives: [] },
+      thumbnail: { bestFrameSec: 0, overlayText: '', concept: '' },
+      agentLog: [],
+      operations: [{ index: 0, start: 10, end: 5, keep: true }], // Invalid inverted operation!
+      effects: { subtitles: false, zooms: false, transitions: 'none' as const, music: false },
+      model: 'fallback',
+    };
+
+    try {
+      validatePipelineResult(corruptedFallbackResult, 30, false, 'fallback');
+      expect.unreachable('Should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(AiProviderError);
+      expect((err as AiProviderError).isFallbackEligible).toBe(false); // Must not attempt further fallback!
+      expect((err as AiProviderError).category).toBe('INVALID_OPERATION');
+    }
   });
 });

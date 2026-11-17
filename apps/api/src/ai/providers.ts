@@ -13,7 +13,8 @@ export type AiErrorCategory =
   | 'TIMEOUT'
   | 'MALFORMED_RESPONSE'
   | 'INVALID_OPERATION'
-  | 'PROGRAMMING_ERROR';
+  | 'PROGRAMMING_ERROR'
+  | 'INVALID_CONFIGURATION';
 
 export class AiProviderError extends Error {
   readonly category: AiErrorCategory;
@@ -34,7 +35,9 @@ export class AiProviderError extends Error {
     this.category = opts.category;
     this.provider = opts.provider;
     this.status = opts.status;
-    this.isFallbackEligible = opts.isFallbackEligible ?? (opts.category !== 'PROGRAMMING_ERROR');
+    this.isFallbackEligible =
+      opts.isFallbackEligible ??
+      (opts.category !== 'PROGRAMMING_ERROR' && opts.category !== 'INVALID_CONFIGURATION');
     if (opts.cause) this.cause = opts.cause;
   }
 }
@@ -93,6 +96,43 @@ export function resetInvalidApiKeyCache() {
   cachedInvalidApiKey = null;
 }
 
+export function isTimeoutError(err: unknown): boolean {
+  if (!err) return false;
+  const anyErr = err as any;
+  const name = anyErr?.name ?? '';
+  const code = anyErr?.code ?? anyErr?.cause?.code;
+  const msg = errorMessage(err);
+
+  return (
+    name === 'TimeoutError' ||
+    name === 'APIConnectionTimeoutError' ||
+    code === 'ETIMEDOUT' ||
+    code === 'UND_ERR_CONNECT_TIMEOUT' ||
+    /timeout|timed? ?out|ETIMEDOUT/i.test(msg)
+  );
+}
+
+export function isNetworkError(err: unknown): boolean {
+  if (!err) return false;
+  const anyErr = err as any;
+  const name = anyErr?.name ?? '';
+  const code = anyErr?.code ?? anyErr?.cause?.code;
+  const msg = errorMessage(err);
+
+  if (name === 'APIConnectionError' || name === 'APIConnectionTimeoutError') return true;
+  if (name === 'TimeoutError' || name === 'AbortError') return true;
+  if (
+    code &&
+    /^(ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|EHOSTUNREACH|EAI_AGAIN|UND_ERR_)/i.test(String(code))
+  ) {
+    return true;
+  }
+  if (name === 'TypeError' && (msg === 'fetch failed' || anyErr?.cause?.code)) {
+    return true;
+  }
+  return /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|fetch failed|connection error/i.test(msg);
+}
+
 export function isAuthenticationError(err: unknown): boolean {
   if (!err) return false;
   const anyErr = err as any;
@@ -103,6 +143,9 @@ export function isAuthenticationError(err: unknown): boolean {
 
 export function isExternalAiUnavailable(err: unknown) {
   if (!err) return false;
+  if (err instanceof TypeError || err instanceof ReferenceError) {
+    if (!isNetworkError(err)) return false;
+  }
   const anyErr = err as any;
   if (
     anyErr.status === 401 ||
@@ -124,8 +167,11 @@ export function isExternalAiUnavailable(err: unknown) {
   ) {
     return true;
   }
+  if (isNetworkError(err)) {
+    return true;
+  }
   const message = errorMessage(err);
-  return /(?:invalid x-api-key|authentication|api key|credit balance|billing|quota|rate.?limit|claude (?:401|402|403|429)|ollama|model|ECONNREFUSED|fetch failed|\b(?:401|402|403|429)\b)/i.test(
+  return /(?:invalid x-api-key|authentication|credit balance|billing|quota|rate.?limit|claude (?:401|402|403|429)|\b(?:401|402|403|429)\b)/i.test(
     message,
   );
 }
@@ -137,82 +183,19 @@ export function classifyAiError(err: unknown, provider: AiProviderName = 'fallba
   const status = (err as any)?.status ?? (err as any)?.statusCode;
   const name = (err as any)?.name ?? '';
 
-  if (isAuthenticationError(err)) {
+  // 1. Invalid configuration errors
+  if ((err as any)?.category === 'INVALID_CONFIGURATION' || /unknown (?:or unsupported )?ai provider/i.test(msg)) {
     return new AiProviderError({
       message: sanitizeLogSecret(msg),
-      category: 'AUTHENTICATION',
+      category: 'INVALID_CONFIGURATION',
       provider,
-      status: 401,
       cause: err,
+      isFallbackEligible: false,
     });
   }
 
-  if (status === 429 || name === 'RateLimitError' || /rate.?limit/i.test(msg)) {
-    return new AiProviderError({
-      message: sanitizeLogSecret(msg),
-      category: 'RATE_LIMIT',
-      provider,
-      status: 429,
-      cause: err,
-    });
-  }
-
-  if (
-    name === 'APIConnectionTimeoutError' ||
-    name === 'TimeoutError' ||
-    /timeout|timed? ?out|ETIMEDOUT/i.test(msg)
-  ) {
-    return new AiProviderError({
-      message: sanitizeLogSecret(msg),
-      category: 'TIMEOUT',
-      provider,
-      status: 504,
-      cause: err,
-    });
-  }
-
-  if (
-    name === 'APIConnectionError' ||
-    /ECONNREFUSED|ENOTFOUND|fetch failed|connection error/i.test(msg)
-  ) {
-    return new AiProviderError({
-      message: sanitizeLogSecret(msg),
-      category: 'CONNECTION',
-      provider,
-      status: 503,
-      cause: err,
-    });
-  }
-
-  if (err instanceof z.ZodError || /malformed|missing (?:response|field)|invalid json|JSON\.parse/i.test(msg)) {
-    return new AiProviderError({
-      message: sanitizeLogSecret(msg),
-      category: 'MALFORMED_RESPONSE',
-      provider,
-      cause: err,
-    });
-  }
-
-  if (/operation.*exceed|invalid timeline|end <= start|negative/i.test(msg)) {
-    return new AiProviderError({
-      message: sanitizeLogSecret(msg),
-      category: 'INVALID_OPERATION',
-      provider,
-      cause: err,
-    });
-  }
-
-  if (isExternalAiUnavailable(err)) {
-    return new AiProviderError({
-      message: sanitizeLogSecret(msg),
-      category: 'CONNECTION',
-      provider,
-      status,
-      cause: err,
-    });
-  }
-
-  if (err instanceof TypeError || err instanceof ReferenceError) {
+  // 2. ReferenceError is always a programming defect
+  if (err instanceof ReferenceError) {
     return new AiProviderError({
       message: sanitizeLogSecret(msg),
       category: 'PROGRAMMING_ERROR',
@@ -222,12 +205,150 @@ export function classifyAiError(err: unknown, provider: AiProviderName = 'fallba
     });
   }
 
+  // 3. TypeError: differentiate network TypeError (e.g. Node fetch failed) from programming TypeError
+  if (err instanceof TypeError) {
+    if (isNetworkError(err)) {
+      const isTimeout = isTimeoutError(err);
+      return new AiProviderError({
+        message: sanitizeLogSecret(msg),
+        category: isTimeout ? 'TIMEOUT' : 'CONNECTION',
+        provider,
+        status: isTimeout ? 504 : 503,
+        cause: err,
+        isFallbackEligible: true,
+      });
+    }
+
+    // Genuine programming TypeError (e.g. Cannot read properties of undefined, x is not a function)
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'PROGRAMMING_ERROR',
+      provider,
+      cause: err,
+      isFallbackEligible: false,
+    });
+  }
+
+  // 4. Authentication errors (401)
+  if (status === 401 || isAuthenticationError(err)) {
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'AUTHENTICATION',
+      provider,
+      status: 401,
+      cause: err,
+      isFallbackEligible: true,
+    });
+  }
+
+  // 5. Rate limit errors (429)
+  if (status === 429 || name === 'RateLimitError' || /rate.?limit/i.test(msg)) {
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'RATE_LIMIT',
+      provider,
+      status: 429,
+      cause: err,
+      isFallbackEligible: true,
+    });
+  }
+
+  // 6. Timeout errors (504, TimeoutError, AbortError, ETIMEDOUT)
+  if (
+    status === 504 ||
+    name === 'APIConnectionTimeoutError' ||
+    name === 'TimeoutError' ||
+    isTimeoutError(err)
+  ) {
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'TIMEOUT',
+      provider,
+      status: 504,
+      cause: err,
+      isFallbackEligible: true,
+    });
+  }
+
+  // 7. Connection errors (503, ECONNREFUSED, ENOTFOUND, network errors)
+  if (
+    status === 503 ||
+    status === 502 ||
+    name === 'APIConnectionError' ||
+    isNetworkError(err)
+  ) {
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'CONNECTION',
+      provider,
+      status: typeof status === 'number' ? status : 503,
+      cause: err,
+      isFallbackEligible: true,
+    });
+  }
+
+  // 8. Output validation errors (ZodError)
+  if (err instanceof z.ZodError) {
+    const isOperationIssue = err.issues.some((issue) =>
+      issue.path.includes('operations') ||
+      issue.path.includes('highlights') ||
+      issue.path.includes('captions') ||
+      issue.path.includes('speakers') ||
+      issue.path.includes('hook') ||
+      issue.path.includes('thumbnail') ||
+      issue.message.includes('exceeds video duration') ||
+      issue.message.includes('greater than start')
+    );
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: isOperationIssue ? 'INVALID_OPERATION' : 'MALFORMED_RESPONSE',
+      provider,
+      cause: err,
+      isFallbackEligible: provider !== 'fallback',
+    });
+  }
+
+  // 9. Malformed JSON parse errors (SyntaxError during JSON.parse)
+  if (err instanceof SyntaxError && /JSON/i.test(msg)) {
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'MALFORMED_RESPONSE',
+      provider,
+      cause: err,
+      isFallbackEligible: true,
+    });
+  }
+
+  // 10. Explicit timeline operations bounds violation in message
+  if (/operation.*exceed|invalid timeline|end <= start|negative/i.test(msg)) {
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'INVALID_OPERATION',
+      provider,
+      cause: err,
+      isFallbackEligible: true,
+    });
+  }
+
+  // 11. Known external HTTP error status
+  if (typeof status === 'number' && [500, 502, 503, 504].includes(status)) {
+    return new AiProviderError({
+      message: sanitizeLogSecret(msg),
+      category: 'CONNECTION',
+      provider,
+      status,
+      cause: err,
+      isFallbackEligible: true,
+    });
+  }
+
+  // 12. Other unknown errors: fail closed! Do not automatically classify as recoverable malformed response.
   return new AiProviderError({
     message: sanitizeLogSecret(msg),
-    category: 'MALFORMED_RESPONSE',
+    category: 'PROGRAMMING_ERROR',
     provider,
     cause: err,
-    isFallbackEligible: true,
+    isFallbackEligible: false,
   });
 }
 
@@ -245,6 +366,8 @@ function subtractSilences(start: number, end: number, silences: SilenceSegment[]
   }
   return spans;
 }
+
+export const FP_TOLERANCE_SEC = 0.05; // 50ms explicit floating-point tolerance for frame rounding
 
 export function buildFallbackPipelineResult(input: {
   meta: { durationSec: number };
@@ -276,6 +399,12 @@ export function buildFallbackPipelineResult(input: {
         score: 0.5,
       }));
 
+      const hookStart = operations[0].start;
+      const hookEnd = Math.min(
+        operations[0].end,
+        hookStart + Math.max(0.5, Math.min(5, operations[0].end - hookStart)),
+      );
+
       return {
         summary: 'Degraded audio analysis generated using silence detection (speech transcript unavailable).',
         strategy: 'Silence-based edit keeping active audio segments with detected pauses removed.',
@@ -291,7 +420,7 @@ export function buildFallbackPipelineResult(input: {
           linkedin: 'Auto-generated edit (silence-trimmed)',
         },
         hook: {
-          hook: { start: operations[0].start, end: Math.min(operations[0].end, 5), text: operations[0].label },
+          hook: { start: hookStart, end: hookEnd, text: operations[0].label },
           alternatives: ['Auto-generated edit'],
         },
         thumbnail: { concept: 'Use the opening frame', overlayText: 'Auto edit', bestFrameSec: operations[0]?.start ?? 0 },
@@ -309,6 +438,7 @@ export function buildFallbackPipelineResult(input: {
     }
 
     const end = dur;
+    const hookEnd = Math.min(end, Math.max(0.5, Math.min(5, end)));
     return {
       summary: 'Fallback edit generated from video-only media with no audio transcript.',
       strategy: 'Fallback edit keeps the full video because no audio transcript is available.',
@@ -323,7 +453,7 @@ export function buildFallbackPipelineResult(input: {
         youtube: 'Auto-generated edit',
         linkedin: 'Auto-generated edit',
       },
-      hook: { hook: { start: 0, end: Math.min(end, 5), text: 'Auto-generated edit' }, alternatives: ['Auto-generated edit'] },
+      hook: { hook: { start: 0, end: hookEnd, text: 'Auto-generated edit' }, alternatives: ['Auto-generated edit'] },
       thumbnail: { concept: 'Use the opening frame', overlayText: 'Auto edit', bestFrameSec: 0 },
       operations: [{ index: 0, start: 0, end, label: 'Video-only segment', keep: true, zoom: 1 }],
       effects: {
@@ -338,11 +468,15 @@ export function buildFallbackPipelineResult(input: {
     };
   }
 
-  const captions = input.transcript.map((cue) => ({
-    start: cue.start,
-    end: cue.end,
-    text: cue.text,
-  }));
+  const captions = input.transcript
+    .filter((cue) => cue.end > cue.start)
+    .map((cue) => ({
+      start: Math.max(0, Math.min(cue.start, input.meta.durationSec)),
+      end: Math.max(0, Math.min(cue.end, input.meta.durationSec)),
+      text: cue.text,
+    }))
+    .filter((cue) => cue.end > cue.start);
+
   const operations = input.transcript
     .flatMap((cue) =>
       subtractSilences(
@@ -355,6 +489,17 @@ export function buildFallbackPipelineResult(input: {
     .sort((a, b) => a.start - b.start)
     .map((op, index) => ({ index, ...op, keep: true, zoom: 1 }));
 
+  if (operations.length === 0) {
+    operations.push({
+      index: 0,
+      start: 0,
+      end: dur,
+      label: 'Full segment',
+      keep: true,
+      zoom: 1,
+    });
+  }
+
   const fullText = input.transcript.map((cue) => cue.text).join(' ').trim();
   const summary = fullText || 'Fallback edit generated from transcript and silence detection.';
   const highlights = operations.map((op) => ({
@@ -363,6 +508,11 @@ export function buildFallbackPipelineResult(input: {
     label: op.label,
     score: 0.5,
   }));
+
+  const hookStart = operations[0] ? operations[0].start : 0;
+  const hookEnd = operations[0]
+    ? Math.min(operations[0].end, hookStart + Math.max(0.5, Math.min(5, operations[0].end - hookStart)))
+    : Math.min(dur, Math.max(0.5, Math.min(5, dur)));
 
   return {
     summary,
@@ -379,9 +529,11 @@ export function buildFallbackPipelineResult(input: {
       linkedin: 'Auto-generated edit',
     },
     hook: {
-      hook: operations[0]
-        ? { start: operations[0].start, end: operations[0].end, text: operations[0].label }
-        : { start: 0, end: Math.min(input.meta.durationSec, 5), text: 'Auto-generated edit' },
+      hook: {
+        start: hookStart,
+        end: hookEnd,
+        text: operations[0]?.label ?? 'Auto-generated edit',
+      },
       alternatives: ['Auto-generated edit'],
     },
     thumbnail: { concept: 'Use the opening frame', overlayText: 'Auto edit', bestFrameSec: operations[0]?.start ?? 0 },
@@ -399,7 +551,7 @@ export function buildFallbackPipelineResult(input: {
 }
 
 export function createPipelineResultValidator(durationSec: number, hasTranscript: boolean) {
-  const maxDuration = Math.max(0.1, durationSec + 1.0); // allow floating point tolerance
+  const maxDuration = Math.max(0.1, durationSec + FP_TOLERANCE_SEC);
 
   const OperationSchema = z
     .object({
@@ -422,93 +574,181 @@ export function createPipelineResultValidator(durationSec: number, hasTranscript
       keep: z.boolean().default(true),
       zoom: z.number().finite().positive().default(1.0),
     })
+    .passthrough()
     .refine((op) => op.end > op.start, {
       message: 'operation end must be strictly greater than start',
     });
 
   const HighlightSchema = z
     .object({
-      start: z.number().finite().nonnegative(),
-      end: z.number().finite().positive(),
+      start: z
+        .number()
+        .finite()
+        .nonnegative()
+        .refine((val) => val <= maxDuration, {
+          message: 'highlight start exceeds video duration',
+        }),
+      end: z
+        .number()
+        .finite()
+        .positive()
+        .refine((val) => val <= maxDuration, {
+          message: 'highlight end exceeds video duration',
+        }),
       label: z.string().min(1),
       score: z.number().finite().min(0).max(100),
     })
+    .passthrough()
     .refine((h) => h.end > h.start, {
-      message: 'highlight end must be greater than start',
+      message: 'highlight end must be strictly greater than start',
     });
 
-  const CaptionSchema = z.object({
-    start: z.number().finite().nonnegative(),
-    end: z.number().finite().positive(),
-    text: z.string(),
-  });
-
-  return z.object({
-    summary: z.string().min(1, 'summary is required'),
-    strategy: z.string().min(1, 'strategy is required'),
-    reasoning: z.string().default(''),
-    highlights: z.array(HighlightSchema).default([]),
-    speakers: z
-      .array(
-        z.object({
-          id: z.string(),
-          label: z.string(),
-          segments: z.array(
-            z.object({
-              start: z.number().finite().nonnegative(),
-              end: z.number().finite().positive(),
-            }),
-          ),
+  const CaptionSchema = z
+    .object({
+      start: z
+        .number()
+        .finite()
+        .nonnegative()
+        .refine((val) => val <= maxDuration, {
+          message: 'caption start exceeds video duration',
         }),
-      )
-      .default([]),
-    captions: z.array(CaptionSchema).superRefine((captions, ctx) => {
-      if (!hasTranscript && captions.length > 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'invented transcript or captions are not permitted when transcript is unavailable',
-        });
-      }
-    }),
-    suggestedTitles: z.array(z.string().min(1)).min(1, 'at least one title required'),
-    socialCopy: z.object({
-      instagram: z.string().default(''),
-      tiktok: z.string().default(''),
-      youtube: z.string().default(''),
-      linkedin: z.string().default(''),
-    }),
-    hook: z.object({
-      hook: z.object({
-        start: z.number().finite().nonnegative(),
-        end: z.number().finite().positive(),
-        text: z.string(),
-      }),
+      end: z
+        .number()
+        .finite()
+        .positive()
+        .refine((val) => val <= maxDuration, {
+          message: 'caption end exceeds video duration',
+        }),
+      text: z.string(),
+    })
+    .passthrough()
+    .refine((c) => c.end > c.start, {
+      message: 'caption end must be strictly greater than start',
+    });
+
+  const SpeakerSegmentSchema = z
+    .object({
+      start: z
+        .number()
+        .finite()
+        .nonnegative()
+        .refine((val) => val <= maxDuration, {
+          message: 'speaker segment start exceeds video duration',
+        }),
+      end: z
+        .number()
+        .finite()
+        .positive()
+        .refine((val) => val <= maxDuration, {
+          message: 'speaker segment end exceeds video duration',
+        }),
+    })
+    .passthrough()
+    .refine((s) => s.end > s.start, {
+      message: 'speaker segment end must be strictly greater than start',
+    });
+
+  const SpeakerSchema = z
+    .object({
+      id: z.string(),
+      label: z.string(),
+      segments: z.array(SpeakerSegmentSchema),
+    })
+    .passthrough();
+
+  const HookSchema = z
+    .object({
+      hook: z
+        .object({
+          start: z
+            .number()
+            .finite()
+            .nonnegative()
+            .refine((val) => val <= maxDuration, {
+              message: 'hook start exceeds video duration',
+            }),
+          end: z
+            .number()
+            .finite()
+            .positive()
+            .refine((val) => val <= maxDuration, {
+              message: 'hook end exceeds video duration',
+            }),
+          text: z.string(),
+        })
+        .passthrough()
+        .refine((h) => h.end > h.start, {
+          message: 'hook end must be strictly greater than start',
+        }),
       alternatives: z.array(z.string()).default([]),
-    }),
-    thumbnail: z.object({
+    })
+    .passthrough();
+
+  const ThumbnailSchema = z
+    .object({
       concept: z.string().default('Use the opening frame'),
       overlayText: z.string().default(''),
-      bestFrameSec: z.number().finite().nonnegative().default(0),
-    }),
-    operations: z.array(OperationSchema).min(1, 'at least one timeline operation required'),
-    effects: z.object({
-      subtitles: z.boolean().default(false),
-      zooms: z.boolean().default(false),
-      transitions: z.enum(['fade', 'none']).default('none'),
-      music: z.boolean().default(false),
-      metadata: z.record(z.unknown()).optional(),
-    }),
-    agentLog: z
-      .array(
-        z.object({
-          agent: z.string(),
-          ms: z.number().finite().nonnegative(),
-          summary: z.string(),
-        }),
-      )
-      .default([]),
-    model: z.string().min(1),
-  });
+      bestFrameSec: z
+        .number()
+        .finite()
+        .nonnegative()
+        .refine((val) => val <= maxDuration, {
+          message: 'thumbnail frame position exceeds video duration',
+        })
+        .default(0),
+    })
+    .passthrough();
+
+  return z
+    .object({
+      summary: z.string().min(1, 'summary is required'),
+      strategy: z.string().min(1, 'strategy is required'),
+      reasoning: z.string().default(''),
+      highlights: z.array(HighlightSchema).default([]),
+      speakers: z.array(SpeakerSchema).default([]),
+      captions: z.array(CaptionSchema).superRefine((captions, ctx) => {
+        if (!hasTranscript && captions.length > 0) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'invented transcript or captions are not permitted when transcript is unavailable',
+          });
+        }
+      }),
+      suggestedTitles: z.array(z.string().min(1)).min(1, 'at least one title required'),
+      socialCopy: z
+        .object({
+          instagram: z.string().default(''),
+          tiktok: z.string().default(''),
+          youtube: z.string().default(''),
+          linkedin: z.string().default(''),
+        })
+        .passthrough(),
+      hook: HookSchema,
+      thumbnail: ThumbnailSchema,
+      operations: z.array(OperationSchema).min(1, 'at least one timeline operation required'),
+      effects: z
+        .object({
+          subtitles: z.boolean().default(false),
+          zooms: z.boolean().default(false),
+          transitions: z.enum(['fade', 'none']).default('none'),
+          music: z.boolean().default(false),
+          metadata: z.record(z.unknown()).optional(),
+        })
+        .passthrough(),
+      agentLog: z
+        .array(
+          z
+            .object({
+              agent: z.string(),
+              ms: z.number().finite().nonnegative(),
+              summary: z.string(),
+            })
+            .passthrough(),
+        )
+        .default([]),
+      model: z.string().min(1),
+    })
+    .passthrough();
 }
 
 export function validatePipelineResult(
@@ -523,11 +763,22 @@ export function validatePipelineResult(
     const errorDetails = parseResult.error.issues
       .map((i) => `${i.path.join('.')}: ${i.message}`)
       .join('; ');
+    const isOperationIssue = parseResult.error.issues.some((i) =>
+      i.path.includes('operations') ||
+      i.path.includes('highlights') ||
+      i.path.includes('captions') ||
+      i.path.includes('speakers') ||
+      i.path.includes('hook') ||
+      i.path.includes('thumbnail') ||
+      i.message.includes('exceeds video duration') ||
+      i.message.includes('greater than start')
+    );
     throw new AiProviderError({
       message: `Invalid AI output: ${errorDetails}`,
-      category: 'MALFORMED_RESPONSE',
+      category: isOperationIssue ? 'INVALID_OPERATION' : 'MALFORMED_RESPONSE',
       provider: providerName,
       cause: parseResult.error,
+      isFallbackEligible: providerName !== 'fallback',
     });
   }
   return parseResult.data as PipelineResult;
@@ -768,7 +1019,8 @@ export function resetAiProviders(): void {
 }
 
 export function resolveAiProvider(name?: string): AiProvider {
-  const resolvedName = (name ?? process.env.AI_PROVIDER ?? env.AI_PROVIDER).toLowerCase();
+  const rawName = name ?? process.env.AI_PROVIDER ?? env.AI_PROVIDER;
+  const resolvedName = (rawName ?? '').trim().toLowerCase();
 
   if (providerRegistry.has(resolvedName)) {
     return providerRegistry.get(resolvedName)!;
@@ -782,7 +1034,12 @@ export function resolveAiProvider(name?: string): AiProvider {
     case 'claude':
       return new ClaudeProvider();
     default:
-      return new FallbackProvider();
+      throw new AiProviderError({
+        message: `Unknown or unsupported AI provider: "${rawName}". Supported providers are: claude, ollama, fallback.`,
+        category: 'INVALID_CONFIGURATION',
+        provider: 'fallback',
+        isFallbackEligible: false,
+      });
   }
 }
 
@@ -791,27 +1048,23 @@ export async function runAiProvider(
   options?: { provider?: AiProviderName },
 ): Promise<AiProviderResult> {
   const targetProvider = options?.provider ?? input.provider;
-  let selected: AiProvider;
-  try {
-    selected = resolveAiProvider(targetProvider);
-  } catch (err) {
-    const classified = classifyAiError(err, 'fallback');
-    const reason = `Provider selection failed: ${classified.message}`;
-    const result = buildFallbackPipelineResult({
-      meta: input.meta,
-      transcript: input.transcript,
-      silences: input.silences,
-      reason,
-    });
-    return { provider: 'fallback', result, fallback: true, category: classified.category, reason };
-  }
 
+  // 1. Fail closed on unknown/misconfigured AI provider (never silently convert to fallback)
+  const selected = resolveAiProvider(targetProvider);
+
+  // 2. Explicit fallback selection
   if (selected.name === 'fallback') {
     const result = await selected.analyzeTranscript(input);
-    const validated = validatePipelineResult(result, input.meta.durationSec, input.transcript.length > 0, 'fallback');
+    const validated = validatePipelineResult(
+      result,
+      input.meta.durationSec,
+      input.transcript.length > 0,
+      'fallback',
+    );
     return { provider: 'fallback', result: validated, fallback: true, reason: 'AI_PROVIDER=fallback' };
   }
 
+  // 3. Primary provider execution with strict output validation
   try {
     const rawResult = await selected.analyzeTranscript(input);
     const validatedResult = validatePipelineResult(
@@ -824,7 +1077,7 @@ export async function runAiProvider(
   } catch (err: unknown) {
     const classified = classifyAiError(err, selected.name);
 
-    // If genuine programming error, do not silently suppress it
+    // If genuine programming error, configuration error, or non-recoverable defect, do not silently suppress it
     if (!classified.isFallbackEligible) {
       throw err;
     }
@@ -846,13 +1099,22 @@ export async function runAiProvider(
       }),
     );
 
-    const result = buildFallbackPipelineResult({
+    // 4. Validate emergency fallback output too!
+    // If fallback output itself is invalid, fail closed without recursive fallback loops.
+    const fallbackRaw = buildFallbackPipelineResult({
       meta: input.meta,
       transcript: input.transcript,
       silences: input.silences,
       reason,
     });
-    return { provider: 'fallback', result, fallback: true, category: classified.category, reason };
+    const fallbackValidated = validatePipelineResult(
+      fallbackRaw,
+      input.meta.durationSec,
+      input.transcript.length > 0,
+      'fallback',
+    );
+
+    return { provider: 'fallback', result: fallbackValidated, fallback: true, category: classified.category, reason };
   }
 }
 
