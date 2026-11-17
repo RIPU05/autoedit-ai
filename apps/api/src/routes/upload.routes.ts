@@ -23,13 +23,15 @@ export function verifyKeyOwnership(key: string, userId: string): void {
   if (typeof key !== 'string' || !key.trim()) {
     throw new HttpError(400, 'invalid s3 key');
   }
-  // Prevent directory traversal, path escaping, absolute paths, or double slashes
+  // Prevent directory traversal, path escaping, absolute paths, trailing slashes, double slashes, null bytes, or URL-encoded ambiguities
   if (
     key.includes('..') ||
     key.includes('\\') ||
     key.startsWith('/') ||
+    key.endsWith('/') ||
     key.includes('//') ||
-    key.includes('\0')
+    key.includes('\0') ||
+    key.includes('%')
   ) {
     throw new HttpError(403, 'forbidden: invalid or escaping s3 key sequence');
   }
@@ -37,9 +39,29 @@ export function verifyKeyOwnership(key: string, userId: string): void {
     throw new HttpError(403, 'forbidden: s3 key must be within sources/ prefix');
   }
   const parts = key.split('/');
-  // If key follows standard sources/<userId>/... convention, enforce that userId matches
-  if (parts.length >= 3 && parts[1] !== userId) {
+  // Strict namespace requirement: sources/<userId>/<upload-session-id>/<safe-filename>
+  if (parts.length !== 4) {
+    throw new HttpError(
+      403,
+      'forbidden: unsupported key structure: must match sources/<userId>/<upload-session-id>/<filename>',
+    );
+  }
+
+  const [prefix, keyUserId, sessionId, filename] = parts;
+  if (prefix !== 'sources') {
+    throw new HttpError(403, 'forbidden: s3 key must be within sources/ prefix');
+  }
+  if (!keyUserId || keyUserId.trim() === '') {
+    throw new HttpError(403, 'forbidden: empty user id in s3 key');
+  }
+  if (keyUserId !== userId) {
     throw new HttpError(403, 'forbidden: s3 key does not belong to user');
+  }
+  if (!sessionId || !/^[a-zA-Z0-9_-]{1,128}$/.test(sessionId)) {
+    throw new HttpError(403, 'forbidden: invalid upload session namespace in s3 key');
+  }
+  if (!filename || filename === '.' || filename === '..' || !/^[a-zA-Z0-9._-]{1,255}$/.test(filename)) {
+    throw new HttpError(403, 'forbidden: invalid filename in s3 key');
   }
 }
 
@@ -83,31 +105,59 @@ uploadRouter.post(
 uploadRouter.post(
   '/part',
   asyncHandler(async (req, res) => {
-    const { key, uploadId, partNumber, projectId } = z
+    const { key, uploadId, partNumber, projectId, bucket } = z
       .object({
         key: z.string(),
         uploadId: z.string(),
         partNumber: z.number().int().positive(),
         projectId: z.string().optional(),
+        bucket: z.string().optional(),
       })
       .parse(req.body);
 
     verifyKeyOwnership(key, req.user!.sub);
 
     const session = await getUploadSession(uploadId);
-    if (session) {
-      if (session.userId !== req.user!.sub) {
-        throw new HttpError(403, 'forbidden: upload does not belong to user');
-      }
-      if (session.key !== key) {
-        throw new HttpError(400, 's3 key does not match upload session');
-      }
-      if (projectId && session.projectId !== projectId) {
-        throw new HttpError(400, 'upload does not belong to this project');
-      }
+    if (!session) {
+      throw new HttpError(400, 'upload session not found or expired');
+    }
+    if (session.userId !== req.user!.sub) {
+      throw new HttpError(403, 'forbidden: upload does not belong to user');
+    }
+    if (session.key !== key) {
+      throw new HttpError(400, 's3 key does not match upload session');
+    }
+    if (session.uploadId !== uploadId) {
+      throw new HttpError(400, 'upload id does not match upload session');
     }
 
     const storage = getStorageProvider();
+    if (bucket && (bucket !== session.bucket || bucket !== storage.bucket)) {
+      throw new HttpError(400, 'upload bucket does not match session');
+    }
+    if (session.bucket !== storage.bucket) {
+      throw new HttpError(400, 'upload bucket does not match active storage');
+    }
+
+    if (projectId && session.projectId !== projectId) {
+      throw new HttpError(400, 'upload does not belong to this project');
+    }
+
+    const targetProjectId = projectId ?? session.projectId;
+    const project = await prisma.project.findUnique({
+      where: { id: targetProjectId },
+      select: { id: true, userId: true, status: true },
+    });
+    if (!project) {
+      throw new HttpError(404, 'project not found');
+    }
+    if (project.userId !== req.user!.sub) {
+      throw new HttpError(403, 'forbidden: you do not own this project');
+    }
+    if (project.status !== 'UPLOADING') {
+      throw new HttpError(409, 'project upload is not in progress');
+    }
+
     const url = await storage.presignUploadPart({ key, uploadId, partNumber });
     res.json({ url });
   }),
@@ -117,7 +167,7 @@ uploadRouter.post(
 uploadRouter.post(
   '/complete',
   asyncHandler(async (req, res) => {
-    const { projectId, key, uploadId, parts, contentType, sizeBytes } = z
+    const { projectId, key, uploadId, parts, contentType, sizeBytes, bucket } = z
       .object({
         projectId: z.string(),
         key: z.string(),
@@ -125,6 +175,7 @@ uploadRouter.post(
         contentType: z.string(),
         sizeBytes: z.number(),
         parts: z.array(z.object({ ETag: z.string(), PartNumber: z.number() })),
+        bucket: z.string().optional(),
       })
       .parse(req.body);
 
@@ -166,6 +217,13 @@ uploadRouter.post(
     }
 
     const storage = getStorageProvider();
+    if (bucket && (bucket !== session.bucket || bucket !== storage.bucket)) {
+      throw new HttpError(400, 'upload bucket does not match session');
+    }
+    if (session.bucket !== storage.bucket) {
+      throw new HttpError(400, 'upload bucket does not match active storage');
+    }
+
     await storage.completeMultipartUpload({ key, uploadId, parts });
     await clearUploadSession(uploadId);
 
@@ -233,38 +291,55 @@ uploadRouter.post(
 uploadRouter.post(
   '/abort',
   asyncHandler(async (req, res) => {
-    const { key, uploadId, projectId } = z
-      .object({ key: z.string(), uploadId: z.string(), projectId: z.string().optional() })
+    const { key, uploadId, projectId, bucket } = z
+      .object({
+        key: z.string(),
+        uploadId: z.string(),
+        projectId: z.string().optional(),
+        bucket: z.string().optional(),
+      })
       .parse(req.body);
 
     verifyKeyOwnership(key, req.user!.sub);
 
-    if (projectId) {
-      const project = await prisma.project.findUnique({
-        where: { id: projectId },
-        select: { id: true, userId: true, status: true },
-      });
-      if (!project) throw new HttpError(404, 'project not found');
-      if (project.userId !== req.user!.sub) throw new HttpError(403, 'forbidden: you do not own this project');
-      if (project.status === 'UPLOADING') {
-        await prisma.project.update({ where: { id: projectId }, data: { status: 'FAILED' } }).catch(() => {});
-      }
-    }
-
     const session = await getUploadSession(uploadId);
-    if (session) {
-      if (session.userId !== req.user!.sub) {
-        throw new HttpError(403, 'forbidden: upload does not belong to user');
-      }
-      if (session.key !== key) {
-        throw new HttpError(400, 's3 key does not match upload session');
-      }
-      if (projectId && session.projectId !== projectId) {
-        throw new HttpError(400, 'upload does not belong to this project');
-      }
+    if (!session) {
+      throw new HttpError(400, 'upload session not found or expired');
+    }
+    if (session.userId !== req.user!.sub) {
+      throw new HttpError(403, 'forbidden: upload does not belong to user');
+    }
+    if (session.key !== key) {
+      throw new HttpError(400, 's3 key does not match upload session');
+    }
+    if (session.uploadId !== uploadId) {
+      throw new HttpError(400, 'upload id does not match upload session');
     }
 
     const storage = getStorageProvider();
+    if (bucket && (bucket !== session.bucket || bucket !== storage.bucket)) {
+      throw new HttpError(400, 'upload bucket does not match session');
+    }
+    if (session.bucket !== storage.bucket) {
+      throw new HttpError(400, 'upload bucket does not match active storage');
+    }
+
+    if (projectId && session.projectId !== projectId) {
+      throw new HttpError(400, 'upload does not belong to this project');
+    }
+
+    const targetProjectId = projectId ?? session.projectId;
+    const project = await prisma.project.findUnique({
+      where: { id: targetProjectId },
+      select: { id: true, userId: true, status: true },
+    });
+    if (!project) throw new HttpError(404, 'project not found');
+    if (project.userId !== req.user!.sub) throw new HttpError(403, 'forbidden: you do not own this project');
+
+    if (project.status === 'UPLOADING') {
+      await prisma.project.update({ where: { id: targetProjectId }, data: { status: 'FAILED' } }).catch(() => {});
+    }
+
     await storage.abortMultipartUpload({ key, uploadId });
     await clearUploadSession(uploadId);
 

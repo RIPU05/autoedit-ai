@@ -184,6 +184,36 @@ describe('Storage Provider Abstraction & Migration Unit Tests (Step 3B.2)', () =
         verifyKeyOwnership('sources//user_123/video.mp4', 'user_123');
       }).toThrow(/invalid or escaping s3 key sequence/);
     });
+
+    it('rejects keys with missing or extra segments (unsupported structure)', () => {
+      expect(() => {
+        verifyKeyOwnership('sources/user_123/video.mp4', 'user_123');
+      }).toThrow(/unsupported key structure/);
+
+      expect(() => {
+        verifyKeyOwnership('sources/user_123/session_abc/nested/video.mp4', 'user_123');
+      }).toThrow(/unsupported key structure/);
+    });
+
+    it('rejects URL-encoded traversal or path ambiguities', () => {
+      expect(() => {
+        verifyKeyOwnership('sources/user_123/%2e%2e/video.mp4', 'user_123');
+      }).toThrow(/invalid or escaping s3 key sequence/);
+
+      expect(() => {
+        verifyKeyOwnership('sources/user_123/session_abc/vid%2f.mp4', 'user_123');
+      }).toThrow(/invalid or escaping s3 key sequence/);
+    });
+
+    it('rejects invalid upload session namespace and invalid filenames', () => {
+      expect(() => {
+        verifyKeyOwnership('sources/user_123/session@bad$/video.mp4', 'user_123');
+      }).toThrow(/invalid upload session namespace/);
+
+      expect(() => {
+        verifyKeyOwnership('sources/user_123/session_abc/bad*name.mp4', 'user_123');
+      }).toThrow(/invalid filename/);
+    });
   });
 
   describe('Backward Compatibility Facade (apps/api/src/lib/s3.ts)', () => {

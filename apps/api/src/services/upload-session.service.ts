@@ -108,3 +108,7 @@ export async function clearUploadSession(uploadId: string): Promise<void> {
 export function resetUploadSessionsForTesting(): void {
   memoryStore.clear();
 }
+
+export function setUploadSessionForTesting(session: UploadSession): void {
+  memoryStore.set(session.uploadId, session);
+}

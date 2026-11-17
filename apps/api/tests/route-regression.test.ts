@@ -302,10 +302,17 @@ describe('rate limit regression', () => {
     const { token } = await register();
     const key = `upload-limit-${Math.random()}`;
     const headers = { Authorization: `Bearer ${token}`, 'x-test-rate-limit-key': key };
+    const start = await request('/api/upload/start', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ filename: 'test.mp4', contentType: 'video/mp4' }),
+    });
+    expect(start.res.status).toBe(200);
+
     let last = await request('/api/upload/part', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ key: 'sources/test.mp4', uploadId: 'upload-id', partNumber: 1 }),
+      body: JSON.stringify({ key: start.body.key, uploadId: start.body.uploadId, partNumber: 1 }),
     });
     expect(last.res.status).toBe(200);
 
@@ -313,7 +320,7 @@ describe('rate limit regression', () => {
       last = await request('/api/upload/part', {
         method: 'POST',
         headers,
-        body: JSON.stringify({ key: 'sources/test.mp4', uploadId: 'upload-id', partNumber: i + 1 }),
+        body: JSON.stringify({ key: start.body.key, uploadId: start.body.uploadId, partNumber: i + 1 }),
       });
     }
 
@@ -327,10 +334,25 @@ describe('rate limit regression', () => {
     const sharedClientKey = `shared-client-${Math.random()}`;
     const firstHeaders = { Authorization: `Bearer ${firstUser.token}`, 'x-test-rate-limit-key': sharedClientKey };
     const secondHeaders = { Authorization: `Bearer ${secondUser.token}`, 'x-test-rate-limit-key': sharedClientKey };
+
+    const startFirst = await request('/api/upload/start', {
+      method: 'POST',
+      headers: firstHeaders,
+      body: JSON.stringify({ filename: 'test1.mp4', contentType: 'video/mp4' }),
+    });
+    expect(startFirst.res.status).toBe(200);
+
+    const startSecond = await request('/api/upload/start', {
+      method: 'POST',
+      headers: secondHeaders,
+      body: JSON.stringify({ filename: 'test2.mp4', contentType: 'video/mp4' }),
+    });
+    expect(startSecond.res.status).toBe(200);
+
     let last = await request('/api/upload/part', {
       method: 'POST',
       headers: firstHeaders,
-      body: JSON.stringify({ key: 'sources/test.mp4', uploadId: 'upload-id', partNumber: 1 }),
+      body: JSON.stringify({ key: startFirst.body.key, uploadId: startFirst.body.uploadId, partNumber: 1 }),
     });
     expect(last.res.status).toBe(200);
 
@@ -338,7 +360,7 @@ describe('rate limit regression', () => {
       last = await request('/api/upload/part', {
         method: 'POST',
         headers: firstHeaders,
-        body: JSON.stringify({ key: 'sources/test.mp4', uploadId: 'upload-id', partNumber: i + 1 }),
+        body: JSON.stringify({ key: startFirst.body.key, uploadId: startFirst.body.uploadId, partNumber: i + 1 }),
       });
     }
 
@@ -347,7 +369,7 @@ describe('rate limit regression', () => {
     const secondUserRequest = await request('/api/upload/part', {
       method: 'POST',
       headers: secondHeaders,
-      body: JSON.stringify({ key: 'sources/test.mp4', uploadId: 'upload-id', partNumber: 1 }),
+      body: JSON.stringify({ key: startSecond.body.key, uploadId: startSecond.body.uploadId, partNumber: 1 }),
     });
     expect(secondUserRequest.res.status).toBe(200);
   });

@@ -102,7 +102,10 @@ projectRouter.get(
   '/:id/renders/:renderId',
   asyncHandler(async (req, res) => {
     await ownedProject(req.user!.sub, req.params.id);
-    const render = await prisma.render.findUnique({ where: { id: req.params.renderId } });
+    const render = await prisma.render.findFirst({
+      where: { id: req.params.renderId, projectId: req.params.id },
+    });
+    if (!render) throw new HttpError(404, 'render not found');
     res.json({ render });
   }),
 );
@@ -343,6 +346,10 @@ projectRouter.patch(
   asyncHandler(async (req, res) => {
     await ownedProject(req.user!.sub, req.params.id);
     const { name } = z.object({ name: z.string().min(1).max(120) }).parse(req.body);
+    const existing = await prisma.editVersion.findFirst({
+      where: { id: req.params.versionId, projectId: req.params.id },
+    });
+    if (!existing) throw new HttpError(404, 'version not found');
     const version = await prisma.editVersion.update({
       where: { id: req.params.versionId },
       data: { name },
