@@ -49,6 +49,16 @@ describe('E2E Local Environment Safety Validation', () => {
     expect(result.errors.some((e) => e.includes('not an authorized local test database'))).toBe(true);
   });
 
+  it('rejects ambiguous database names containing "test" that are not in the explicit allowlist', () => {
+    const env = {
+      ...validLocalEnv,
+      DATABASE_URL: 'postgresql://autoedit:pwd@localhost:5432/my_test_prod_db',
+    };
+    const result = validateLocalE2EEnvironment(env);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes('not an authorized local test database'))).toBe(true);
+  });
+
   it('rejects remote REDIS_URL and sanitizes token', () => {
     const env = {
       ...validLocalEnv,

@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import type { EditChange } from '@autoedit/contracts';
 import { env } from '../config/env.js';
 import {
   isExternalAiUnavailable,
@@ -292,11 +293,7 @@ export interface TimelineEffects {
   music: boolean;
   metadata?: Record<string, unknown>;
 }
-export interface EditChange {
-  action: 'kept' | 'removed' | 'trimmed' | 'reordered' | 'added' | 'effect';
-  target: string; // human-readable, e.g. "03:12–04:01" or "background music"
-  reasons: string[]; // the WHY — short bullet reasons that build user trust
-}
+export type { EditChange };
 export interface EditResult {
   operations: TimelineOp[];
   effects: TimelineEffects;
