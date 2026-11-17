@@ -243,77 +243,211 @@ export const LegacyTimelineOpSchema = z.object({
   label: z.string().optional(),
   cutReason: z.string().optional(),
   dynamicZoom: z.boolean().optional(),
+  zoom: z.number().positive().optional(),
 });
 
 export type LegacyTimelineOp = z.infer<typeof LegacyTimelineOpSchema>;
 
-export function legacyOpToEditOperation(legacyOp: LegacyTimelineOp): EditOperation {
-  if (legacyOp.dynamicZoom) {
-    return {
-      action: 'zoom',
-      startSec: legacyOp.start,
-      endSec: legacyOp.end,
-      startMs: Math.round(legacyOp.start * 1000),
-      endMs: Math.round(legacyOp.end * 1000),
-      scale: 1.15,
-      pan: 'center',
-    };
-  }
+export type LegacyConversionErrorCode =
+  | 'UNSUPPORTED_OPERATION'
+  | 'UNSUPPORTED_PROPERTY'
+  | 'INVALID_TIME_RANGE';
 
-  if (legacyOp.keep) {
-    return {
-      action: 'keep',
-      startSec: legacyOp.start,
-      endSec: legacyOp.end,
-      startMs: Math.round(legacyOp.start * 1000),
-      endMs: Math.round(legacyOp.end * 1000),
-    };
-  }
-
-  return {
-    action: 'cut',
-    startSec: legacyOp.start,
-    endSec: legacyOp.end,
-    startMs: Math.round(legacyOp.start * 1000),
-    endMs: Math.round(legacyOp.end * 1000),
-    reason: legacyOp.cutReason || legacyOp.label,
-  };
+export interface LegacyOpConversionError {
+  code: LegacyConversionErrorCode;
+  action: string;
+  message: string;
+  field?: string;
+  details?: Record<string, unknown>;
 }
 
-export function editOperationToLegacyOp(editOp: EditOperation, index: number): LegacyTimelineOp {
+export type LegacyOpConversionResult =
+  | { success: true; op: LegacyTimelineOp }
+  | { success: false; error: LegacyOpConversionError };
+
+export class UnsupportedTimelineOperationError extends Error {
+  readonly conversionError: LegacyOpConversionError;
+  constructor(conversionError: LegacyOpConversionError) {
+    super(`Timeline conversion error: ${conversionError.message}`);
+    this.name = 'UnsupportedTimelineOperationError';
+    this.conversionError = conversionError;
+  }
+}
+
+/**
+ * Converts a canonical EditOperation into a legacy TimelineOp.
+ * If the legacy renderer cannot faithfully represent the operation or its properties,
+ * returns an explicit typed unsupported-conversion error instead of silently corrupting semantics.
+ */
+export function editOperationToLegacyOp(
+  editOp: EditOperation,
+  index?: number,
+): LegacyOpConversionResult {
+  // Validate time range integrity: startSec must be strictly less than endSec
+  if (editOp.startSec >= editOp.endSec) {
+    return {
+      success: false,
+      error: {
+        code: 'INVALID_TIME_RANGE',
+        action: editOp.action,
+        message: `Invalid time range: startSec (${editOp.startSec}) must be strictly less than endSec (${editOp.endSec}).`,
+        details: { startSec: editOp.startSec, endSec: editOp.endSec },
+      },
+    };
+  }
+
   if (editOp.action === 'keep') {
     return {
-      index,
-      start: editOp.startSec,
-      end: editOp.endSec,
-      keep: true,
+      success: true,
+      op: {
+        ...(typeof index === 'number' ? { index } : {}),
+        start: editOp.startSec,
+        end: editOp.endSec,
+        keep: true,
+      },
     };
   }
 
   if (editOp.action === 'cut') {
     return {
-      index,
-      start: editOp.startSec,
-      end: editOp.endSec,
-      keep: false,
-      cutReason: editOp.reason,
+      success: true,
+      op: {
+        ...(typeof index === 'number' ? { index } : {}),
+        start: editOp.startSec,
+        end: editOp.endSec,
+        keep: false,
+        cutReason: editOp.reason,
+      },
     };
   }
 
   if (editOp.action === 'zoom') {
+    // Check if pan direction is supported: legacy renderer only supports centered cropping
+    if (editOp.pan && editOp.pan !== 'center') {
+      return {
+        success: false,
+        error: {
+          code: 'UNSUPPORTED_PROPERTY',
+          action: 'zoom',
+          field: 'pan',
+          message: `Legacy renderer does not support directional pan ("${editOp.pan}"). Only "center" pan is supported in the legacy pipeline.`,
+          details: { pan: editOp.pan, scale: editOp.scale },
+        },
+      };
+    }
+
     return {
-      index,
-      start: editOp.startSec,
-      end: editOp.endSec,
-      keep: true,
-      dynamicZoom: true,
+      success: true,
+      op: {
+        ...(typeof index === 'number' ? { index } : {}),
+        start: editOp.startSec,
+        end: editOp.endSec,
+        keep: true,
+        dynamicZoom: true,
+        zoom: editOp.scale,
+      },
+    };
+  }
+
+  if (editOp.action === 'speed') {
+    // Legacy FFmpeg pipeline has no setpts/atempo filter graph support.
+    // Never silently convert speed to keep, as that would discard speedMultiplier.
+    return {
+      success: false,
+      error: {
+        code: 'UNSUPPORTED_OPERATION',
+        action: 'speed',
+        message: `Legacy renderer does not support speed adjustment (speedMultiplier=${editOp.speedMultiplier}). Speed operations require the modular timeline engine.`,
+        details: { speedMultiplier: editOp.speedMultiplier },
+      },
     };
   }
 
   return {
-    index,
-    start: editOp.startSec,
-    end: editOp.endSec,
-    keep: true,
+    success: false,
+    error: {
+      code: 'UNSUPPORTED_OPERATION',
+      action: (editOp as any).action ?? 'unknown',
+      message: `Unknown or unrepresentable edit operation action.`,
+    },
+  };
+}
+
+/**
+ * Throwing variant of editOperationToLegacyOp for callers that require a guaranteed valid LegacyTimelineOp.
+ */
+export function editOperationToLegacyOpOrThrow(
+  editOp: EditOperation,
+  index?: number,
+): LegacyTimelineOp {
+  const result = editOperationToLegacyOp(editOp, index);
+  if (!result.success) {
+    throw new UnsupportedTimelineOperationError(result.error);
+  }
+  return result.op;
+}
+
+/**
+ * Batch-converts an entire timeline plan of operations into legacy TimelineOps.
+ * Fails closed if any operation cannot be faithfully represented.
+ */
+export function editOperationsToLegacyOps(
+  editOps: EditOperation[],
+): { success: true; ops: LegacyTimelineOp[] } | { success: false; errors: LegacyOpConversionError[] } {
+  const ops: LegacyTimelineOp[] = [];
+  const errors: LegacyOpConversionError[] = [];
+
+  for (let i = 0; i < editOps.length; i++) {
+    const res = editOperationToLegacyOp(editOps[i], i);
+    if (res.success) {
+      ops.push(res.op);
+    } else {
+      errors.push(res.error);
+    }
+  }
+
+  if (errors.length > 0) {
+    return { success: false, errors };
+  }
+  return { success: true, ops };
+}
+
+/**
+ * Converts a legacy TimelineOp into a canonical EditOperation.
+ * Preserves exact numeric zoom scales when present.
+ */
+export function legacyOpToEditOperation(legacyOp: LegacyTimelineOp): EditOperation {
+  const startMs = Math.round(legacyOp.start * 1000);
+  const endMs = Math.round(legacyOp.end * 1000);
+
+  if (legacyOp.dynamicZoom || (typeof legacyOp.zoom === 'number' && legacyOp.zoom > 1)) {
+    return {
+      action: 'zoom',
+      startSec: legacyOp.start,
+      endSec: legacyOp.end,
+      startMs,
+      endMs,
+      scale: legacyOp.zoom ?? 1.15,
+      pan: 'center',
+    };
+  }
+
+  if (legacyOp.keep === false) {
+    return {
+      action: 'cut',
+      startSec: legacyOp.start,
+      endSec: legacyOp.end,
+      startMs,
+      endMs,
+      reason: legacyOp.cutReason || legacyOp.label,
+    };
+  }
+
+  return {
+    action: 'keep',
+    startSec: legacyOp.start,
+    endSec: legacyOp.end,
+    startMs,
+    endMs,
   };
 }

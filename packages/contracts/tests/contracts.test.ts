@@ -10,8 +10,12 @@ import {
   createMediaTimeRange,
   ProjectStatusSchema,
   EditOperationSchema,
+  LegacyTimelineOpSchema,
   legacyOpToEditOperation,
   editOperationToLegacyOp,
+  editOperationToLegacyOpOrThrow,
+  editOperationsToLegacyOps,
+  UnsupportedTimelineOperationError,
   EditTimelinePlanSchema,
   EditChangeSchema,
   VersionDiffSchema,
@@ -454,30 +458,216 @@ describe('AutoAI Edit Shared Contracts Suite', () => {
       expect(safeValidateContract(ProjectStatusSchema, 'UNKNOWN_STATUS').success).toBe(false);
     });
 
-    it('converts legacy TimelineOp to EditOperation and vice versa', () => {
-      const legacyKeep = { index: 0, start: 0, end: 12.5, keep: true };
-      const editKeep = legacyOpToEditOperation(legacyKeep);
-      expect(editKeep.action).toBe('keep');
-      expect(editKeep.startSec).toBe(0);
-      expect(editKeep.endSec).toBe(12.5);
-      expect(editKeep.startMs).toBe(0);
-      expect(editKeep.endMs).toBe(12500);
+    describe('Timeline Conversion Adapters (Step 3A.1 Safety Hardened)', () => {
+      it('converts keep operations faithfully and preserves round-trip semantics', () => {
+        const canonicalKeep = {
+          action: 'keep' as const,
+          startSec: 0,
+          endSec: 12.5,
+          startMs: 0,
+          endMs: 12500,
+        };
+        const result = editOperationToLegacyOp(canonicalKeep, 0);
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.op.keep).toBe(true);
+          expect(result.op.start).toBe(0);
+          expect(result.op.end).toBe(12.5);
+          expect(result.op.index).toBe(0);
 
-      const roundTripKeep = editOperationToLegacyOp(editKeep, 0);
-      expect(roundTripKeep.keep).toBe(true);
-      expect(roundTripKeep.start).toBe(0);
-      expect(roundTripKeep.end).toBe(12.5);
+          // Reverse conversion
+          const roundTrip = legacyOpToEditOperation(result.op);
+          expect(roundTrip.action).toBe('keep');
+          expect(roundTrip.startSec).toBe(0);
+          expect(roundTrip.endSec).toBe(12.5);
+          expect(roundTrip.startMs).toBe(0);
+          expect(roundTrip.endMs).toBe(12500);
+        }
+      });
 
-      const legacyCut = { index: 1, start: 12.5, end: 16.0, keep: false, cutReason: 'silence' };
-      const editCut = legacyOpToEditOperation(legacyCut);
-      expect(editCut.action).toBe('cut');
-      if (editCut.action === 'cut') {
-        expect(editCut.reason).toBe('silence');
-      }
+      it('converts cut operations faithfully with reason preserved', () => {
+        const canonicalCut = {
+          action: 'cut' as const,
+          startSec: 12.5,
+          endSec: 16.0,
+          reason: 'dead air / silence',
+        };
+        const result = editOperationToLegacyOp(canonicalCut, 1);
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.op.keep).toBe(false);
+          expect(result.op.cutReason).toBe('dead air / silence');
+          expect(result.op.start).toBe(12.5);
+          expect(result.op.end).toBe(16.0);
 
-      const roundTripCut = editOperationToLegacyOp(editCut, 1);
-      expect(roundTripCut.keep).toBe(false);
-      expect(roundTripCut.cutReason).toBe('silence');
+          // Reverse conversion
+          const roundTrip = legacyOpToEditOperation(result.op);
+          expect(roundTrip.action).toBe('cut');
+          expect(roundTrip.startSec).toBe(12.5);
+          expect(roundTrip.endSec).toBe(16.0);
+          if (roundTrip.action === 'cut') {
+            expect(roundTrip.reason).toBe('dead air / silence');
+          }
+        }
+      });
+
+      it('converts zoom operations with center pan and preserves exact scale factor', () => {
+        const canonicalZoom = {
+          action: 'zoom' as const,
+          startSec: 5.0,
+          endSec: 9.5,
+          scale: 1.35,
+          pan: 'center' as const,
+        };
+        const result = editOperationToLegacyOp(canonicalZoom, 2);
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.op.keep).toBe(true);
+          expect(result.op.dynamicZoom).toBe(true);
+          expect(result.op.zoom).toBe(1.35); // Scale preserved! Not discarded or hardcoded
+          expect(result.op.start).toBe(5.0);
+          expect(result.op.end).toBe(9.5);
+
+          // Reverse conversion preserves exact scale
+          const roundTrip = legacyOpToEditOperation(result.op);
+          expect(roundTrip.action).toBe('zoom');
+          if (roundTrip.action === 'zoom') {
+            expect(roundTrip.scale).toBe(1.35);
+            expect(roundTrip.pan).toBe('center');
+          }
+        }
+      });
+
+      it('fails closed with explicit typed error when speed operation is converted to legacy', () => {
+        const canonicalSpeed = {
+          action: 'speed' as const,
+          startSec: 2.0,
+          endSec: 6.0,
+          speedMultiplier: 2.0,
+        };
+        const result = editOperationToLegacyOp(canonicalSpeed, 0);
+        // Must NEVER silently convert speed to keep!
+        expect(result.success).toBe(false);
+        if (!result.success) {
+          expect(result.error.code).toBe('UNSUPPORTED_OPERATION');
+          expect(result.error.action).toBe('speed');
+          expect(result.error.message).toContain('Legacy renderer does not support speed');
+          expect(result.error.details).toEqual({ speedMultiplier: 2.0 });
+        }
+
+        // Throwing variant must throw UnsupportedTimelineOperationError
+        expect(() => editOperationToLegacyOpOrThrow(canonicalSpeed, 0)).toThrow(
+          UnsupportedTimelineOperationError,
+        );
+      });
+
+      it('fails closed when directional zoom panning (left or right) is converted to legacy', () => {
+        const canonicalLeftZoom = {
+          action: 'zoom' as const,
+          startSec: 1.0,
+          endSec: 4.0,
+          scale: 1.25,
+          pan: 'left' as const,
+        };
+        const result = editOperationToLegacyOp(canonicalLeftZoom, 0);
+        expect(result.success).toBe(false);
+        if (!result.success) {
+          expect(result.error.code).toBe('UNSUPPORTED_PROPERTY');
+          expect(result.error.action).toBe('zoom');
+          expect(result.error.field).toBe('pan');
+          expect(result.error.message).toContain('directional pan');
+        }
+
+        const canonicalRightZoom = {
+          action: 'zoom' as const,
+          startSec: 1.0,
+          endSec: 4.0,
+          scale: 1.25,
+          pan: 'right' as const,
+        };
+        const resultRight = editOperationToLegacyOp(canonicalRightZoom, 0);
+        expect(resultRight.success).toBe(false);
+        if (!resultRight.success) {
+          expect(resultRight.error.code).toBe('UNSUPPORTED_PROPERTY');
+          expect(resultRight.error.field).toBe('pan');
+        }
+      });
+
+      it('validates start and end time ranges and rejects invalid spans', () => {
+        // Inverted time range
+        const inverted = {
+          action: 'keep' as const,
+          startSec: 10.0,
+          endSec: 5.0,
+        };
+        const resInverted = editOperationToLegacyOp(inverted);
+        expect(resInverted.success).toBe(false);
+        if (!resInverted.success) {
+          expect(resInverted.error.code).toBe('INVALID_TIME_RANGE');
+          expect(resInverted.error.message).toContain('startSec (10) must be strictly less than endSec (5)');
+        }
+
+        // Zero duration span
+        const zeroDuration = {
+          action: 'cut' as const,
+          startSec: 5.0,
+          endSec: 5.0,
+        };
+        const resZero = editOperationToLegacyOp(zeroDuration);
+        expect(resZero.success).toBe(false);
+        if (!resZero.success) {
+          expect(resZero.error.code).toBe('INVALID_TIME_RANGE');
+        }
+      });
+
+      it('preserves sub-second floating-point precision during conversion', () => {
+        const preciseKeep = {
+          action: 'keep' as const,
+          startSec: 1.23456,
+          endSec: 7.89012,
+        };
+        const res = editOperationToLegacyOp(preciseKeep);
+        expect(res.success).toBe(true);
+        if (res.success) {
+          expect(res.op.start).toBe(1.23456);
+          expect(res.op.end).toBe(7.89012);
+
+          const roundTrip = legacyOpToEditOperation(res.op);
+          expect(roundTrip.startSec).toBe(1.23456);
+          expect(roundTrip.endSec).toBe(7.89012);
+          expect(roundTrip.startMs).toBe(1235);
+          expect(roundTrip.endMs).toBe(7890);
+        }
+      });
+
+      it('batch converts valid timelines and reports all errors when unsupported operations exist', () => {
+        const validTimeline = [
+          { action: 'keep' as const, startSec: 0, endSec: 5 },
+          { action: 'cut' as const, startSec: 5, endSec: 8, reason: 'um' },
+          { action: 'zoom' as const, startSec: 8, endSec: 12, scale: 1.2, pan: 'center' as const },
+        ];
+        const validBatch = editOperationsToLegacyOps(validTimeline);
+        expect(validBatch.success).toBe(true);
+        if (validBatch.success) {
+          expect(validBatch.ops).toHaveLength(3);
+          expect(validBatch.ops[0].keep).toBe(true);
+          expect(validBatch.ops[1].keep).toBe(false);
+          expect(validBatch.ops[2].zoom).toBe(1.2);
+        }
+
+        const mixedTimeline = [
+          { action: 'keep' as const, startSec: 0, endSec: 5 },
+          { action: 'speed' as const, startSec: 5, endSec: 8, speedMultiplier: 1.5 },
+          { action: 'zoom' as const, startSec: 8, endSec: 12, scale: 1.2, pan: 'left' as const },
+        ];
+        const mixedBatch = editOperationsToLegacyOps(mixedTimeline);
+        expect(mixedBatch.success).toBe(false);
+        if (!mixedBatch.success) {
+          expect(mixedBatch.errors).toHaveLength(2);
+          expect(mixedBatch.errors[0].code).toBe('UNSUPPORTED_OPERATION');
+          expect(mixedBatch.errors[1].code).toBe('UNSUPPORTED_PROPERTY');
+        }
+      });
     });
 
     it('validates BullMQ Analysis and Render job payloads', () => {
