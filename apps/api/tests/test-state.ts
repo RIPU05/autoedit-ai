@@ -45,7 +45,14 @@ function matches(row: Row, where: Row = {}) {
 function makeModel(table: Row[], prefix: string) {
   return {
     findUnique: vi.fn(async (args: Row) => selectRow(table.find((row) => matches(row, args.where)) ?? null, args.select)),
-    findFirst: vi.fn(async (args: Row = {}) => selectRow(table.find((row) => matches(row, args.where)) ?? null, args.select)),
+    findFirst: vi.fn(async (args: Row = {}) => {
+      const rows = table.filter((row) => matches(row, args.where));
+      if (args.orderBy && typeof args.orderBy === 'object') {
+        const [key, dir] = Object.entries(args.orderBy)[0];
+        rows.sort((a, b) => (dir === 'desc' ? (b[key] > a[key] ? 1 : -1) : (a[key] > b[key] ? 1 : -1)));
+      }
+      return selectRow(rows[0] ?? null, args.select);
+    }),
     findMany: vi.fn(async (args: Row = {}) => table.filter((row) => matches(row, args.where)).map((row) => selectRow(row, args.select))),
     count: vi.fn(async (args: Row = {}) => table.filter((row) => matches(row, args.where)).length),
     create: vi.fn(async (args: Row) => {
