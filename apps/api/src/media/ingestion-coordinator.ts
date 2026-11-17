@@ -378,6 +378,92 @@ export interface RedisLikeClient {
   eval(script: string, numkeys: number, ...args: (string | number)[]): Promise<unknown>;
 }
 
+/**
+ * Explicit positional ARGV contract for REQUEST_INGESTION_LUA:
+ *   KEYS[1] = coordination Redis key
+ *   ARGV[1] = canonicalId (string)
+ *   ARGV[2] = workerId (string)
+ *   ARGV[3] = leaseMs (positive integer)
+ *   ARGV[4] = maxRetries (positive integer)
+ *   ARGV[5] = nowMs (non-negative integer)
+ *   ARGV[6] = recordTtlMs (positive integer)
+ *
+ * Note: requesterId is deliberately excluded from the O(1) ownership lock record
+ * and must not be added to ARGV without updating both Lua and this packer together.
+ */
+export function buildRequestIngestionLuaArgs(params: {
+  canonicalSourceId: CacheableSourceId;
+  workerId: string;
+  leaseMs: number;
+  maxRetries: number;
+  nowMs: number;
+  recordTtlMs: number;
+}): [string, string, number, number, number, number] {
+  if (!params.workerId || !params.workerId.trim()) {
+    throw new MediaSourceError({
+      code: 'COORDINATION_CONFLICT',
+      message: 'workerId must be a non-empty string.',
+    });
+  }
+  if (!Number.isFinite(params.leaseMs) || params.leaseMs <= 0) {
+    throw new MediaSourceError({ code: 'COORDINATION_CONFLICT', message: 'leaseMs must be > 0.' });
+  }
+  if (!Number.isFinite(params.maxRetries) || params.maxRetries < 1) {
+    throw new MediaSourceError({ code: 'COORDINATION_CONFLICT', message: 'maxRetries must be >= 1.' });
+  }
+  if (!Number.isFinite(params.nowMs) || params.nowMs < 0) {
+    throw new MediaSourceError({ code: 'COORDINATION_CONFLICT', message: 'nowMs must be >= 0.' });
+  }
+  if (!Number.isFinite(params.recordTtlMs) || params.recordTtlMs <= 0) {
+    throw new MediaSourceError({ code: 'COORDINATION_CONFLICT', message: 'recordTtlMs must be > 0.' });
+  }
+  return [
+    params.canonicalSourceId,
+    params.workerId,
+    Math.trunc(params.leaseMs),
+    Math.trunc(params.maxRetries),
+    Math.trunc(params.nowMs),
+    Math.trunc(params.recordTtlMs),
+  ];
+}
+
+/**
+ * Explicit positional ARGV contract for MUTATE_LEASE_LUA:
+ *   KEYS[1] = coordination Redis key
+ *   ARGV[1] = mode ('transition' | 'renew' | 'release')
+ *   ARGV[2] = workerId (string)
+ *   ARGV[3] = fencingToken (positive integer)
+ *   ARGV[4] = nextState (string, '' when unused)
+ *   ARGV[5] = leaseMs (non-negative integer)
+ *   ARGV[6] = artifactRef (string, '' when unused)
+ *   ARGV[7] = lastError (string, '' when unused)
+ *   ARGV[8] = nowMs (non-negative integer)
+ *   ARGV[9] = recordTtlMs (positive integer)
+ */
+export function buildMutateLeaseLuaArgs(params: {
+  mode: 'transition' | 'renew' | 'release';
+  workerId: string;
+  fencingToken: number;
+  nextState: string;
+  leaseMs: number;
+  artifactRef: string;
+  lastError: string;
+  nowMs: number;
+  recordTtlMs: number;
+}): [string, string, number, string, number, string, string, number, number] {
+  return [
+    params.mode,
+    params.workerId,
+    Math.trunc(params.fencingToken),
+    params.nextState,
+    Math.trunc(params.leaseMs),
+    params.artifactRef,
+    params.lastError,
+    Math.trunc(params.nowMs),
+    Math.trunc(params.recordTtlMs),
+  ];
+}
+
 const REQUEST_INGESTION_LUA = `
 local key = KEYS[1]
 local canonicalId = ARGV[1]
@@ -386,6 +472,13 @@ local leaseMs = tonumber(ARGV[3])
 local maxRetries = tonumber(ARGV[4])
 local nowMs = tonumber(ARGV[5])
 local recordTtlMs = tonumber(ARGV[6])
+
+assert(canonicalId and canonicalId ~= '', 'ARGV[1] canonicalId required')
+assert(workerId and workerId ~= '', 'ARGV[2] workerId required')
+assert(leaseMs and leaseMs > 0, 'ARGV[3] leaseMs must be positive number')
+assert(maxRetries and maxRetries >= 1, 'ARGV[4] maxRetries must be >= 1')
+assert(nowMs and nowMs >= 0, 'ARGV[5] nowMs must be >= 0')
+assert(recordTtlMs and recordTtlMs > 0, 'ARGV[6] recordTtlMs must be positive number')
 
 local raw = redis.call('GET', key)
 local rec = nil
@@ -458,6 +551,13 @@ local artifactRef = ARGV[6]
 local lastError = ARGV[7]
 local nowMs = tonumber(ARGV[8])
 local recordTtlMs = tonumber(ARGV[9])
+
+assert(mode == 'transition' or mode == 'renew' or mode == 'release', 'ARGV[1] invalid mode')
+assert(workerId and workerId ~= '', 'ARGV[2] workerId required')
+assert(token and token >= 1, 'ARGV[3] fencingToken must be >= 1')
+assert(leaseMs and leaseMs >= 0, 'ARGV[5] leaseMs must be >= 0')
+assert(nowMs and nowMs >= 0, 'ARGV[8] nowMs must be >= 0')
+assert(recordTtlMs and recordTtlMs > 0, 'ARGV[9] recordTtlMs must be > 0')
 
 local raw = redis.call('GET', key)
 if not raw then
@@ -553,16 +653,19 @@ export class RedisCoordinationStore implements CoordinationStore {
     maxRetries: number;
     nowMs: number;
   }): Promise<RequestIngestionResult> {
+    const args = buildRequestIngestionLuaArgs({
+      canonicalSourceId: input.canonicalSourceId,
+      workerId: input.workerId,
+      leaseMs: input.leaseMs,
+      maxRetries: input.maxRetries,
+      nowMs: input.nowMs,
+      recordTtlMs: this.recordTtlMs,
+    });
     const raw = (await this.redis.eval(
       REQUEST_INGESTION_LUA,
       1,
       this.key(input.canonicalSourceId),
-      input.canonicalSourceId,
-      input.workerId,
-      input.leaseMs,
-      input.maxRetries,
-      input.nowMs,
-      this.recordTtlMs,
+      ...args,
     )) as string;
     return JSON.parse(raw) as RequestIngestionResult;
   }
@@ -577,19 +680,22 @@ export class RedisCoordinationStore implements CoordinationStore {
     lastError?: string;
     nowMs: number;
   }): Promise<IngestionCoordinationRecord> {
+    const args = buildMutateLeaseLuaArgs({
+      mode: 'transition',
+      workerId: input.workerId,
+      fencingToken: input.fencingToken,
+      nextState: input.nextState,
+      leaseMs: input.leaseMs ?? 0,
+      artifactRef: input.artifactRef ?? '',
+      lastError: input.lastError ?? '',
+      nowMs: input.nowMs,
+      recordTtlMs: this.recordTtlMs,
+    });
     const raw = (await this.redis.eval(
       MUTATE_LEASE_LUA,
       1,
       this.key(input.canonicalSourceId),
-      'transition',
-      input.workerId,
-      input.fencingToken,
-      input.nextState,
-      input.leaseMs ?? 0,
-      input.artifactRef ?? '',
-      input.lastError ?? '',
-      input.nowMs,
-      this.recordTtlMs,
+      ...args,
     )) as string;
     const parsed = JSON.parse(raw) as { ok?: boolean; error?: string; record?: IngestionCoordinationRecord };
     if (parsed.error === 'COORDINATION_CONFLICT') {
@@ -620,19 +726,22 @@ export class RedisCoordinationStore implements CoordinationStore {
     leaseMs: number;
     nowMs: number;
   }): Promise<IngestionCoordinationRecord> {
+    const args = buildMutateLeaseLuaArgs({
+      mode: 'renew',
+      workerId: input.workerId,
+      fencingToken: input.fencingToken,
+      nextState: '',
+      leaseMs: input.leaseMs,
+      artifactRef: '',
+      lastError: '',
+      nowMs: input.nowMs,
+      recordTtlMs: this.recordTtlMs,
+    });
     const raw = (await this.redis.eval(
       MUTATE_LEASE_LUA,
       1,
       this.key(input.canonicalSourceId),
-      'renew',
-      input.workerId,
-      input.fencingToken,
-      '',
-      input.leaseMs,
-      '',
-      '',
-      input.nowMs,
-      this.recordTtlMs,
+      ...args,
     )) as string;
     const parsed = JSON.parse(raw) as { ok?: boolean; error?: string; record?: IngestionCoordinationRecord };
     if (parsed.error || !parsed.record) {
@@ -650,19 +759,22 @@ export class RedisCoordinationStore implements CoordinationStore {
     fencingToken: number;
     nowMs: number;
   }): Promise<boolean> {
+    const args = buildMutateLeaseLuaArgs({
+      mode: 'release',
+      workerId: input.workerId,
+      fencingToken: input.fencingToken,
+      nextState: '',
+      leaseMs: 0,
+      artifactRef: '',
+      lastError: '',
+      nowMs: input.nowMs,
+      recordTtlMs: this.recordTtlMs,
+    });
     const raw = (await this.redis.eval(
       MUTATE_LEASE_LUA,
       1,
       this.key(input.canonicalSourceId),
-      'release',
-      input.workerId,
-      input.fencingToken,
-      '',
-      0,
-      '',
-      '',
-      input.nowMs,
-      this.recordTtlMs,
+      ...args,
     )) as string;
     const parsed = JSON.parse(raw) as { ok?: boolean };
     return Boolean(parsed.ok);
@@ -675,7 +787,7 @@ export class RedisCoordinationStore implements CoordinationStore {
  * while the coordination record exists, using TTL leases and monotonic fencing tokens.
  */
 export class SharedIngestionCoordinator {
-  constructor(private readonly store: CoordinationStore) {}
+  constructor(private readonly store: CoordinationStore) { }
 
   async requestIngestion(input: RequestIngestionInput): Promise<RequestIngestionResult> {
     const canonicalSourceId = assertCacheableCanonicalId(input.canonicalSourceId);

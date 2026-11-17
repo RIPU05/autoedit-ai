@@ -3,6 +3,7 @@ import {
   CacheableSourceIdSchema,
   SharedCacheIdentitySchema,
   SharedCacheKeyInputSchema,
+  UniversalMediaSourceSchema,
   type CacheArtifactKind,
   type CacheRenderSettings,
   type CacheRightsScope,
@@ -66,6 +67,14 @@ export interface CreateTrustedCacheAuthInput {
 /**
  * Constructs a frozen, server-trusted authorization context from verified source metadata
  * and authenticated session identity.
+ *
+ * SECURITY / TRUST BOUNDARY:
+ * - Symbol branding prevents in-process plain-object forgery, NOT persistent authorization.
+ * - HTTP route handlers MUST NEVER pass untrusted client-supplied `source` JSON into this
+ *   helper. `source` and `ownerUserId` MUST be hydrated from server-side authoritative
+ *   resolution/storage (e.g. PostgreSQL `Project`/`Asset`/`MediaSource` rows in future steps).
+ * - Setting `source.rightsStatus = 'PERMITTED_PUBLIC'` alone NEVER grants shared cache reuse;
+ *   `allowSharedCacheReuse: true` must also be explicitly granted by server policy.
  */
 export function createTrustedCacheAuthContext(
   input: CreateTrustedCacheAuthInput,
@@ -78,31 +87,40 @@ export function createTrustedCacheAuthContext(
     });
   }
 
-  if (input.source.identityScope === 'CHANNEL_DISCOVERY') {
+  const parsedSource = UniversalMediaSourceSchema.safeParse(input.source);
+  if (!parsedSource.success) {
+    throw new MediaSourceError({
+      code: 'ACCESS_DENIED',
+      message: 'Invalid media source metadata rejected by cache authorization.',
+    });
+  }
+  const source = parsedSource.data;
+
+  if (source.identityScope === 'CHANNEL_DISCOVERY') {
     throw new MediaSourceError({
       code: 'BROADCAST_UNRESOLVED',
-      message: `Cannot authorize cache access for channel-only identity "${input.source.canonicalId}". A verified broadcast session ID is required.`,
+      message: `Cannot authorize cache access for channel-only identity "${source.canonicalId}". A verified broadcast session ID is required.`,
       retryable: true,
     });
   }
 
-  const parsedCacheable = CacheableSourceIdSchema.safeParse(input.source.canonicalId);
+  const parsedCacheable = CacheableSourceIdSchema.safeParse(source.canonicalId);
   if (!parsedCacheable.success) {
     throw new MediaSourceError({
       code: 'BROADCAST_UNRESOLVED',
-      message: `Source "${input.source.canonicalId}" is not an immutable cacheable identity.`,
+      message: `Source "${source.canonicalId}" is not an immutable cacheable identity.`,
     });
   }
 
-  const verifiedRightsStatus = input.source.rightsStatus;
+  const verifiedRightsStatus = source.rightsStatus;
   const allowSharedCacheReuse =
-    Boolean(input.allowSharedCacheReuse) &&
+    input.allowSharedCacheReuse === true &&
     verifiedRightsStatus === 'PERMITTED_PUBLIC' &&
-    input.source.provider !== 'upload';
+    source.provider !== 'upload';
 
   return Object.freeze({
     [TRUSTED_CACHE_AUTH_BRAND]: true as const,
-    source: Object.freeze({ ...input.source }),
+    source: Object.freeze({ ...source }),
     requesterUserId,
     ownerUserId: input.ownerUserId?.trim() || undefined,
     verifiedRightsStatus,

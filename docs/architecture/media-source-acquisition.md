@@ -83,7 +83,7 @@ Implemented in `apps/api/src/media/shared-cache.ts`:
   - `SHARED_PERMITTED` (`cache/shared/<kind>/<sourceHash>/<cacheKey>`): Strictly requires broadcast/VOD identity (`CacheableSourceIdSchema`), verified `PERMITTED_PUBLIC` rights, explicit `allowSharedCacheReuse`, and zero `customEditHash`.
   - `PRIVATE_USER` (`cache/private/<ownerUserId>/<kind>/<sourceHash>/<cacheKey>`): Bound to `ownerUserId === requesterUserId`. Direct uploads (`upload:*`) and personalized edits (`customEditHash`) are forced into `PRIVATE_USER`.
 - **No Secret/Key Leakage:** Rights and ownership checks run BEFORE `getObjectMetadata`, `putObject`, and `createDownloadUrl`. Raw storage keys and signed URLs are never returned to unauthorized callers.
-- **Remaining Trust Assumptions & Future DB Requirements:** Currently `createTrustedCacheAuthContext` trusts the in-process server layer passing the authenticated `requesterUserId`, `ownerUserId`, and `UniversalMediaSource`. Once PostgreSQL persistence (`MediaSource`, `SharedCacheEntry`) is added in a future milestone, `createTrustedCacheAuthContext` will hydrate `source.rightsStatus` and `ownerUserId` directly from verified database rows.
+- **Remaining Trust Assumptions & Future DB Requirements:** Symbol branding on `TrustedCacheAuthContext` protects against accidental or malicious plain-object forgery within the running Node.js process, **not** against unverified persistence inputs. HTTP routes MUST NEVER pass untrusted user-supplied `UniversalMediaSource` JSON directly into `createTrustedCacheAuthContext()`. Until PostgreSQL persistence (`MediaSource`, `SharedCacheEntry`) is introduced, `source` must be resolved server-side (defaulting external URLs and direct-media hosts to `UNKNOWN`), and once DB persistence is added, `source.rightsStatus` and `ownerUserId` MUST be hydrated exclusively from authoritative server-side database rows.
 
 ---
 
@@ -91,6 +91,7 @@ Implemented in `apps/api/src/media/shared-cache.ts`:
 
 Implemented in `apps/api/src/media/ingestion-coordinator.ts`:
 
+- **Explicit Lua/TypeScript Positional Contract:** `buildRequestIngestionLuaArgs` (6 ARGV: `canonicalId`, `workerId`, `leaseMs`, `maxRetries`, `nowMs`, `recordTtlMs`) and `buildMutateLeaseLuaArgs` (9 ARGV: `mode`, `workerId`, `fencingToken`, `nextState`, `leaseMs`, `artifactRef`, `lastError`, `nowMs`, `recordTtlMs`) pair with runtime Lua `assert(...)` guards so positional argument shifts fail loudly rather than corrupting state.
 - **Constant-Size O(1) Work Ownership:** The coordination record stores `{ canonicalSourceId, state, ownerWorkerId, fencingToken, attempts, maxRetries, leaseExpiresAtMs, updatedAtMs, attachedCount, artifactRef?, lastError? }`. Per-user subscriber lists are deliberately excluded so 1,000+ clippers never bloat Redis lock payloads.
 - **Validated State Machine (Enforced in both In-Memory & Redis Lua):**
   - Only `ACQUIRING → INGESTING | READY | FAILED` and `INGESTING → READY | FAILED` are permitted.

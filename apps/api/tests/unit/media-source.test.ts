@@ -725,4 +725,103 @@ describe('Step 3B.4 & 3B.4.1: Universal Media Source, Channel/Broadcast Identity
     expect(candidates[0].windowEndSec).toBe(135);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  // 14. Twitch & Kick clips canonicalization (restored explicit coverage from Step 3B.4)
+  it('14. canonicalizes Twitch and Kick clip URLs distinctly from channels and full VODs', () => {
+    const twitchClip1 = resolveMediaSourceFromUrl('https://clips.twitch.tv/AmazingClutchPlay123?tt_content=url');
+    const twitchClip2 = resolveMediaSourceFromUrl('https://www.twitch.tv/shroud/clip/AmazingClutchPlay123');
+    expect(twitchClip1.canonicalId).toBe('twitch:vod:clip_AmazingClutchPlay123');
+    expect(twitchClip1.identityScope).toBe('IMMUTABLE_VOD');
+    expect(twitchClip2.canonicalId).toBe(twitchClip1.canonicalId);
+
+    const kickClip = resolveMediaSourceFromUrl('https://kick.com/xqc/clips/clip_01JABC999');
+    expect(kickClip.canonicalId).toBe('kick:vod:clip_clip_01JABC999');
+    expect(kickClip.identityScope).toBe('IMMUTABLE_VOD');
+  });
+
+  // 15. Malformed URLs, reserved paths, control characters & oversized inputs (restored explicit coverage)
+  it('15. rejects malformed IDs, reserved platform routes, CRLF control characters, and oversized URLs', () => {
+    const malformed = [
+      '   ',
+      'https://www.youtube.com/watch?v=short',
+      'https://www.youtube.com/watch',
+      'https://www.twitch.tv/directory',
+      'https://www.twitch.tv/videos/notanumber',
+      'https://kick.com/categories',
+      'https://www.youtube.com/watch?v=dQw4w9WgXcQ\r\nX-Injected: true',
+      `https://www.youtube.com/watch?v=dQw4w9WgXcQ&pad=${'a'.repeat(2100)}`,
+    ];
+    for (const url of malformed) {
+      expect(() => resolveMediaSourceFromUrl(url)).toThrow(MediaSourceError);
+    }
+  });
+
+  // 16. Extended SSRF, IPv6 metadata, octal/subdomain bypasses & resolved IPv6 checks (restored coverage)
+  it('16. blocks data/ftp schemes, local subdomains, IPv6 IMDSv2, octal IPs, and private resolved IPv6', () => {
+    const extendedSsrf = [
+      'data:text/html,<h1>x</h1>',
+      'ftp://youtube.com/watch?v=dQw4w9WgXcQ',
+      'https://api.localhost/video.mp4',
+      'https://internal.service.local/stream.m3u8',
+      'https://[fd00:ec2::254]/latest/meta-data/',
+      'https://0177.0.0.1/loopback',
+    ];
+    for (const url of extendedSsrf) {
+      expect(() => parseAndValidateSafeUrl(url)).toThrow(MediaSourceError);
+    }
+
+    expect(() => assertSafeResolvedIp('::1')).toThrow(MediaSourceError);
+    expect(() => assertSafeResolvedIp('fe80::1')).toThrow(MediaSourceError);
+    expect(() => assertSafeResolvedIp('10.20.30.40')).toThrow(MediaSourceError);
+  });
+
+  // 17. DRM acquisition/cache denial, upload SHARED_PERMITTED rejection & explicit allowSharedCacheReuse gate
+  it('17. blocks DRM acquisition/caching, upload shared caching, and PERMITTED_PUBLIC without explicit reuse policy', () => {
+    const yt = resolveMediaSourceFromUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+    const drmSource = {
+      ...yt,
+      acquisitionCapability: 'APPROVED_API' as const,
+      rightsStatus: 'RESTRICTED_DRM' as const,
+    };
+    expect(() => assertAcquisitionPermitted(drmSource)).toThrow(/DRM-protected/);
+
+    const drmAuth = createTrustedCacheAuthContext({
+      source: drmSource,
+      requesterUserId: 'user_A',
+      allowSharedCacheReuse: true,
+    });
+    expect(() =>
+      resolveAuthorizedCacheIdentity(drmAuth, { artifactKind: 'BASE_CLIP', rightsScope: 'SHARED_PERMITTED' }),
+    ).toThrow(/DRM-restricted/);
+
+    // Direct upload cannot enter SHARED_PERMITTED cache scope
+    expect(() =>
+      buildSharedCacheIdentity({
+        artifactKind: 'SOURCE_MEDIA',
+        canonicalSourceId: 'upload:uploaded:asset_private_only',
+        sourceRevision: 'v1',
+        algorithmVersion: 'v1',
+        rightsScope: 'SHARED_PERMITTED',
+      }),
+    ).toThrow(/Private user uploads cannot be stored in SHARED_PERMITTED/);
+
+    // Even if a source carries PERMITTED_PUBLIC, shared cache reuse is DENIED unless allowSharedCacheReuse: true
+    const publicSource = {
+      ...yt,
+      acquisitionCapability: 'APPROVED_API' as const,
+      rightsStatus: 'PERMITTED_PUBLIC' as const,
+    };
+    const authWithoutSharedGrant = createTrustedCacheAuthContext({
+      source: publicSource,
+      requesterUserId: 'clipper_1',
+      // allowSharedCacheReuse omitted -> defaults false!
+    });
+    expect(authWithoutSharedGrant.allowSharedCacheReuse).toBe(false);
+    expect(() =>
+      resolveAuthorizedCacheIdentity(authWithoutSharedGrant, {
+        artifactKind: 'BASE_CLIP',
+        rightsScope: 'SHARED_PERMITTED',
+      }),
+    ).toThrow(/Shared cache reuse denied/);
+  });
 });
