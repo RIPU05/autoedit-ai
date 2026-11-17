@@ -33,6 +33,7 @@ const schema = z.object({
   OLLAMA_BASE_URL: z.string().url().default('http://localhost:11434'),
   OLLAMA_MODEL: z.string().default('qwen3:8b'),
 
+  STORAGE_PROVIDER: z.enum(['s3', 'minio', 'r2', 'custom-s3']).default('s3'),
   AWS_REGION: z.string().default('us-east-1'),
   AWS_ACCESS_KEY_ID: z.string(),
   AWS_SECRET_ACCESS_KEY: z.string(),

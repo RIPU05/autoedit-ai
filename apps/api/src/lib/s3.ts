@@ -10,6 +10,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { env } from '../config/env.js';
+import { getStorageProvider } from '../storage/index.js';
 
 export function getS3ClientConfig(): S3ClientConfig {
   const config: S3ClientConfig = {
@@ -43,8 +44,6 @@ export function createS3Client(overrides?: Partial<S3ClientConfig>): S3Client {
 
 export const s3 = createS3Client();
 
-const BUCKET = env.S3_BUCKET;
-
 /**
  * Large-file strategy: the browser uploads directly to S3 using presigned
  * multipart-part URLs, so big videos never stream through our API.
@@ -55,7 +54,15 @@ const BUCKET = env.S3_BUCKET;
  *   3. POST /api/upload/complete      -> completeMultipart(parts)
  */
 
-export async function startMultipart(key: string, contentType: string, client: S3Client = s3, bucket: string = env.S3_BUCKET) {
+export async function startMultipart(
+  key: string,
+  contentType: string,
+  client: S3Client = s3,
+  bucket: string = env.S3_BUCKET,
+) {
+  if (client === s3) {
+    return getStorageProvider().startMultipartUpload({ key, contentType, bucket });
+  }
   const res = await client.send(
     new CreateMultipartUploadCommand({ Bucket: bucket, Key: key, ContentType: contentType }),
   );
@@ -69,6 +76,9 @@ export async function presignUploadPart(
   client: S3Client = s3,
   bucket: string = env.S3_BUCKET,
 ) {
+  if (client === s3) {
+    return getStorageProvider().presignUploadPart({ key, uploadId, partNumber, bucket });
+  }
   const cmd = new UploadPartCommand({
     Bucket: bucket,
     Key: key,
@@ -85,6 +95,9 @@ export async function completeMultipart(
   client: S3Client = s3,
   bucket: string = env.S3_BUCKET,
 ) {
+  if (client === s3) {
+    return getStorageProvider().completeMultipartUpload({ key, uploadId, parts, bucket });
+  }
   return client.send(
     new CompleteMultipartUploadCommand({
       Bucket: bucket,
@@ -95,7 +108,15 @@ export async function completeMultipart(
   );
 }
 
-export async function abortMultipart(key: string, uploadId: string, client: S3Client = s3, bucket: string = env.S3_BUCKET) {
+export async function abortMultipart(
+  key: string,
+  uploadId: string,
+  client: S3Client = s3,
+  bucket: string = env.S3_BUCKET,
+) {
+  if (client === s3) {
+    return getStorageProvider().abortMultipartUpload({ key, uploadId, bucket });
+  }
   return client.send(new AbortMultipartUploadCommand({ Bucket: bucket, Key: key, UploadId: uploadId }));
 }
 
@@ -107,12 +128,22 @@ export async function putObject(
   client: S3Client = s3,
   bucket: string = env.S3_BUCKET,
 ) {
+  if (client === s3) {
+    return getStorageProvider().putObject({ key, body, contentType, bucket });
+  }
   await client.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body as any, ContentType: contentType }));
   return { key, bucket };
 }
 
 /** Presigned GET URL for download / handing off to n8n. */
-export async function presignDownload(key: string, client: S3Client = s3, bucket: string = env.S3_BUCKET) {
+export async function presignDownload(
+  key: string,
+  client: S3Client = s3,
+  bucket: string = env.S3_BUCKET,
+) {
+  if (client === s3) {
+    return getStorageProvider().createDownloadUrl({ key, bucket });
+  }
   return getSignedUrl(client, new GetObjectCommand({ Bucket: bucket, Key: key }), {
     expiresIn: env.S3_PRESIGN_TTL,
   });
