@@ -4,10 +4,16 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import { requireAuth, asyncHandler, HttpError } from '../middleware/auth.js';
 import { enqueueRender } from '../queue/queues.js';
-import { regenerateSocialCopy, editTimelineWithPrompt, explainClip } from '../services/claude.service.js';
+import {
+  regenerateSocialCopy,
+  editTimelineWithPrompt,
+  explainClip,
+  UnsupportedPromptError,
+} from '../services/claude.service.js';
 import { createVersion, getHeadVersion, diffVersions, restoreVersion } from '../services/version.service.js';
 import { presignDownload } from '../lib/s3.js';
 import { buildPromptInjection, learnFromPromptEdit } from '../services/creator-memory.service.js';
+import { getConnectedClaudeApiKey } from '../services/integration-events.service.js';
 
 export const projectRouter = Router();
 projectRouter.use(requireAuth);
@@ -114,17 +120,27 @@ projectRouter.post(
     });
     if (!project?.analysis || !project.timeline) throw new HttpError(400, 'analyze the video first');
 
-    const result = await editTimelineWithPrompt({
-      instruction,
-      durationSec: project.sourceAsset?.durationSec ?? 0,
-      summary: project.analysis.summary,
-      highlights: project.analysis.highlights,
-      silences: project.analysis.silences,
-      captions: project.analysis.captions,
-      currentOps: project.timeline.operations as any[],
-      currentEffects: project.timeline.effects as any,
-      creatorProfile: await buildPromptInjection(req.user!.sub),
-    });
+    const userClaudeApiKey = await getConnectedClaudeApiKey(req.user!.sub).catch(() => undefined);
+    let result: import('../services/claude.service.js').EditResult;
+    try {
+      result = await editTimelineWithPrompt({
+        instruction,
+        durationSec: project.sourceAsset?.durationSec ?? 0,
+        summary: project.analysis.summary,
+        highlights: project.analysis.highlights,
+        silences: project.analysis.silences,
+        captions: project.analysis.captions,
+        currentOps: project.timeline.operations as any[],
+        currentEffects: project.timeline.effects as any,
+        creatorProfile: await buildPromptInjection(req.user!.sub),
+        claudeApiKey: userClaudeApiKey,
+      });
+    } catch (err) {
+      if (err instanceof UnsupportedPromptError) {
+        throw new HttpError(400, err.message);
+      }
+      throw err;
+    }
 
     // creator memory: learn from this instruction (fire-and-forget)
     void learnFromPromptEdit(req.user!.sub, instruction);

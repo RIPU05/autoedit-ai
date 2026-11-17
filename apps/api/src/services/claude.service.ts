@@ -1,5 +1,39 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { env } from '../config/env.js';
+import {
+  isExternalAiUnavailable,
+  markApiKeyInvalid,
+  isApiKeyMarkedInvalid,
+  resetInvalidApiKeyCache,
+  isAuthenticationError,
+} from '../ai/providers.js';
+
+export {
+  isExternalAiUnavailable,
+  markApiKeyInvalid,
+  isApiKeyMarkedInvalid,
+  resetInvalidApiKeyCache,
+  isAuthenticationError,
+} from '../ai/providers.js';
+
+import {
+  applyDeterministicPromptEdit,
+  validateTimeline,
+  explainClipDeterministic,
+  generateDeterministicSocialCopy,
+  type PromptEditInput,
+  type ExplainClipInput,
+} from './deterministic-edit.service.js';
+
+export {
+  UnsupportedPromptError,
+  applyDeterministicPromptEdit,
+  validateTimeline,
+  explainClipDeterministic,
+  generateDeterministicSocialCopy,
+  type PromptEditInput,
+  type ExplainClipInput,
+} from './deterministic-edit.service.js';
 
 const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
 
@@ -150,7 +184,13 @@ export async function analyzeVideo(input: {
   transcript: TranscriptCue[];
   silences: SilenceSegment[];
   userPrompt?: string;
+  apiKey?: string;
 }): Promise<{ analysis: ClaudeAnalysis; raw: unknown; model: string }> {
+  const activeKey = input.apiKey || env.ANTHROPIC_API_KEY;
+  if (isApiKeyMarkedInvalid(activeKey)) {
+    throw new Error('Claude API key is marked invalid (cached from prior 401)');
+  }
+
   const userContent = [
     `VIDEO METADATA: ${JSON.stringify(input.meta)}`,
     `DETECTED SILENCES (s): ${JSON.stringify(input.silences)}`,
@@ -162,43 +202,73 @@ export async function analyzeVideo(input: {
     .filter(Boolean)
     .join('\n\n');
 
-  const message = await client.messages.create({
-    model: env.CLAUDE_MODEL,
-    max_tokens: 8000,
-    system: SYSTEM_PROMPT,
-    tools: [ANALYSIS_TOOL],
-    tool_choice: { type: 'tool', name: 'submit_video_analysis' },
-    messages: [{ role: 'user', content: userContent }],
-  });
+  try {
+    const activeClient = input.apiKey ? new Anthropic({ apiKey: input.apiKey }) : client;
+    const message = await activeClient.messages.create({
+      model: env.CLAUDE_MODEL,
+      max_tokens: 8000,
+      system: SYSTEM_PROMPT,
+      tools: [ANALYSIS_TOOL],
+      tool_choice: { type: 'tool', name: 'submit_video_analysis' },
+      messages: [{ role: 'user', content: userContent }],
+    });
 
-  const toolUse = message.content.find(
-    (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
-  );
-  if (!toolUse) throw new Error('Claude did not return structured analysis.');
+    const toolUse = message.content.find(
+      (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
+    );
+    if (!toolUse) throw new Error('Claude did not return structured analysis.');
 
-  return {
-    analysis: toolUse.input as ClaudeAnalysis,
-    raw: message,
-    model: env.CLAUDE_MODEL,
-  };
+    return {
+      analysis: toolUse.input as ClaudeAnalysis,
+      raw: message,
+      model: env.CLAUDE_MODEL,
+    };
+  } catch (err) {
+    if (isAuthenticationError(err)) {
+      markApiKeyInvalid(activeKey);
+    }
+    throw err;
+  }
 }
 
 /** Cheap, fast regeneration of just the social copy (e.g. user clicks "rewrite"). */
 export async function regenerateSocialCopy(summary: string, tone: string) {
-  const message = await client.messages.create({
-    model: env.CLAUDE_FAST_MODEL,
-    max_tokens: 1024,
-    system: 'You write punchy social media copy. Respond ONLY with JSON, no markdown fences.',
-    messages: [
-      {
-        role: 'user',
-        content: `Video summary: ${summary}\nTone: ${tone}\nReturn JSON: {"instagram":"","tiktok":"","youtube":"","linkedin":""}`,
-      },
-    ],
-  });
-  const text = message.content.find((b) => b.type === 'text');
-  const raw = text && text.type === 'text' ? text.text : '{}';
-  return JSON.parse(raw.replace(/```json|```/g, '').trim());
+  const currentProvider = process.env.AI_PROVIDER ?? env.AI_PROVIDER;
+  if (currentProvider === 'fallback' || isApiKeyMarkedInvalid(env.ANTHROPIC_API_KEY)) {
+    return generateDeterministicSocialCopy(summary, tone);
+  }
+
+  try {
+    const message = await client.messages.create({
+      model: env.CLAUDE_FAST_MODEL,
+      max_tokens: 1024,
+      system: 'You write punchy social media copy. Respond ONLY with JSON, no markdown fences.',
+      messages: [
+        {
+          role: 'user',
+          content: `Video summary: ${summary}\nTone: ${tone}\nReturn JSON: {"instagram":"","tiktok":"","youtube":"","linkedin":""}`,
+        },
+      ],
+    });
+    const text = message.content.find((b) => b.type === 'text');
+    const raw = text && text.type === 'text' ? text.text : '{}';
+    return JSON.parse(raw.replace(/```json|```/g, '').trim());
+  } catch (err) {
+    if (isAuthenticationError(err)) {
+      markApiKeyInvalid(env.ANTHROPIC_API_KEY);
+    }
+    if (isExternalAiUnavailable(err)) {
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          msg: 'regenerateSocialCopy.fallback',
+          reason: err instanceof Error ? err.message : String(err),
+        }),
+      );
+      return generateDeterministicSocialCopy(summary, tone);
+    }
+    throw err;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -220,6 +290,7 @@ export interface TimelineEffects {
   zooms: boolean;
   transitions: 'fade' | 'none';
   music: boolean;
+  metadata?: Record<string, unknown>;
 }
 export interface EditChange {
   action: 'kept' | 'removed' | 'trimmed' | 'reordered' | 'added' | 'effect';
@@ -292,17 +363,16 @@ const EDIT_TOOL: Anthropic.Tool = {
   },
 };
 
-export async function editTimelineWithPrompt(input: {
-  instruction: string;
-  durationSec: number;
-  summary?: string | null;
-  highlights: unknown;
-  silences: unknown;
-  captions: unknown;
-  currentOps: TimelineOp[];
-  currentEffects: TimelineEffects;
-  creatorProfile?: string;
-}): Promise<EditResult> {
+export async function editTimelineWithPrompt(input: PromptEditInput): Promise<EditResult> {
+  const currentProvider = process.env.AI_PROVIDER ?? env.AI_PROVIDER;
+  const isFallbackMode = currentProvider === 'fallback' || currentProvider === 'ollama';
+  const apiKey = input.claudeApiKey || env.ANTHROPIC_API_KEY;
+  const isKeyInvalid = isApiKeyMarkedInvalid(apiKey);
+
+  if (isFallbackMode || isKeyInvalid) {
+    return applyDeterministicPromptEdit(input);
+  }
+
   const userContent = [
     input.creatorProfile ?? '',
     `VIDEO DURATION (s): ${input.durationSec}`,
@@ -318,96 +388,116 @@ export async function editTimelineWithPrompt(input: {
     .filter(Boolean)
     .join('\n\n');
 
-  const message = await client.messages.create({
-    model: env.CLAUDE_MODEL,
-    max_tokens: 6000,
-    system:
-      'You are the AI Director of a video editor. You receive the current edit plan, ' +
-      'the analysis of the source video, and a natural-language instruction (often a ' +
-      'GOAL like "go viral on TikTok" or "make it educational"). Translate the goal into ' +
-      'concrete editing decisions: choose which clips to keep, reorder them, trim in/out ' +
-      'points, set per-clip zoom, and toggle effects. For EVERY meaningful decision, record ' +
-      'a change entry that explains WHY in plain language (e.g. removed because it repeats an ' +
-      'earlier point / low energy / long pause). Never invent timestamps outside [0, duration]. ' +
-      'Prefer cutting on silence boundaries when tightening pacing. Give the version a short, ' +
-      'distinctive name. Always respond by calling apply_edit.',
-    tools: [EDIT_TOOL],
-    tool_choice: { type: 'tool', name: 'apply_edit' },
-    messages: [{ role: 'user', content: userContent }],
-  });
+  try {
+    const activeClient = input.claudeApiKey ? new Anthropic({ apiKey: input.claudeApiKey }) : client;
+    const message = await activeClient.messages.create({
+      model: env.CLAUDE_MODEL,
+      max_tokens: 6000,
+      system:
+        'You are the AI Director of a video editor. You receive the current edit plan, ' +
+        'the analysis of the source video, and a natural-language instruction (often a ' +
+        'GOAL like "go viral on TikTok" or "make it educational"). Translate the goal into ' +
+        'concrete editing decisions: choose which clips to keep, reorder them, trim in/out ' +
+        'points, set per-clip zoom, and toggle effects. For EVERY meaningful decision, record ' +
+        'a change entry that explains WHY in plain language (e.g. removed because it repeats an ' +
+        'earlier point / low energy / long pause). Never invent timestamps outside [0, duration]. ' +
+        'Prefer cutting on silence boundaries when tightening pacing. Give the version a short, ' +
+        'distinctive name. Always respond by calling apply_edit.',
+      tools: [EDIT_TOOL],
+      tool_choice: { type: 'tool', name: 'apply_edit' },
+      messages: [{ role: 'user', content: userContent }],
+    });
 
-  const toolUse = message.content.find(
-    (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
-  );
-  if (!toolUse) throw new Error('Claude did not return an edit.');
-  const result = toolUse.input as EditResult;
+    const toolUse = message.content.find(
+      (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
+    );
+    if (!toolUse) throw new Error('Claude did not return an edit.');
+    const result = toolUse.input as EditResult;
 
-  // backfill metadata so downstream code is never handed undefined
-  result.changes = Array.isArray(result.changes) ? result.changes : [];
-  result.reasoning = result.reasoning ?? '';
-  result.versionName = result.versionName?.trim() || 'Untitled edit';
+    // backfill metadata so downstream code is never handed undefined
+    result.changes = Array.isArray(result.changes) ? result.changes : [];
+    result.reasoning = result.reasoning ?? '';
+    result.versionName = result.versionName?.trim() || 'Untitled edit';
 
-  // clamp + normalize so a hallucinated bound can never break the renderer
-  const dur = input.durationSec || Number.MAX_SAFE_INTEGER;
-  result.operations = result.operations
-    .map((o, i) => ({
-      index: typeof o.index === 'number' ? o.index : i,
-      start: Math.max(0, Math.min(o.start, dur)),
-      end: Math.max(0, Math.min(o.end, dur)),
-      label: o.label,
-      keep: o.keep ?? true,
-      zoom: o.zoom ?? 1,
-    }))
-    .filter((o) => o.end > o.start)
-    .sort((a, b) => a.index - b.index)
-    .map((o, i) => ({ ...o, index: i }));
+    // validate and normalize operations
+    result.operations = validateTimeline(result.operations, input.durationSec);
 
-  return result;
+    return result;
+  } catch (err: unknown) {
+    if (isAuthenticationError(err)) {
+      markApiKeyInvalid(apiKey);
+    }
+    if (isExternalAiUnavailable(err)) {
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          msg: 'editTimelineWithPrompt.fallback',
+          reason: err instanceof Error ? err.message : String(err),
+        }),
+      );
+      return applyDeterministicPromptEdit(input);
+    }
+    throw err;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Explainable AI — answer "why was this clip kept/removed?" for any segment.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function explainClip(input: {
-  start: number;
-  end: number;
-  kept: boolean;
-  summary?: string | null;
-  highlights: unknown;
-  silences: unknown;
-  captions: unknown;
-}): Promise<{ explanation: string; reasons: string[] }> {
-  const message = await client.messages.create({
-    model: env.CLAUDE_FAST_MODEL,
-    max_tokens: 700,
-    system:
-      'You explain a video editor\'s decisions to build user trust. Given the analysis ' +
-      'and a specific time range, explain in plain language why that segment is ' +
-      (input.kept ? 'KEPT in' : 'REMOVED from') +
-      ' the edit. Be concrete and reference the evidence (energy, repetition, silence, ' +
-      'relevance). Respond ONLY with JSON: {"explanation":"...","reasons":["...","..."]}.',
-    messages: [
-      {
-        role: 'user',
-        content: [
-          `SEGMENT: ${input.start}s–${input.end}s (currently ${input.kept ? 'kept' : 'removed'})`,
-          input.summary ? `SUMMARY: ${input.summary}` : '',
-          `HIGHLIGHTS: ${JSON.stringify(input.highlights)}`,
-          `SILENCES: ${JSON.stringify(input.silences)}`,
-          `CAPTIONS NEAR SEGMENT: ${JSON.stringify(input.captions)}`,
-        ]
-          .filter(Boolean)
-          .join('\n'),
-      },
-    ],
-  });
-  const text = message.content.find((b) => b.type === 'text');
-  const raw = text && text.type === 'text' ? text.text : '{}';
+export async function explainClip(input: ExplainClipInput): Promise<{ explanation: string; reasons: string[] }> {
+  const currentProvider = process.env.AI_PROVIDER ?? env.AI_PROVIDER;
+  if (currentProvider === 'fallback' || isApiKeyMarkedInvalid(env.ANTHROPIC_API_KEY)) {
+    return explainClipDeterministic(input);
+  }
+
   try {
-    const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
-    return { explanation: parsed.explanation ?? '', reasons: parsed.reasons ?? [] };
-  } catch {
-    return { explanation: raw.slice(0, 400), reasons: [] };
+    const message = await client.messages.create({
+      model: env.CLAUDE_FAST_MODEL,
+      max_tokens: 700,
+      system:
+        'You explain a video editor\'s decisions to build user trust. Given the analysis ' +
+        'and a specific time range, explain in plain language why that segment is ' +
+        (input.kept ? 'KEPT in' : 'REMOVED from') +
+        ' the edit. Be concrete and reference the evidence (energy, repetition, silence, ' +
+        'relevance). Respond ONLY with JSON: {"explanation":"...","reasons":["...","..."]}.',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            `SEGMENT: ${input.start}s–${input.end}s (currently ${input.kept ? 'kept' : 'removed'})`,
+            input.summary ? `SUMMARY: ${input.summary}` : '',
+            `HIGHLIGHTS: ${JSON.stringify(input.highlights)}`,
+            `SILENCES: ${JSON.stringify(input.silences)}`,
+            `CAPTIONS NEAR SEGMENT: ${JSON.stringify(input.captions)}`,
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        },
+      ],
+    });
+    const text = message.content.find((b) => b.type === 'text');
+    const raw = text && text.type === 'text' ? text.text : '{}';
+    try {
+      const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
+      return { explanation: parsed.explanation ?? '', reasons: parsed.reasons ?? [] };
+    } catch {
+      return { explanation: raw.slice(0, 400), reasons: [] };
+    }
+  } catch (err) {
+    if (isAuthenticationError(err)) {
+      markApiKeyInvalid(env.ANTHROPIC_API_KEY);
+    }
+    if (isExternalAiUnavailable(err)) {
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          msg: 'explainClip.fallback',
+          reason: err instanceof Error ? err.message : String(err),
+        }),
+      );
+      return explainClipDeterministic(input);
+    }
+    throw err;
   }
 }

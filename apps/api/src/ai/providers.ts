@@ -33,7 +33,52 @@ function errorMessage(err: unknown) {
   return err instanceof Error ? err.message : String(err);
 }
 
+let cachedInvalidApiKey: string | null = null;
+
+export function markApiKeyInvalid(key?: string) {
+  if (key) cachedInvalidApiKey = key;
+}
+
+export function isApiKeyMarkedInvalid(key?: string): boolean {
+  if (!key) return false;
+  return cachedInvalidApiKey === key;
+}
+
+export function resetInvalidApiKeyCache() {
+  cachedInvalidApiKey = null;
+}
+
+export function isAuthenticationError(err: unknown): boolean {
+  if (!err) return false;
+  const anyErr = err as any;
+  if (anyErr.status === 401 || anyErr.name === 'AuthenticationError') return true;
+  const message = errorMessage(err);
+  return /(?:invalid x-api-key|authentication_error|401 unauthorized|invalid api key)/i.test(message);
+}
+
 export function isExternalAiUnavailable(err: unknown) {
+  if (!err) return false;
+  const anyErr = err as any;
+  if (
+    anyErr.status === 401 ||
+    anyErr.status === 402 ||
+    anyErr.status === 403 ||
+    anyErr.status === 429 ||
+    anyErr.status === 500 ||
+    anyErr.status === 502 ||
+    anyErr.status === 503 ||
+    anyErr.status === 504
+  ) {
+    return true;
+  }
+  if (
+    anyErr.name === 'AuthenticationError' ||
+    anyErr.name === 'RateLimitError' ||
+    anyErr.name === 'APIConnectionError' ||
+    anyErr.name === 'APIConnectionTimeoutError'
+  ) {
+    return true;
+  }
   const message = errorMessage(err);
   return /(?:invalid x-api-key|authentication|api key|credit balance|billing|quota|rate.?limit|claude (?:401|402|403|429)|ollama|model|ECONNREFUSED|fetch failed|\b(?:401|402|403|429)\b)/i.test(
     message,
@@ -60,8 +105,63 @@ export function buildFallbackPipelineResult(input: {
   silences: SilenceSegment[];
   reason: string;
 }): PipelineResult {
+  const dur = Math.max(0.1, input.meta.durationSec);
+
   if (input.transcript.length === 0) {
-    const end = Math.max(0.1, input.meta.durationSec);
+    const activeSpans =
+      Array.isArray(input.silences) && input.silences.length > 0
+        ? subtractSilences(0, dur, input.silences)
+        : [];
+
+    if (activeSpans.length > 0) {
+      const operations = activeSpans.map((span, index) => ({
+        index,
+        start: span.start,
+        end: span.end,
+        label: `Active audio segment ${index + 1}`,
+        keep: true,
+        zoom: 1,
+      }));
+      const highlights = operations.map((op) => ({
+        start: op.start,
+        end: op.end,
+        label: op.label,
+        score: 0.5,
+      }));
+
+      return {
+        summary: 'Degraded audio analysis generated using silence detection (speech transcript unavailable).',
+        strategy: 'Silence-based edit keeping active audio segments with detected pauses removed.',
+        reasoning: input.reason,
+        highlights,
+        speakers: [{ id: 'spk_1', label: 'Speaker 1', segments: operations.map((op) => ({ start: op.start, end: op.end })) }],
+        captions: [],
+        suggestedTitles: ['Auto-generated edit (silence-trimmed)'],
+        socialCopy: {
+          instagram: 'Auto-generated edit (silence-trimmed)',
+          tiktok: 'Auto-generated edit (silence-trimmed)',
+          youtube: 'Auto-generated edit (silence-trimmed)',
+          linkedin: 'Auto-generated edit (silence-trimmed)',
+        },
+        hook: {
+          hook: { start: operations[0].start, end: Math.min(operations[0].end, 5), text: operations[0].label },
+          alternatives: ['Auto-generated edit'],
+        },
+        thumbnail: { concept: 'Use the opening frame', overlayText: 'Auto edit', bestFrameSec: operations[0]?.start ?? 0 },
+        operations,
+        effects: {
+          subtitles: false,
+          zooms: false,
+          transitions: 'none',
+          music: false,
+          metadata: { aiProvider: 'fallback', reason: input.reason, degradedAudio: true, transcriptUnavailable: true },
+        } as PipelineResult['effects'],
+        agentLog: [{ agent: 'Fallback', ms: 0, summary: 'Speech transcript unavailable; performed degraded silence-based edit.' }],
+        model: 'fallback',
+      };
+    }
+
+    const end = dur;
     return {
       summary: 'Fallback edit generated from video-only media with no audio transcript.',
       strategy: 'Fallback edit keeps the full video because no audio transcript is available.',
@@ -349,8 +449,9 @@ export class OllamaProvider extends BaseProvider {
 }
 
 export async function runAiProvider(input: AiProviderInput): Promise<AiProviderResult> {
+  const currentProvider = process.env.AI_PROVIDER ?? env.AI_PROVIDER;
   const selected: AiProvider =
-    env.AI_PROVIDER === 'ollama' ? new OllamaProvider() : env.AI_PROVIDER === 'fallback' ? new FallbackProvider() : new ClaudeProvider();
+    currentProvider === 'ollama' ? new OllamaProvider() : currentProvider === 'fallback' ? new FallbackProvider() : new ClaudeProvider();
 
   if (selected.name === 'fallback') {
     return { provider: 'fallback', result: await selected.analyzeTranscript(input), fallback: true, reason: 'AI_PROVIDER=fallback' };
@@ -361,6 +462,9 @@ export async function runAiProvider(input: AiProviderInput): Promise<AiProviderR
   } catch (err) {
     const selectedName = selected.name === 'ollama' ? 'Ollama' : 'Claude';
     if (selected.name !== 'ollama' && !isExternalAiUnavailable(err)) throw err;
+    if (isAuthenticationError(err)) {
+      markApiKeyInvalid(input.claudeApiKey || env.ANTHROPIC_API_KEY);
+    }
     const reason = `${selectedName} unavailable: ${errorMessage(err)}`;
     const result = buildFallbackPipelineResult({
       meta: input.meta,

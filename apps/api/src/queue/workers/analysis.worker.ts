@@ -81,22 +81,51 @@ export const analysisWorker = new Worker<AnalysisJobData>(
     const silences = hasAudio ? await timeStage('silence', projectId, () => detectSilences(localVideo)) : [];
 
     // 3. transcribe audio (rich: words + confidence + language)
-    const tr = hasAudio
-      ? await (async () => {
-          const audioPath = path.join(workDir, 'audio.wav');
-          await extractAudio(localVideo, audioPath);
-          return timeStage('transcription', projectId, () => transcribeRich(audioPath));
-        })()
-      : {
+    let tr: import('../../services/transcribe.service.js').TranscriptionResult;
+    let transcriptionSuccessful = false;
+
+    if (!hasAudio) {
+      tr = {
+        language: 'unknown',
+        durationSec: meta.durationSec,
+        segments: [],
+        words: [],
+        avgConfidence: null,
+        model: 'no-audio',
+      };
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          msg: 'No audio stream detected; skipping transcription and using fallback timeline',
+          projectId,
+        }),
+      );
+    } else {
+      const audioPath = path.join(workDir, 'audio.wav');
+      // Extract audio: corrupt media will throw here, failing the job legitimately
+      await extractAudio(localVideo, audioPath);
+      try {
+        tr = await timeStage('transcription', projectId, () => transcribeRich(audioPath));
+        transcriptionSuccessful = true;
+      } catch (err) {
+        console.warn(
+          JSON.stringify({
+            level: 'warn',
+            msg: 'transcription.unavailable',
+            projectId,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+        await captureError('WHISPER', err, { projectId, jobId: job.id }).catch(() => {});
+        tr = {
           language: 'unknown',
           durationSec: meta.durationSec,
           segments: [],
           words: [],
           avgConfidence: null,
-          model: 'no-audio',
+          model: 'unavailable',
         };
-    if (!hasAudio) {
-      console.warn(JSON.stringify({ level: 'warn', msg: 'No audio stream detected; skipping transcription and using fallback timeline', projectId }));
+      }
     }
     await job.updateProgress(40);
 
@@ -126,7 +155,7 @@ export const analysisWorker = new Worker<AnalysisJobData>(
     // creator memory → prompt injection
     const proj0 = await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true, title: true } });
     const creatorProfile = proj0 ? await buildPromptInjection(proj0.userId) : undefined;
-    if (proj0) {
+    if (proj0 && transcriptionSuccessful) {
       void dispatchIntegrationEvent(proj0.userId, 'transcript.completed', {
         projectId,
         projectTitle: proj0.title,

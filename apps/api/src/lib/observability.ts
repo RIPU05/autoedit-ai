@@ -11,6 +11,7 @@ export type ErrorCategory =
   | 'MEMORY'
   | 'RENDER_TIMEOUT'
   | 'TRANSCRIPTION'
+  | 'WHISPER'
   | 'UNKNOWN';
 
 /** Record how long a pipeline stage took (and whether it succeeded). */
