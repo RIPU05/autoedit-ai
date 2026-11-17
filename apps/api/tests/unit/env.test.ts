@@ -67,4 +67,43 @@ describe('env validation', () => {
     expect(env.AI_PROVIDER).toBe('claude');
     expect(env.ANTHROPIC_API_KEY).toBe('test-anthropic-key');
   });
+
+  describe('S3 endpoint and path style configuration', () => {
+    it('defaults S3_ENDPOINT and S3_FORCE_PATH_STYLE to undefined when omitted', async () => {
+      const env = await loadEnv({ S3_ENDPOINT: undefined, S3_FORCE_PATH_STYLE: undefined });
+
+      expect(env.S3_ENDPOINT).toBeUndefined();
+      expect(env.S3_FORCE_PATH_STYLE).toBeUndefined();
+    });
+
+    it('treats empty or whitespace S3_ENDPOINT as undefined', async () => {
+      const env = await loadEnv({ S3_ENDPOINT: '   ' });
+
+      expect(env.S3_ENDPOINT).toBeUndefined();
+    });
+
+    it('accepts valid S3_ENDPOINT URL', async () => {
+      const env = await loadEnv({ S3_ENDPOINT: 'http://127.0.0.1:9002' });
+
+      expect(env.S3_ENDPOINT).toBe('http://127.0.0.1:9002');
+    });
+
+    it('rejects malformed S3_ENDPOINT URL', async () => {
+      await expect(loadEnv({ S3_ENDPOINT: 'not-a-valid-url' })).rejects.toThrow();
+    });
+
+    it('parses S3_FORCE_PATH_STYLE true/1 and false/0 correctly', async () => {
+      const envTrue = await loadEnv({ S3_FORCE_PATH_STYLE: 'true' });
+      expect(envTrue.S3_FORCE_PATH_STYLE).toBe(true);
+
+      const envOne = await loadEnv({ S3_FORCE_PATH_STYLE: '1' });
+      expect(envOne.S3_FORCE_PATH_STYLE).toBe(true);
+
+      const envFalse = await loadEnv({ S3_FORCE_PATH_STYLE: 'false' });
+      expect(envFalse.S3_FORCE_PATH_STYLE).toBe(false);
+
+      const envZero = await loadEnv({ S3_FORCE_PATH_STYLE: '0' });
+      expect(envZero.S3_FORCE_PATH_STYLE).toBe(false);
+    });
+  });
 });

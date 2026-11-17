@@ -1,5 +1,6 @@
 import {
   S3Client,
+  type S3ClientConfig,
   CreateMultipartUploadCommand,
   UploadPartCommand,
   CompleteMultipartUploadCommand,
@@ -10,13 +11,37 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { env } from '../config/env.js';
 
-export const s3 = new S3Client({
-  region: env.AWS_REGION,
-  credentials: {
-    accessKeyId: env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
-  },
-});
+export function getS3ClientConfig(): S3ClientConfig {
+  const config: S3ClientConfig = {
+    region: env.AWS_REGION,
+    credentials: {
+      accessKeyId: env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+    },
+  };
+
+  if (env.S3_ENDPOINT) {
+    config.endpoint = env.S3_ENDPOINT;
+  }
+
+  if (env.S3_FORCE_PATH_STYLE !== undefined) {
+    config.forcePathStyle = env.S3_FORCE_PATH_STYLE;
+  } else if (env.S3_ENDPOINT) {
+    // MinIO and local S3-compatible emulators require path-style bucket addressing
+    config.forcePathStyle = true;
+  }
+
+  return config;
+}
+
+export function createS3Client(overrides?: Partial<S3ClientConfig>): S3Client {
+  return new S3Client({
+    ...getS3ClientConfig(),
+    ...overrides,
+  });
+}
+
+export const s3 = createS3Client();
 
 const BUCKET = env.S3_BUCKET;
 
@@ -30,31 +55,39 @@ const BUCKET = env.S3_BUCKET;
  *   3. POST /api/upload/complete      -> completeMultipart(parts)
  */
 
-export async function startMultipart(key: string, contentType: string) {
-  const res = await s3.send(
-    new CreateMultipartUploadCommand({ Bucket: BUCKET, Key: key, ContentType: contentType }),
+export async function startMultipart(key: string, contentType: string, client: S3Client = s3, bucket: string = env.S3_BUCKET) {
+  const res = await client.send(
+    new CreateMultipartUploadCommand({ Bucket: bucket, Key: key, ContentType: contentType }),
   );
-  return { uploadId: res.UploadId!, key, bucket: BUCKET };
+  return { uploadId: res.UploadId!, key, bucket };
 }
 
-export async function presignUploadPart(key: string, uploadId: string, partNumber: number) {
+export async function presignUploadPart(
+  key: string,
+  uploadId: string,
+  partNumber: number,
+  client: S3Client = s3,
+  bucket: string = env.S3_BUCKET,
+) {
   const cmd = new UploadPartCommand({
-    Bucket: BUCKET,
+    Bucket: bucket,
     Key: key,
     UploadId: uploadId,
     PartNumber: partNumber,
   });
-  return getSignedUrl(s3, cmd, { expiresIn: env.S3_PRESIGN_TTL });
+  return getSignedUrl(client, cmd, { expiresIn: env.S3_PRESIGN_TTL });
 }
 
 export async function completeMultipart(
   key: string,
   uploadId: string,
   parts: { ETag: string; PartNumber: number }[],
+  client: S3Client = s3,
+  bucket: string = env.S3_BUCKET,
 ) {
-  return s3.send(
+  return client.send(
     new CompleteMultipartUploadCommand({
-      Bucket: BUCKET,
+      Bucket: bucket,
       Key: key,
       UploadId: uploadId,
       MultipartUpload: { Parts: parts.sort((a, b) => a.PartNumber - b.PartNumber) },
@@ -62,19 +95,25 @@ export async function completeMultipart(
   );
 }
 
-export async function abortMultipart(key: string, uploadId: string) {
-  return s3.send(new AbortMultipartUploadCommand({ Bucket: BUCKET, Key: key, UploadId: uploadId }));
+export async function abortMultipart(key: string, uploadId: string, client: S3Client = s3, bucket: string = env.S3_BUCKET) {
+  return client.send(new AbortMultipartUploadCommand({ Bucket: bucket, Key: key, UploadId: uploadId }));
 }
 
 /** Server-side upload (used by the render worker for output files). */
-export async function putObject(key: string, body: Buffer | NodeJS.ReadableStream, contentType: string) {
-  await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: key, Body: body as any, ContentType: contentType }));
-  return { key, bucket: BUCKET };
+export async function putObject(
+  key: string,
+  body: Buffer | NodeJS.ReadableStream,
+  contentType: string,
+  client: S3Client = s3,
+  bucket: string = env.S3_BUCKET,
+) {
+  await client.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body as any, ContentType: contentType }));
+  return { key, bucket };
 }
 
 /** Presigned GET URL for download / handing off to n8n. */
-export async function presignDownload(key: string) {
-  return getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: key }), {
+export async function presignDownload(key: string, client: S3Client = s3, bucket: string = env.S3_BUCKET) {
+  return getSignedUrl(client, new GetObjectCommand({ Bucket: bucket, Key: key }), {
     expiresIn: env.S3_PRESIGN_TTL,
   });
 }

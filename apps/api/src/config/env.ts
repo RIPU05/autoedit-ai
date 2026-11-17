@@ -38,6 +38,25 @@ const schema = z.object({
   AWS_SECRET_ACCESS_KEY: z.string(),
   S3_BUCKET: z.string(),
   S3_PRESIGN_TTL: z.coerce.number().default(3600),
+  S3_ENDPOINT: z
+    .string()
+    .optional()
+    .transform((val) => {
+      if (!val) return undefined;
+      const trimmed = val.trim();
+      return trimmed.length > 0 ? trimmed : undefined;
+    })
+    .pipe(z.string().url().optional()),
+  S3_FORCE_PATH_STYLE: z
+    .string()
+    .optional()
+    .transform((val) => {
+      if (val === undefined) return undefined;
+      const normalized = val.trim().toLowerCase();
+      if (normalized === 'true' || normalized === '1') return true;
+      if (normalized === 'false' || normalized === '0') return false;
+      return undefined;
+    }),
 
   N8N_BASE_URL: z.string().optional(),
   N8N_API_KEY: z.string().optional(),
