@@ -36,6 +36,8 @@ function defaultStatusForCode(code: MediaSourceErrorCode): number {
     case 'SOURCE_UNAVAILABLE':
       return 404;
     case 'COORDINATION_CONFLICT':
+    case 'INVALID_STATE_TRANSITION':
+    case 'BROADCAST_UNRESOLVED':
     case 'LEASE_EXPIRED':
       return 409;
     case 'UNSUPPORTED_ACQUISITION':

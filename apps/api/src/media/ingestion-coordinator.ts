@@ -1,8 +1,18 @@
-import type { CanonicalSourceId, SharedIngestionState } from '@autoedit/contracts';
+import {
+  CacheableSourceIdSchema,
+  type CacheableSourceId,
+  type CanonicalSourceId,
+  type SharedIngestionState,
+} from '@autoedit/contracts';
 import { MediaSourceError } from './errors.js';
 
+/**
+ * Compact, fixed-size O(1) work-ownership record.
+ * Deliberately excludes per-user subscriber lists so high fan-in (e.g. 1,000+ clippers)
+ * never bloats Redis lock payloads; subscriber notifications belong outside the lock.
+ */
 export interface IngestionCoordinationRecord {
-  canonicalSourceId: CanonicalSourceId;
+  canonicalSourceId: CacheableSourceId;
   state: SharedIngestionState;
   ownerWorkerId: string | null;
   fencingToken: number;
@@ -10,7 +20,7 @@ export interface IngestionCoordinationRecord {
   maxRetries: number;
   leaseExpiresAtMs: number;
   updatedAtMs: number;
-  requesters: string[];
+  attachedCount: number;
   artifactRef?: string;
   lastError?: string;
 }
@@ -39,10 +49,17 @@ export interface RequestIngestionResult {
 }
 
 export interface CoordinationStore {
-  get(canonicalSourceId: CanonicalSourceId): Promise<IngestionCoordinationRecord | null>;
-  requestIngestion(input: Required<RequestIngestionInput>): Promise<RequestIngestionResult>;
+  get(canonicalSourceId: CacheableSourceId): Promise<IngestionCoordinationRecord | null>;
+  requestIngestion(input: {
+    canonicalSourceId: CacheableSourceId;
+    requesterId: string;
+    workerId: string;
+    leaseMs: number;
+    maxRetries: number;
+    nowMs: number;
+  }): Promise<RequestIngestionResult>;
   transitionState(input: {
-    canonicalSourceId: CanonicalSourceId;
+    canonicalSourceId: CacheableSourceId;
     workerId: string;
     fencingToken: number;
     nextState: SharedIngestionState;
@@ -52,14 +69,14 @@ export interface CoordinationStore {
     nowMs: number;
   }): Promise<IngestionCoordinationRecord>;
   renewLease(input: {
-    canonicalSourceId: CanonicalSourceId;
+    canonicalSourceId: CacheableSourceId;
     workerId: string;
     fencingToken: number;
     leaseMs: number;
     nowMs: number;
   }): Promise<IngestionCoordinationRecord>;
   releaseLease(input: {
-    canonicalSourceId: CanonicalSourceId;
+    canonicalSourceId: CacheableSourceId;
     workerId: string;
     fencingToken: number;
     nowMs: number;
@@ -68,35 +85,76 @@ export interface CoordinationStore {
 
 const DEFAULT_LEASE_MS = 30_000;
 const DEFAULT_MAX_RETRIES = 3;
-const MAX_TRACKED_REQUESTERS = 5000;
 
-function addRequester(list: string[], requesterId: string): string[] {
-  if (list.includes(requesterId)) return list;
-  if (list.length >= MAX_TRACKED_REQUESTERS) return list;
-  return [...list, requesterId];
+const ALLOWED_TRANSITIONS: Record<SharedIngestionState, ReadonlySet<SharedIngestionState>> = {
+  PENDING: new Set(),
+  ACQUIRING: new Set(['INGESTING', 'READY', 'FAILED']),
+  INGESTING: new Set(['READY', 'FAILED']),
+  READY: new Set(), // Terminal immutable state
+  FAILED: new Set(), // Must re-enter via requestIngestion recovery
+  EXPIRED: new Set(), // Must re-enter via requestIngestion recovery
+};
+
+function assertCacheableCanonicalId(canonicalSourceId: string): CacheableSourceId {
+  const parsed = CacheableSourceIdSchema.safeParse(canonicalSourceId);
+  if (!parsed.success) {
+    throw new MediaSourceError({
+      code: 'BROADCAST_UNRESOLVED',
+      message: `Cannot coordinate ingestion for "${canonicalSourceId}": an immutable broadcast, VOD, or upload identity is required (channel-only IDs are rejected).`,
+      retryable: true,
+    });
+  }
+  return parsed.data;
+}
+
+function assertValidTransition(
+  currentState: SharedIngestionState,
+  nextState: SharedIngestionState,
+  artifactRef?: string,
+): void {
+  const allowed = ALLOWED_TRANSITIONS[currentState];
+  if (!allowed || !allowed.has(nextState)) {
+    throw new MediaSourceError({
+      code: 'INVALID_STATE_TRANSITION',
+      message: `Invalid ingestion state transition from "${currentState}" to "${nextState}".`,
+    });
+  }
+  if (nextState === 'READY' && (!artifactRef || !artifactRef.trim())) {
+    throw new MediaSourceError({
+      code: 'INVALID_STATE_TRANSITION',
+      message: 'Transitioning ingestion to READY requires a non-empty artifactRef.',
+    });
+  }
 }
 
 /**
  * Deterministic in-memory coordination store implementing the exact same
- * lease, fencing-token, retry, and recovery semantics as the Redis Lua store.
- * Useful for isolated unit and concurrency tests.
+ * lease, fencing-token, transition-validation, retry, and recovery semantics
+ * as the Redis Lua store.
  */
 export class InMemoryCoordinationStore implements CoordinationStore {
-  private readonly records = new Map<CanonicalSourceId, IngestionCoordinationRecord>();
+  private readonly records = new Map<CacheableSourceId, IngestionCoordinationRecord>();
 
-  async get(canonicalSourceId: CanonicalSourceId): Promise<IngestionCoordinationRecord | null> {
+  async get(canonicalSourceId: CacheableSourceId): Promise<IngestionCoordinationRecord | null> {
     const rec = this.records.get(canonicalSourceId);
-    return rec ? { ...rec, requesters: [...rec.requesters] } : null;
+    return rec ? { ...rec } : null;
   }
 
-  async requestIngestion(input: Required<RequestIngestionInput>): Promise<RequestIngestionResult> {
+  async requestIngestion(input: {
+    canonicalSourceId: CacheableSourceId;
+    requesterId: string;
+    workerId: string;
+    leaseMs: number;
+    maxRetries: number;
+    nowMs: number;
+  }): Promise<RequestIngestionResult> {
     const existing = this.records.get(input.canonicalSourceId);
 
-    // Case 1: Already READY -> reuse immediately, zero duplicate work
-    if (existing && existing.state === 'READY') {
+    // Case 1: READY with valid non-empty artifactRef -> reuse immediately
+    if (existing && existing.state === 'READY' && existing.artifactRef && existing.artifactRef.trim()) {
       const updated: IngestionCoordinationRecord = {
         ...existing,
-        requesters: addRequester(existing.requesters, input.requesterId),
+        attachedCount: existing.attachedCount + 1,
         updatedAtMs: input.nowMs,
       };
       this.records.set(input.canonicalSourceId, updated);
@@ -104,11 +162,11 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         action: 'REUSE_READY',
         deduplicated: true,
         fencingToken: updated.fencingToken,
-        record: { ...updated, requesters: [...updated.requesters] },
+        record: { ...updated },
       };
     }
 
-    // Case 2: Active lease held by a live worker -> attach requester, zero duplicate work
+    // Case 2: Active unexpired lease held by a live worker -> attach without duplicate work
     if (
       existing &&
       (existing.state === 'ACQUIRING' || existing.state === 'INGESTING') &&
@@ -116,7 +174,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     ) {
       const updated: IngestionCoordinationRecord = {
         ...existing,
-        requesters: addRequester(existing.requesters, input.requesterId),
+        attachedCount: existing.attachedCount + 1,
         updatedAtMs: input.nowMs,
       };
       this.records.set(input.canonicalSourceId, updated);
@@ -124,11 +182,11 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         action: 'ATTACH_EXISTING',
         deduplicated: true,
         fencingToken: updated.fencingToken,
-        record: { ...updated, requesters: [...updated.requesters] },
+        record: { ...updated },
       };
     }
 
-    // Case 3: Lease expired (worker crashed) or previous attempt failed -> bounded recovery
+    // Case 3: Lease expired (worker crashed) or previous attempt FAILED/EXPIRED -> bounded recovery
     if (existing) {
       const nextAttempts = existing.attempts + 1;
       const maxRetries = existing.maxRetries || input.maxRetries;
@@ -140,15 +198,15 @@ export class InMemoryCoordinationStore implements CoordinationStore {
           ownerWorkerId: null,
           leaseExpiresAtMs: 0,
           updatedAtMs: input.nowMs,
+          attachedCount: existing.attachedCount + 1,
           lastError: existing.lastError ?? 'Maximum ingestion retry attempts exceeded.',
-          requesters: addRequester(existing.requesters, input.requesterId),
         };
         this.records.set(input.canonicalSourceId, exhausted);
         return {
           action: 'FAILED_MAX_RETRIES',
           deduplicated: true,
           fencingToken: exhausted.fencingToken,
-          record: { ...exhausted, requesters: [...exhausted.requesters] },
+          record: { ...exhausted },
         };
       }
 
@@ -161,14 +219,14 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         maxRetries,
         leaseExpiresAtMs: input.nowMs + input.leaseMs,
         updatedAtMs: input.nowMs,
-        requesters: addRequester(existing.requesters, input.requesterId),
+        attachedCount: existing.attachedCount + 1,
       };
       this.records.set(input.canonicalSourceId, recovered);
       return {
         action: 'ACQUIRED_RECOVERY',
         deduplicated: false,
         fencingToken: recovered.fencingToken,
-        record: { ...recovered, requesters: [...recovered.requesters] },
+        record: { ...recovered },
       };
     }
 
@@ -182,19 +240,19 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       maxRetries: input.maxRetries,
       leaseExpiresAtMs: input.nowMs + input.leaseMs,
       updatedAtMs: input.nowMs,
-      requesters: [input.requesterId],
+      attachedCount: 1,
     };
     this.records.set(input.canonicalSourceId, created);
     return {
       action: 'ACQUIRED_NEW',
       deduplicated: false,
       fencingToken: created.fencingToken,
-      record: { ...created, requesters: [...created.requesters] },
+      record: { ...created },
     };
   }
 
   async transitionState(input: {
-    canonicalSourceId: CanonicalSourceId;
+    canonicalSourceId: CacheableSourceId;
     workerId: string;
     fencingToken: number;
     nextState: SharedIngestionState;
@@ -210,6 +268,12 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         message: `No active ingestion record for ${input.canonicalSourceId}.`,
       });
     }
+    if (existing.state === 'READY') {
+      throw new MediaSourceError({
+        code: 'INVALID_STATE_TRANSITION',
+        message: `Cannot modify READY ingestion record for ${input.canonicalSourceId}.`,
+      });
+    }
     if (existing.ownerWorkerId !== input.workerId || existing.fencingToken !== input.fencingToken) {
       throw new MediaSourceError({
         code: 'LEASE_EXPIRED',
@@ -223,6 +287,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       });
     }
 
+    assertValidTransition(existing.state, input.nextState, input.artifactRef);
+
     const isTerminal = input.nextState === 'READY' || input.nextState === 'FAILED' || input.nextState === 'EXPIRED';
     const updated: IngestionCoordinationRecord = {
       ...existing,
@@ -233,23 +299,29 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         : input.leaseMs
           ? input.nowMs + input.leaseMs
           : existing.leaseExpiresAtMs,
-      artifactRef: input.artifactRef ?? existing.artifactRef,
+      artifactRef: input.nextState === 'READY' ? input.artifactRef : existing.artifactRef,
       lastError: input.lastError ?? existing.lastError,
       updatedAtMs: input.nowMs,
     };
     this.records.set(input.canonicalSourceId, updated);
-    return { ...updated, requesters: [...updated.requesters] };
+    return { ...updated };
   }
 
   async renewLease(input: {
-    canonicalSourceId: CanonicalSourceId;
+    canonicalSourceId: CacheableSourceId;
     workerId: string;
     fencingToken: number;
     leaseMs: number;
     nowMs: number;
   }): Promise<IngestionCoordinationRecord> {
     const existing = this.records.get(input.canonicalSourceId);
-    if (!existing || existing.ownerWorkerId !== input.workerId || existing.fencingToken !== input.fencingToken) {
+    if (!existing || existing.state === 'READY') {
+      throw new MediaSourceError({
+        code: 'LEASE_EXPIRED',
+        message: `Cannot renew lease: no active mutable lease for ${input.canonicalSourceId}.`,
+      });
+    }
+    if (existing.ownerWorkerId !== input.workerId || existing.fencingToken !== input.fencingToken) {
       throw new MediaSourceError({
         code: 'LEASE_EXPIRED',
         message: `Cannot renew lease: worker "${input.workerId}" does not own ${input.canonicalSourceId}.`,
@@ -267,22 +339,27 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       updatedAtMs: input.nowMs,
     };
     this.records.set(input.canonicalSourceId, updated);
-    return { ...updated, requesters: [...updated.requesters] };
+    return { ...updated };
   }
 
   async releaseLease(input: {
-    canonicalSourceId: CanonicalSourceId;
+    canonicalSourceId: CacheableSourceId;
     workerId: string;
     fencingToken: number;
     nowMs: number;
   }): Promise<boolean> {
     const existing = this.records.get(input.canonicalSourceId);
-    if (!existing || existing.ownerWorkerId !== input.workerId || existing.fencingToken !== input.fencingToken) {
+    if (
+      !existing ||
+      existing.state === 'READY' ||
+      existing.ownerWorkerId !== input.workerId ||
+      existing.fencingToken !== input.fencingToken
+    ) {
       return false;
     }
     const updated: IngestionCoordinationRecord = {
       ...existing,
-      state: existing.state === 'READY' ? 'READY' : 'EXPIRED',
+      state: 'EXPIRED',
       ownerWorkerId: null,
       leaseExpiresAtMs: 0,
       updatedAtMs: input.nowMs,
@@ -304,12 +381,11 @@ export interface RedisLikeClient {
 const REQUEST_INGESTION_LUA = `
 local key = KEYS[1]
 local canonicalId = ARGV[1]
-local requesterId = ARGV[2]
-local workerId = ARGV[3]
-local leaseMs = tonumber(ARGV[4])
-local maxRetries = tonumber(ARGV[5])
-local nowMs = tonumber(ARGV[6])
-local recordTtlMs = tonumber(ARGV[7])
+local workerId = ARGV[2]
+local leaseMs = tonumber(ARGV[3])
+local maxRetries = tonumber(ARGV[4])
+local nowMs = tonumber(ARGV[5])
+local recordTtlMs = tonumber(ARGV[6])
 
 local raw = redis.call('GET', key)
 local rec = nil
@@ -317,26 +393,15 @@ if raw then
   rec = cjson.decode(raw)
 end
 
-local function addRequester(list, id)
-  if not list then list = {} end
-  for _, v in ipairs(list) do
-    if v == id then return list end
-  end
-  if #list < 5000 then
-    table.insert(list, id)
-  end
-  return list
-end
-
-if rec and rec.state == 'READY' then
-  rec.requesters = addRequester(rec.requesters, requesterId)
+if rec and rec.state == 'READY' and rec.artifactRef and rec.artifactRef ~= '' then
+  rec.attachedCount = (rec.attachedCount or 0) + 1
   rec.updatedAtMs = nowMs
   redis.call('SET', key, cjson.encode(rec), 'PX', recordTtlMs)
   return cjson.encode({ action = 'REUSE_READY', deduplicated = true, fencingToken = rec.fencingToken, record = rec })
 end
 
 if rec and (rec.state == 'ACQUIRING' or rec.state == 'INGESTING') and rec.leaseExpiresAtMs > nowMs then
-  rec.requesters = addRequester(rec.requesters, requesterId)
+  rec.attachedCount = (rec.attachedCount or 0) + 1
   rec.updatedAtMs = nowMs
   redis.call('SET', key, cjson.encode(rec), 'PX', recordTtlMs)
   return cjson.encode({ action = 'ATTACH_EXISTING', deduplicated = true, fencingToken = rec.fencingToken, record = rec })
@@ -350,7 +415,7 @@ if rec then
     rec.ownerWorkerId = cjson.null
     rec.leaseExpiresAtMs = 0
     rec.updatedAtMs = nowMs
-    rec.requesters = addRequester(rec.requesters, requesterId)
+    rec.attachedCount = (rec.attachedCount or 0) + 1
     if not rec.lastError then rec.lastError = 'Maximum ingestion retry attempts exceeded.' end
     redis.call('SET', key, cjson.encode(rec), 'PX', recordTtlMs)
     return cjson.encode({ action = 'FAILED_MAX_RETRIES', deduplicated = true, fencingToken = rec.fencingToken, record = rec })
@@ -362,7 +427,7 @@ if rec then
   rec.maxRetries = limit
   rec.leaseExpiresAtMs = nowMs + leaseMs
   rec.updatedAtMs = nowMs
-  rec.requesters = addRequester(rec.requesters, requesterId)
+  rec.attachedCount = (rec.attachedCount or 0) + 1
   redis.call('SET', key, cjson.encode(rec), 'PX', recordTtlMs)
   return cjson.encode({ action = 'ACQUIRED_RECOVERY', deduplicated = false, fencingToken = rec.fencingToken, record = rec })
 end
@@ -376,7 +441,7 @@ local created = {
   maxRetries = maxRetries,
   leaseExpiresAtMs = nowMs + leaseMs,
   updatedAtMs = nowMs,
-  requesters = { requesterId }
+  attachedCount = 1
 }
 redis.call('SET', key, cjson.encode(created), 'PX', recordTtlMs)
 return cjson.encode({ action = 'ACQUIRED_NEW', deduplicated = false, fencingToken = 1, record = created })
@@ -399,6 +464,9 @@ if not raw then
   return cjson.encode({ error = 'COORDINATION_CONFLICT' })
 end
 local rec = cjson.decode(raw)
+if rec.state == 'READY' then
+  return cjson.encode({ error = 'INVALID_STATE_TRANSITION' })
+end
 if rec.ownerWorkerId ~= workerId or rec.fencingToken ~= token then
   return cjson.encode({ error = 'LEASE_EXPIRED' })
 end
@@ -410,11 +478,24 @@ if mode == 'renew' then
   rec.leaseExpiresAtMs = nowMs + leaseMs
   rec.updatedAtMs = nowMs
 elseif mode == 'release' then
-  if rec.state ~= 'READY' then rec.state = 'EXPIRED' end
+  rec.state = 'EXPIRED'
   rec.ownerWorkerId = cjson.null
   rec.leaseExpiresAtMs = 0
   rec.updatedAtMs = nowMs
 else
+  local valid = false
+  if rec.state == 'ACQUIRING' and (nextState == 'INGESTING' or nextState == 'READY' or nextState == 'FAILED') then
+    valid = true
+  elseif rec.state == 'INGESTING' and (nextState == 'READY' or nextState == 'FAILED') then
+    valid = true
+  end
+  if not valid then
+    return cjson.encode({ error = 'INVALID_STATE_TRANSITION' })
+  end
+  if nextState == 'READY' and artifactRef == '' then
+    return cjson.encode({ error = 'INVALID_STATE_TRANSITION' })
+  end
+
   local isTerminal = (nextState == 'READY' or nextState == 'FAILED' or nextState == 'EXPIRED')
   rec.state = nextState
   if isTerminal then
@@ -423,7 +504,7 @@ else
   elseif leaseMs > 0 then
     rec.leaseExpiresAtMs = nowMs + leaseMs
   end
-  if artifactRef ~= '' then rec.artifactRef = artifactRef end
+  if nextState == 'READY' and artifactRef ~= '' then rec.artifactRef = artifactRef end
   if lastError ~= '' then rec.lastError = lastError end
   rec.updatedAtMs = nowMs
 end
@@ -433,8 +514,14 @@ return cjson.encode({ ok = true, record = rec })
 `;
 
 /**
- * Redis-backed atomic coordination store using existing ioredis connection.
- * Uses single-key Lua scripts for atomic lease acquisition, renewal, fencing, and recovery.
+ * Redis-backed atomic coordination store using single-key Lua scripts.
+ *
+ * Durability / TTL caveat:
+ * Redis coordination records expire after `recordTtlMs` (independent of durable
+ * object-storage artifact retention) and may be lost on Redis restart or eviction.
+ * Therefore this primitive provides at-least-once coordination with monotonic fencing
+ * while the Redis key is resident — NOT distributed exactly-once across Redis data loss.
+ * Workers must check durable storage/DB before re-acquiring after a Redis key expiry.
  */
 export class RedisCoordinationStore implements CoordinationStore {
   private readonly keyPrefix: string;
@@ -448,23 +535,29 @@ export class RedisCoordinationStore implements CoordinationStore {
     this.recordTtlMs = opts?.recordTtlMs ?? 24 * 60 * 60 * 1000;
   }
 
-  private key(canonicalSourceId: CanonicalSourceId): string {
+  private key(canonicalSourceId: CacheableSourceId): string {
     return `${this.keyPrefix}${canonicalSourceId}`;
   }
 
-  async get(canonicalSourceId: CanonicalSourceId): Promise<IngestionCoordinationRecord | null> {
+  async get(canonicalSourceId: CacheableSourceId): Promise<IngestionCoordinationRecord | null> {
     const raw = await this.redis.get(this.key(canonicalSourceId));
     if (!raw) return null;
     return JSON.parse(raw) as IngestionCoordinationRecord;
   }
 
-  async requestIngestion(input: Required<RequestIngestionInput>): Promise<RequestIngestionResult> {
+  async requestIngestion(input: {
+    canonicalSourceId: CacheableSourceId;
+    requesterId: string;
+    workerId: string;
+    leaseMs: number;
+    maxRetries: number;
+    nowMs: number;
+  }): Promise<RequestIngestionResult> {
     const raw = (await this.redis.eval(
       REQUEST_INGESTION_LUA,
       1,
       this.key(input.canonicalSourceId),
       input.canonicalSourceId,
-      input.requesterId,
       input.workerId,
       input.leaseMs,
       input.maxRetries,
@@ -475,7 +568,7 @@ export class RedisCoordinationStore implements CoordinationStore {
   }
 
   async transitionState(input: {
-    canonicalSourceId: CanonicalSourceId;
+    canonicalSourceId: CacheableSourceId;
     workerId: string;
     fencingToken: number;
     nextState: SharedIngestionState;
@@ -505,6 +598,12 @@ export class RedisCoordinationStore implements CoordinationStore {
         message: `No active ingestion record for ${input.canonicalSourceId}.`,
       });
     }
+    if (parsed.error === 'INVALID_STATE_TRANSITION') {
+      throw new MediaSourceError({
+        code: 'INVALID_STATE_TRANSITION',
+        message: `Invalid state transition to "${input.nextState}" for ${input.canonicalSourceId}.`,
+      });
+    }
     if (parsed.error === 'LEASE_EXPIRED' || !parsed.record) {
       throw new MediaSourceError({
         code: 'LEASE_EXPIRED',
@@ -515,7 +614,7 @@ export class RedisCoordinationStore implements CoordinationStore {
   }
 
   async renewLease(input: {
-    canonicalSourceId: CanonicalSourceId;
+    canonicalSourceId: CacheableSourceId;
     workerId: string;
     fencingToken: number;
     leaseMs: number;
@@ -546,7 +645,7 @@ export class RedisCoordinationStore implements CoordinationStore {
   }
 
   async releaseLease(input: {
-    canonicalSourceId: CanonicalSourceId;
+    canonicalSourceId: CacheableSourceId;
     workerId: string;
     fencingToken: number;
     nowMs: number;
@@ -572,15 +671,16 @@ export class RedisCoordinationStore implements CoordinationStore {
 
 /**
  * Shared Ingestion Coordinator
- * Guarantees at most one active lease per canonicalSourceId at a time using
- * TTL leases and monotonic fencing tokens (at-least-once with fencing on crash recovery).
+ * Guarantees at most one active lease per immutable canonical source identity
+ * while the coordination record exists, using TTL leases and monotonic fencing tokens.
  */
 export class SharedIngestionCoordinator {
   constructor(private readonly store: CoordinationStore) {}
 
-  requestIngestion(input: RequestIngestionInput): Promise<RequestIngestionResult> {
+  async requestIngestion(input: RequestIngestionInput): Promise<RequestIngestionResult> {
+    const canonicalSourceId = assertCacheableCanonicalId(input.canonicalSourceId);
     return this.store.requestIngestion({
-      canonicalSourceId: input.canonicalSourceId,
+      canonicalSourceId,
       requesterId: input.requesterId,
       workerId: input.workerId,
       leaseMs: input.leaseMs ?? DEFAULT_LEASE_MS,
@@ -589,43 +689,48 @@ export class SharedIngestionCoordinator {
     });
   }
 
-  markIngesting(input: {
+  async markIngesting(input: {
     canonicalSourceId: CanonicalSourceId;
     workerId: string;
     fencingToken: number;
     leaseMs?: number;
     nowMs?: number;
   }): Promise<IngestionCoordinationRecord> {
+    const canonicalSourceId = assertCacheableCanonicalId(input.canonicalSourceId);
     return this.store.transitionState({
       ...input,
+      canonicalSourceId,
       nextState: 'INGESTING',
       nowMs: input.nowMs ?? Date.now(),
     });
   }
 
-  markReady(input: {
+  async markReady(input: {
     canonicalSourceId: CanonicalSourceId;
     workerId: string;
     fencingToken: number;
     artifactRef: string;
     nowMs?: number;
   }): Promise<IngestionCoordinationRecord> {
+    const canonicalSourceId = assertCacheableCanonicalId(input.canonicalSourceId);
     return this.store.transitionState({
       ...input,
+      canonicalSourceId,
       nextState: 'READY',
       nowMs: input.nowMs ?? Date.now(),
     });
   }
 
-  markFailed(input: {
+  async markFailed(input: {
     canonicalSourceId: CanonicalSourceId;
     workerId: string;
     fencingToken: number;
     error: string;
     nowMs?: number;
   }): Promise<IngestionCoordinationRecord> {
+    const canonicalSourceId = assertCacheableCanonicalId(input.canonicalSourceId);
     return this.store.transitionState({
-      canonicalSourceId: input.canonicalSourceId,
+      canonicalSourceId,
       workerId: input.workerId,
       fencingToken: input.fencingToken,
       nextState: 'FAILED',
@@ -634,15 +739,16 @@ export class SharedIngestionCoordinator {
     });
   }
 
-  renewLease(input: {
+  async renewLease(input: {
     canonicalSourceId: CanonicalSourceId;
     workerId: string;
     fencingToken: number;
     leaseMs?: number;
     nowMs?: number;
   }): Promise<IngestionCoordinationRecord> {
+    const canonicalSourceId = assertCacheableCanonicalId(input.canonicalSourceId);
     return this.store.renewLease({
-      canonicalSourceId: input.canonicalSourceId,
+      canonicalSourceId,
       workerId: input.workerId,
       fencingToken: input.fencingToken,
       leaseMs: input.leaseMs ?? DEFAULT_LEASE_MS,
@@ -650,21 +756,23 @@ export class SharedIngestionCoordinator {
     });
   }
 
-  releaseLease(input: {
+  async releaseLease(input: {
     canonicalSourceId: CanonicalSourceId;
     workerId: string;
     fencingToken: number;
     nowMs?: number;
   }): Promise<boolean> {
+    const canonicalSourceId = assertCacheableCanonicalId(input.canonicalSourceId);
     return this.store.releaseLease({
-      canonicalSourceId: input.canonicalSourceId,
+      canonicalSourceId,
       workerId: input.workerId,
       fencingToken: input.fencingToken,
       nowMs: input.nowMs ?? Date.now(),
     });
   }
 
-  getState(canonicalSourceId: CanonicalSourceId): Promise<IngestionCoordinationRecord | null> {
-    return this.store.get(canonicalSourceId);
+  async getState(canonicalSourceId: CanonicalSourceId): Promise<IngestionCoordinationRecord | null> {
+    const validId = assertCacheableCanonicalId(canonicalSourceId);
+    return this.store.get(validId);
   }
 }

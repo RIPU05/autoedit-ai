@@ -5,6 +5,9 @@ import {
   ApiErrorResponseSchema,
   MediaSourceSchema,
   CanonicalSourceIdSchema,
+  ChannelIdentitySchema,
+  BroadcastIdentitySchema,
+  CacheableSourceIdSchema,
   UniversalMediaSourceSchema,
   SharedCacheKeyInputSchema,
   RollingBufferConfigSchema,
@@ -744,17 +747,26 @@ describe('AutoAI Edit Shared Contracts Suite', () => {
     });
   });
 
-  // 15. Step 3B.4: Universal Media Source, Shared Cache & Rolling Buffer Contracts
-  describe('15. Universal Media Source & Shared Ingestion Contracts (Step 3B.4)', () => {
-    it('validates CanonicalSourceId and UniversalMediaSource schemas', () => {
-      expect(safeValidateContract(CanonicalSourceIdSchema, 'youtube:live:dQw4w9WgXcQ').success).toBe(true);
-      expect(safeValidateContract(CanonicalSourceIdSchema, 'twitch:vod:2284910293').success).toBe(true);
-      expect(safeValidateContract(CanonicalSourceIdSchema, 'kick:live:xqc').success).toBe(true);
-      expect(safeValidateContract(CanonicalSourceIdSchema, 'upload:uploaded:asset_123').success).toBe(true);
+  // 15. Step 3B.4 & 3B.4.1: Universal Media Source, Channel vs Broadcast, Shared Cache & Rolling Buffer Contracts
+  describe('15. Universal Media Source & Shared Ingestion Contracts (Step 3B.4 / 3B.4.1)', () => {
+    it('separates ChannelIdentity from immutable BroadcastIdentity and CacheableSourceId', () => {
+      expect(safeValidateContract(ChannelIdentitySchema, 'twitch:channel:shroud').success).toBe(true);
+      expect(safeValidateContract(ChannelIdentitySchema, 'kick:channel:xqc').success).toBe(true);
+      expect(safeValidateContract(BroadcastIdentitySchema, 'youtube:broadcast:dQw4w9WgXcQ').success).toBe(true);
+      expect(safeValidateContract(BroadcastIdentitySchema, 'twitch:broadcast:shroud:41928374650').success).toBe(true);
+
+      // Channel-only identity is valid as CanonicalSourceId (discovery) but FORBIDDEN as CacheableSourceId
+      expect(safeValidateContract(CanonicalSourceIdSchema, 'twitch:channel:shroud').success).toBe(true);
+      expect(safeValidateContract(CacheableSourceIdSchema, 'twitch:channel:shroud').success).toBe(false);
+      expect(safeValidateContract(CacheableSourceIdSchema, 'kick:channel:xqc').success).toBe(false);
+      expect(safeValidateContract(CacheableSourceIdSchema, 'twitch:broadcast:shroud:41928374650').success).toBe(true);
+      expect(safeValidateContract(CacheableSourceIdSchema, 'twitch:vod:2284910293').success).toBe(true);
+      expect(safeValidateContract(CacheableSourceIdSchema, 'upload:uploaded:asset_123').success).toBe(true);
       expect(safeValidateContract(CanonicalSourceIdSchema, 'unknown:vod:123').success).toBe(false);
 
       const src = {
         canonicalId: 'youtube:vod:dQw4w9WgXcQ',
+        identityScope: 'IMMUTABLE_VOD',
         provider: 'youtube',
         sourceType: 'vod',
         externalId: 'dQw4w9WgXcQ',
@@ -767,7 +779,16 @@ describe('AutoAI Edit Shared Contracts Suite', () => {
       expect(safeValidateContract(UniversalMediaSourceSchema, src).success).toBe(true);
     });
 
-    it('enforces ownerUserId requirement on PRIVATE_USER cache keys', () => {
+    it('enforces ownerUserId on PRIVATE_USER and rejects channel-only IDs in SharedCacheKeyInput', () => {
+      const channelCacheAttempt = {
+        artifactKind: 'SOURCE_MEDIA',
+        canonicalSourceId: 'twitch:channel:shroud',
+        sourceRevision: 'v1',
+        algorithmVersion: 'v1',
+        rightsScope: 'SHARED_PERMITTED',
+      };
+      expect(safeValidateContract(SharedCacheKeyInputSchema, channelCacheAttempt).success).toBe(false);
+
       const missingOwner = {
         artifactKind: 'BASE_CLIP',
         canonicalSourceId: 'upload:uploaded:asset_1',
@@ -789,7 +810,7 @@ describe('AutoAI Edit Shared Contracts Suite', () => {
 
       const candidate = {
         candidateId: 'hl_1',
-        canonicalSourceId: 'twitch:live:shroud',
+        canonicalSourceId: 'twitch:broadcast:shroud:41928374650',
         eventTimestampSec: 120,
         windowStartSec: 75,
         windowEndSec: 135,

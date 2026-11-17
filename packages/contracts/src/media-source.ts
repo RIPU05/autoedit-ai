@@ -16,15 +16,29 @@ export const MediaSourceProviderSchema = z.enum([
 export type MediaSourceProvider = z.infer<typeof MediaSourceProviderSchema>;
 
 /**
- * Source Media Kind: live broadcast, recorded VOD, or direct upload
+ * Source Media Kind: live broadcast/channel, recorded VOD, or direct upload
  */
 export const MediaSourceTypeSchema = z.enum(['live', 'vod', 'uploaded']);
 
 export type MediaSourceType = z.infer<typeof MediaSourceTypeSchema>;
 
 /**
+ * Distinguishes mutable live-channel discovery inputs from immutable media identities.
+ * Only IMMUTABLE_* identities may coordinate ingestion or key immutable media caches.
+ */
+export const IdentityScopeSchema = z.enum([
+  'CHANNEL_DISCOVERY',
+  'IMMUTABLE_BROADCAST',
+  'IMMUTABLE_VOD',
+  'IMMUTABLE_UPLOAD',
+]);
+
+export type IdentityScope = z.infer<typeof IdentityScopeSchema>;
+
+/**
  * Approved acquisition capabilities.
- * External platforms default to UNSUPPORTED unless a permitted adapter is explicitly authorized.
+ * External platforms and direct-media hosts default to UNSUPPORTED unless
+ * a permitted acquisition method is explicitly authorized.
  */
 export const AcquisitionCapabilitySchema = z.enum([
   'DIRECT_UPLOAD',
@@ -88,33 +102,75 @@ export const MediaSourceErrorCodeSchema = z.enum([
   'SSRF_BLOCKED',
   'PRIVATE_NETWORK_BLOCKED',
   'UNSUPPORTED_ACQUISITION',
+  'BROADCAST_UNRESOLVED',
   'ACCESS_DENIED',
   'RIGHTS_UNVERIFIED',
   'DRM_RESTRICTED',
   'SOURCE_UNAVAILABLE',
   'COORDINATION_CONFLICT',
+  'INVALID_STATE_TRANSITION',
   'LEASE_EXPIRED',
 ]);
 
 export type MediaSourceErrorCode = z.infer<typeof MediaSourceErrorCodeSchema>;
 
 /**
- * Canonical Source Identity Format:
- *   <provider>:<sourceType>:<externalId>
- * Examples:
- *   youtube:live:dQw4w9WgXcQ
- *   youtube:vod:dQw4w9WgXcQ
- *   twitch:live:shroud
- *   twitch:vod:2284910293
- *   kick:live:xqc
- *   kick:vod:9f8a7b6c-1234
- *   upload:uploaded:asset_clx12345
+ * Channel Identity (Discovery input only — NOT an immutable broadcast session):
+ *   twitch:channel:shroud
+ *   kick:channel:xqc
+ */
+export const ChannelIdentitySchema = z
+  .string()
+  .regex(
+    /^(youtube|twitch|kick):channel:[a-zA-Z0-9._-]+$/,
+    'Channel identity must follow <provider>:channel:<channelKey>',
+  );
+
+export type ChannelIdentity = z.infer<typeof ChannelIdentitySchema>;
+
+/**
+ * Immutable Broadcast Session Identity:
+ *   youtube:broadcast:dQw4w9WgXcQ
+ *   twitch:broadcast:shroud:41928374650
+ *   kick:broadcast:xqc:ls_998877
+ */
+export const BroadcastIdentitySchema = z
+  .string()
+  .regex(
+    /^(youtube|twitch|kick):broadcast:[a-zA-Z0-9._:-]+$/,
+    'Broadcast identity must follow <provider>:broadcast:<verifiedSessionId>',
+  );
+
+export type BroadcastIdentity = z.infer<typeof BroadcastIdentitySchema>;
+
+/**
+ * Cacheable / Immutable Source Identity (strictly excludes channel-only discovery IDs):
+ *   youtube:broadcast:<id>
+ *   youtube:vod:<id>
+ *   twitch:broadcast:<channel>:<sessionId>
+ *   twitch:vod:<id>
+ *   kick:broadcast:<channel>:<sessionId>
+ *   kick:vod:<id>
+ *   upload:uploaded:<assetId>
+ *   direct_media:vod:<hash>
+ */
+export const CacheableSourceIdSchema = z
+  .string()
+  .regex(
+    /^(upload:uploaded|youtube:(vod|broadcast)|twitch:(vod|broadcast)|kick:(vod|broadcast)|direct_media:vod):[a-zA-Z0-9._:-]+$/,
+    'Cacheable source ID must be an immutable broadcast, VOD, or upload identity (channel-only IDs are forbidden)',
+  );
+
+export type CacheableSourceId = z.infer<typeof CacheableSourceIdSchema>;
+
+/**
+ * Canonical Source Identity (includes both immutable source IDs and channel discovery IDs)
  */
 export const CanonicalSourceIdSchema = z
   .string()
   .regex(
-    /^(upload|youtube|twitch|kick|direct_media):(live|vod|uploaded):[a-zA-Z0-9._:-]+$/,
-    'Canonical source ID must follow <provider>:<sourceType>:<externalId>',
+    /^(upload:uploaded|youtube:(vod|broadcast|channel)|twitch:(vod|broadcast|channel)|kick:(vod|broadcast|channel)|direct_media:vod):[a-zA-Z0-9._:-]+$/,
+    'Canonical source ID must follow <provider>:<kind>:<id>',
   );
 
 export type CanonicalSourceId = z.infer<typeof CanonicalSourceIdSchema>;
@@ -141,9 +197,12 @@ export type MediaSourceErrorPayload = z.infer<typeof MediaSourceErrorPayloadSche
  */
 export const UniversalMediaSourceSchema = z.object({
   canonicalId: CanonicalSourceIdSchema,
+  identityScope: IdentityScopeSchema,
   provider: MediaSourceProviderSchema,
   sourceType: MediaSourceTypeSchema,
   externalId: z.string().min(1),
+  channelId: ChannelIdentitySchema.optional(),
+  broadcastId: z.string().min(1).optional(),
   normalizedUrl: z.string().url().optional(),
   availability: SourceAvailabilitySchema.default('UNKNOWN'),
   acquisitionCapability: AcquisitionCapabilitySchema,
@@ -203,7 +262,7 @@ export type CacheRenderSettings = z.infer<typeof CacheRenderSettingsSchema>;
 export const SharedCacheKeyInputSchema = z
   .object({
     artifactKind: CacheArtifactKindSchema,
-    canonicalSourceId: CanonicalSourceIdSchema,
+    canonicalSourceId: CacheableSourceIdSchema,
     sourceRevision: z.string().min(1).default('v1'),
     timeRangeSec: CacheTimeRangeSecSchema.optional(),
     algorithmVersion: z.string().min(1).default('v1'),
@@ -225,7 +284,7 @@ export const SharedCacheIdentitySchema = z.object({
   cacheKey: z.string().min(1),
   storageKey: z.string().min(1),
   artifactKind: CacheArtifactKindSchema,
-  canonicalSourceId: CanonicalSourceIdSchema,
+  canonicalSourceId: CacheableSourceIdSchema,
   rightsScope: CacheRightsScopeSchema,
   ownerUserId: z.string().optional(),
 });
@@ -268,7 +327,7 @@ export type HighlightDetectionSample = z.infer<typeof HighlightDetectionSampleSc
 
 export const HighlightWindowCandidateSchema = z.object({
   candidateId: z.string().min(1),
-  canonicalSourceId: CanonicalSourceIdSchema,
+  canonicalSourceId: CacheableSourceIdSchema,
   eventTimestampSec: z.number().finite().nonnegative(),
   windowStartSec: z.number().finite().nonnegative(),
   windowEndSec: z.number().finite().positive(),

@@ -1,8 +1,9 @@
 import {
+  CacheableSourceIdSchema,
   HighlightDetectionSampleSchema,
   HighlightWindowCandidateSchema,
   RollingBufferConfigSchema,
-  type CanonicalSourceId,
+  type CacheableSourceId,
   type CpuSignalKind,
   type HighlightDetectionSample,
   type HighlightWindowCandidate,
@@ -72,7 +73,7 @@ const DEFAULT_SIGNAL_WEIGHTS: Record<CpuSignalKind, number> = {
 };
 
 export interface CpuDetectorOptions {
-  canonicalSourceId: CanonicalSourceId;
+  canonicalSourceId: CacheableSourceId;
   bufferConfig?: Partial<RollingBufferConfig>;
   /** Minimum composite score (0..100) to emit a candidate; defaults to 65. */
   scoreThreshold?: number;
@@ -93,13 +94,13 @@ export class CpuFirstHeuristicDetector implements LiveHighlightDetector {
   readonly algorithmVersion = 'v1.0-heuristic' as const;
   private readonly buffer: RollingMediaBufferTracker;
   private readonly samples: HighlightDetectionSample[] = [];
-  private readonly canonicalSourceId: CanonicalSourceId;
+  private readonly canonicalSourceId: CacheableSourceId;
   private readonly scoreThreshold: number;
   private readonly cooldownSec: number;
   private readonly aggregationWindowSec: number;
 
   constructor(opts: CpuDetectorOptions) {
-    this.canonicalSourceId = opts.canonicalSourceId;
+    this.canonicalSourceId = CacheableSourceIdSchema.parse(opts.canonicalSourceId);
     this.buffer = new RollingMediaBufferTracker(opts.bufferConfig);
     this.scoreThreshold = opts.scoreThreshold ?? 65;
     this.cooldownSec = opts.cooldownSec ?? 20;
