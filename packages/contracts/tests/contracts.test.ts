@@ -4,6 +4,14 @@ import {
   SchemaVersionSchema,
   ApiErrorResponseSchema,
   MediaSourceSchema,
+  CanonicalSourceIdSchema,
+  ChannelIdentitySchema,
+  BroadcastIdentitySchema,
+  CacheableSourceIdSchema,
+  UniversalMediaSourceSchema,
+  SharedCacheKeyInputSchema,
+  RollingBufferConfigSchema,
+  HighlightWindowCandidateSchema,
   MediaSegmentSchema,
   MediaDiscontinuitySchema,
   MediaTimeRangeSchema,
@@ -736,6 +744,81 @@ describe('AutoAI Edit Shared Contracts Suite', () => {
         to: { id: 'v2', name: 'Edited', durationSec: 45 },
       };
       expect(safeValidateContract(VersionDiffSchema, versionDiff).success).toBe(true);
+    });
+  });
+
+  // 15. Step 3B.4 & 3B.4.1: Universal Media Source, Channel vs Broadcast, Shared Cache & Rolling Buffer Contracts
+  describe('15. Universal Media Source & Shared Ingestion Contracts (Step 3B.4 / 3B.4.1)', () => {
+    it('separates ChannelIdentity from immutable BroadcastIdentity and CacheableSourceId', () => {
+      expect(safeValidateContract(ChannelIdentitySchema, 'twitch:channel:shroud').success).toBe(true);
+      expect(safeValidateContract(ChannelIdentitySchema, 'kick:channel:xqc').success).toBe(true);
+      expect(safeValidateContract(BroadcastIdentitySchema, 'youtube:broadcast:dQw4w9WgXcQ').success).toBe(true);
+      expect(safeValidateContract(BroadcastIdentitySchema, 'twitch:broadcast:shroud:41928374650').success).toBe(true);
+
+      // Channel-only identity is valid as CanonicalSourceId (discovery) but FORBIDDEN as CacheableSourceId
+      expect(safeValidateContract(CanonicalSourceIdSchema, 'twitch:channel:shroud').success).toBe(true);
+      expect(safeValidateContract(CacheableSourceIdSchema, 'twitch:channel:shroud').success).toBe(false);
+      expect(safeValidateContract(CacheableSourceIdSchema, 'kick:channel:xqc').success).toBe(false);
+      expect(safeValidateContract(CacheableSourceIdSchema, 'twitch:broadcast:shroud:41928374650').success).toBe(true);
+      expect(safeValidateContract(CacheableSourceIdSchema, 'twitch:vod:2284910293').success).toBe(true);
+      expect(safeValidateContract(CacheableSourceIdSchema, 'upload:uploaded:asset_123').success).toBe(true);
+      expect(safeValidateContract(CanonicalSourceIdSchema, 'unknown:vod:123').success).toBe(false);
+
+      const src = {
+        canonicalId: 'youtube:vod:dQw4w9WgXcQ',
+        identityScope: 'IMMUTABLE_VOD',
+        provider: 'youtube',
+        sourceType: 'vod',
+        externalId: 'dQw4w9WgXcQ',
+        normalizedUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        availability: 'UNKNOWN',
+        acquisitionCapability: 'UNSUPPORTED',
+        rightsStatus: 'UNKNOWN',
+        ingestionStatus: 'PENDING',
+      };
+      expect(safeValidateContract(UniversalMediaSourceSchema, src).success).toBe(true);
+    });
+
+    it('enforces ownerUserId on PRIVATE_USER and rejects channel-only IDs in SharedCacheKeyInput', () => {
+      const channelCacheAttempt = {
+        artifactKind: 'SOURCE_MEDIA',
+        canonicalSourceId: 'twitch:channel:shroud',
+        sourceRevision: 'v1',
+        algorithmVersion: 'v1',
+        rightsScope: 'SHARED_PERMITTED',
+      };
+      expect(safeValidateContract(SharedCacheKeyInputSchema, channelCacheAttempt).success).toBe(false);
+
+      const missingOwner = {
+        artifactKind: 'BASE_CLIP',
+        canonicalSourceId: 'upload:uploaded:asset_1',
+        sourceRevision: 'v1',
+        algorithmVersion: 'v1',
+        rightsScope: 'PRIVATE_USER',
+      };
+      expect(safeValidateContract(SharedCacheKeyInputSchema, missingOwner).success).toBe(false);
+
+      const validPrivate = { ...missingOwner, ownerUserId: 'usr_123' };
+      expect(safeValidateContract(SharedCacheKeyInputSchema, validPrivate).success).toBe(true);
+    });
+
+    it('validates configurable RollingBufferConfig and HighlightWindowCandidate', () => {
+      const defaults = validateContract(RollingBufferConfigSchema, {});
+      expect(defaults.preEventSec).toBe(45);
+      expect(defaults.postEventSec).toBe(15);
+      expect(defaults.segmentDurationSec).toBe(6);
+
+      const candidate = {
+        candidateId: 'hl_1',
+        canonicalSourceId: 'twitch:broadcast:shroud:41928374650',
+        eventTimestampSec: 120,
+        windowStartSec: 75,
+        windowEndSec: 135,
+        compositeScore: 88.5,
+        contributingSignals: ['AUDIO_ENERGY', 'CHAT_VELOCITY'],
+        pinnedSegmentIndices: [12, 13, 14],
+      };
+      expect(safeValidateContract(HighlightWindowCandidateSchema, candidate).success).toBe(true);
     });
   });
 });
