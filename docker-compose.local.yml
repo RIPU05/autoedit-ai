@@ -1,0 +1,120 @@
+# ==============================================================================
+# AutoAI Edit — Isolated Local Development Infrastructure (Step 2A)
+#
+# Provides isolated, non-production local instances of:
+#   - PostgreSQL (5432)
+#   - Redis (6379)
+#   - MinIO Object Storage (API: 9002, Console: 9003)
+#   - MinIO Bucket Auto-Initializer (autoedit-local)
+#   - Faster-Whisper Transcription Service (9000)
+#
+# Usage:
+#   docker compose -f docker-compose.local.yml up -d
+#   docker compose -f docker-compose.local.yml ps
+#   docker compose -f docker-compose.local.yml down
+# ==============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: autoedit-local-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: autoedit
+      POSTGRES_PASSWORD: autoedit_dev_password
+      POSTGRES_DB: autoedit_local
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_local_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U autoedit -d autoedit_local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    container_name: autoedit-local-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_local_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    container_name: autoedit-local-minio
+    restart: unless-stopped
+    command: server /data --address ":9002" --console-address ":9003"
+    environment:
+      MINIO_ROOT_USER: minio_local_admin
+      MINIO_ROOT_PASSWORD: minio_local_secret_key
+    ports:
+      - "127.0.0.1:9002:9002"
+      - "127.0.0.1:9003:9003"
+    volumes:
+      - minio_local_data:/data
+    healthcheck:
+      test: ["CMD", "/usr/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9002 && printf 'GET /minio/health/live HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n' >&3 && read -r line <&3 && case \"$$line\" in *200*) exit 0;; *) exit 1;; esac"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  minio-init:
+    image: cgr.dev/chainguard/minio:latest
+    container_name: autoedit-local-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/usr/bin/bash", "-c"]
+    command:
+      - |
+        echo "Waiting for MinIO server to accept aliases..."
+        mc alias set local http://minio:9002 minio_local_admin minio_local_secret_key
+        echo "Creating local test bucket: autoedit-local"
+        mc mb local/autoedit-local --ignore-existing
+        echo "MinIO local bucket autoedit-local is ready."
+    restart: "no"
+
+  whisper:
+    build:
+      context: ./services/whisper
+      dockerfile: Dockerfile
+    image: autoedit-whisper:local
+    container_name: autoedit-local-whisper
+    restart: unless-stopped
+    environment:
+      WHISPER_MODEL: base
+      WHISPER_DEVICE: cpu
+      WHISPER_COMPUTE_TYPE: int8
+      ENABLE_DIARIZATION: "false"
+      HUGGINGFACE_TOKEN: ""
+    ports:
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - whisper_cache_data:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  postgres_local_data:
+    name: autoedit_postgres_local_data
+  redis_local_data:
+    name: autoedit_redis_local_data
+  minio_local_data:
+    name: autoedit_minio_local_data
+  whisper_cache_data:
+    name: autoedit_whisper_cache_data
