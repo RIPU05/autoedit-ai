@@ -38,7 +38,7 @@ const schema = z.object({
   AWS_ACCESS_KEY_ID: z.string(),
   AWS_SECRET_ACCESS_KEY: z.string(),
   S3_BUCKET: z.string(),
-  S3_PRESIGN_TTL: z.coerce.number().default(3600),
+  S3_PRESIGN_TTL: z.coerce.number().int().min(60).max(604800).default(3600),
   S3_ENDPOINT: z
     .string()
     .optional()

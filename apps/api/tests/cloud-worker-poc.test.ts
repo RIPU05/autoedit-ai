@@ -1,8 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { db, prismaMock, resetDb } from './test-state.js';
+import { db, prismaMock, resetDb, storageMock } from './test-state.js';
 import { env } from '../src/config/env.js';
+
+vi.mock('../src/storage/index.js', () => ({
+  getStorageProvider: vi.fn(() => storageMock),
+  createStorageProvider: vi.fn(() => storageMock),
+  resolveStorageConfig: vi.fn(),
+  setStorageProvider: vi.fn(),
+}));
 import type { TranscriptionResult } from '../src/services/transcribe.service.js';
 
 const processors = new Map<string, (job: any) => Promise<unknown>>();

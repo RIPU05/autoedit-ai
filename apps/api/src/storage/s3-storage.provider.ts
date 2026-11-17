@@ -47,6 +47,9 @@ import type {
 export class S3StorageProvider implements MediaStorageProvider {
   readonly providerType: StorageProviderType;
   readonly defaultBucket: string;
+  get bucket(): string {
+    return this.defaultBucket;
+  }
   private readonly client: S3Client;
   private readonly defaultPresignTtl: number;
 
@@ -244,11 +247,13 @@ export class S3StorageProvider implements MediaStorageProvider {
         ms: Date.now() - t0,
       };
     } catch (err: any) {
+      const errMsg = err?.message || String(err);
       return {
         ok: false,
         provider: this.providerType,
         bucket,
-        error: err?.message || String(err),
+        error: errMsg,
+        detail: errMsg,
         ms: Date.now() - t0,
       };
     }

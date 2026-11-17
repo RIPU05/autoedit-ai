@@ -4,7 +4,7 @@ import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { bullConnection as connection } from '../../lib/redis.js';
 import { prisma } from '../../lib/prisma.js';
-import { presignDownload, putObject } from '../../lib/s3.js';
+import { getStorageProvider } from '../../storage/index.js';
 import { renderEdit, buildKeepSegments, type EditPlan } from '../../ffmpeg/pipeline.js';
 import { enqueueN8n, moveToDeadLetter } from '../queues.js';
 import { env } from '../../config/env.js';
@@ -73,7 +73,9 @@ export const renderWorker = new Worker<RenderJobData>(
 
     // 1. pull source
     const localVideo = path.join(workDir, 'source.mp4');
-    await download(await presignDownload(project.sourceAsset.s3Key), localVideo);
+    const storage = getStorageProvider();
+    const sourceUrl = await storage.createDownloadUrl({ key: project.sourceAsset.s3Key });
+    await download(sourceUrl, localVideo);
 
     // 2. build edit plan from the user-approved timeline (source of truth),
     //    falling back to auto-derivation from analysis only when empty.
@@ -125,10 +127,10 @@ export const renderWorker = new Worker<RenderJobData>(
       ),
     );
 
-    // 4. upload result to S3
+    // 4. upload result to storage
     const outKey = `renders/${projectId}/${renderId}-${format}.mp4`;
-    await putObject(outKey, createReadStream(outPath), 'video/mp4');
-    const outputUrl = await presignDownload(outKey);
+    await storage.putObject({ key: outKey, body: createReadStream(outPath), contentType: 'video/mp4' });
+    const outputUrl = await storage.createDownloadUrl({ key: outKey });
     const finishedAt = new Date();
     const renderUrlExpiresAt = new Date(finishedAt.getTime() + env.S3_PRESIGN_TTL * 1000).toISOString();
 

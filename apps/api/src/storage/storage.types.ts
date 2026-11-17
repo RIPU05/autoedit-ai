@@ -135,12 +135,14 @@ export interface StorageHealthCheckResult {
   bucket: string;
   endpoint?: string;
   error?: string;
+  detail?: string;
   ms: number;
 }
 
 export interface MediaStorageProvider {
   readonly providerType: StorageProviderType;
   readonly defaultBucket: string;
+  readonly bucket: string;
 
   putObject(input: PutObjectInput): Promise<PutObjectOutput>;
   getObject(input: GetObjectInput): Promise<GetObjectOutput>;
