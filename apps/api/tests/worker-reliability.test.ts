@@ -1,8 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { db, prismaMock, queueAdds, resetDb, resetQueues } from './test-state.js';
+import { db, prismaMock, queueAdds, resetDb, resetQueues, storageMock } from './test-state.js';
 import { env } from '../src/config/env.js';
+
+vi.mock('../src/storage/index.js', () => ({
+  getStorageProvider: vi.fn(() => storageMock),
+  createStorageProvider: vi.fn(() => storageMock),
+  resolveStorageConfig: vi.fn(),
+  setStorageProvider: vi.fn(),
+}));
 
 const processors = new Map<string, (job: any) => Promise<unknown>>();
 const failedHandlers = new Map<string, (job: any, err: Error) => Promise<void>>();

@@ -1,8 +1,7 @@
 import { Router } from 'express';
 import { prisma } from '../lib/prisma.js';
 import { connection } from '../lib/redis.js';
-import { s3 } from '../lib/s3.js';
-import { HeadBucketCommand } from '@aws-sdk/client-s3';
+import { getStorageProvider } from '../storage/index.js';
 import { analysisQueue, renderQueue, n8nQueue } from '../queue/queues.js';
 import { env } from '../config/env.js';
 
@@ -22,7 +21,14 @@ async function timed(fn: () => Promise<unknown>): Promise<Check> {
 
 const checkRedis = () => timed(() => connection.ping());
 const checkDb = () => timed(() => prisma.$queryRaw`SELECT 1`);
-const checkS3 = () => timed(() => s3.send(new HeadBucketCommand({ Bucket: env.S3_BUCKET })));
+const checkS3 = async (): Promise<Check> => {
+  try {
+    const res = await getStorageProvider().checkHealth();
+    return { ok: res.ok, ms: res.ms, detail: res.detail };
+  } catch (err) {
+    return { ok: false, ms: 0, detail: err instanceof Error ? err.message : String(err) };
+  }
+};
 const checkClaude = () =>
   timed(async () => {
     const res = await fetch('https://api.anthropic.com/v1/models', {

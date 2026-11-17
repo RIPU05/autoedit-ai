@@ -125,3 +125,61 @@ export const queueAdds = {
 export function resetQueues() {
   for (const value of Object.values(queueAdds)) value.splice(0, value.length);
 }
+
+export function createMockStorageProvider() {
+  return {
+    providerType: 's3' as const,
+    bucket: 'autoedit-test-bucket',
+    putObject: vi.fn(async (input: any) => ({
+      key: input.key,
+      bucket: input.bucket || 'autoedit-test-bucket',
+      etag: '"mock-etag"',
+    })),
+    getObject: vi.fn(async (_input: any) => ({
+      body: Buffer.from('mock-bytes'),
+      contentType: 'video/mp4',
+    })),
+    getObjectMetadata: vi.fn(async (_input: any) => ({
+      contentLength: 1024,
+      contentType: 'video/mp4',
+      etag: '"mock-etag"',
+      lastModified: new Date(),
+    })),
+    deleteObject: vi.fn(async (input: any) => ({
+      success: true,
+      key: input.key,
+      bucket: input.bucket || 'autoedit-test-bucket',
+    })),
+    startMultipartUpload: vi.fn(async (input: any) => ({
+      uploadId: `upload-${input.key}`,
+      key: input.key,
+      bucket: input.bucket || 'autoedit-test-bucket',
+    })),
+    presignUploadPart: vi.fn(async (input: any) => `https://s3.test/upload-part?part=${input?.partNumber ?? 1}`),
+    completeMultipartUpload: vi.fn(async (input: any) => ({
+      key: input.key,
+      bucket: input.bucket || 'autoedit-test-bucket',
+      etag: '"mock-etag"',
+    })),
+    abortMultipartUpload: vi.fn(async (input: any) => ({
+      success: true,
+      key: input.key,
+      uploadId: input.uploadId,
+    })),
+    createDownloadUrl: vi.fn(async (input: any) => {
+      const key = input?.key ?? '';
+      if (key.startsWith('renders/')) {
+        return `https://s3.test/${key}`;
+      }
+      return `https://s3.test/download/${key}`;
+    }),
+    checkHealth: vi.fn(async () => ({
+      ok: true,
+      provider: 's3' as const,
+      bucket: 'autoedit-test-bucket',
+      ms: 1,
+    })),
+  };
+}
+
+export const storageMock = createMockStorageProvider();

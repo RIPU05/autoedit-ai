@@ -1,9 +1,15 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { db, prismaMock, queueAdds, resetDb, resetQueues } from './test-state.js';
+import { db, prismaMock, queueAdds, resetDb, resetQueues, storageMock } from './test-state.js';
 import { resetUploadSessionsForTesting } from '../src/services/upload-session.service.js';
 
+vi.mock('../src/storage/index.js', () => ({
+  getStorageProvider: vi.fn(() => storageMock),
+  createStorageProvider: vi.fn(() => storageMock),
+  resolveStorageConfig: vi.fn(),
+  setStorageProvider: vi.fn(),
+}));
 vi.mock('../src/lib/prisma.js', () => ({ prisma: prismaMock }));
 vi.mock('../src/lib/redis.js', () => ({
   connection: { ping: vi.fn(async () => 'PONG') },

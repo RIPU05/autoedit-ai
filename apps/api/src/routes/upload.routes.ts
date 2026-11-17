@@ -2,11 +2,10 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../lib/prisma.js';
-import { startMultipart, presignUploadPart, completeMultipart, abortMultipart } from '../lib/s3.js';
+import { getStorageProvider } from '../storage/index.js';
 import { requireAuth, asyncHandler, HttpError } from '../middleware/auth.js';
 import { probe } from '../ffmpeg/probe.js';
 import { enqueueAnalysis } from '../queue/queues.js';
-import { presignDownload } from '../lib/s3.js';
 import { env } from '../config/env.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -20,7 +19,20 @@ import {
 export const uploadRouter = Router();
 uploadRouter.use(requireAuth);
 
-function verifyKeyOwnership(key: string, userId: string) {
+export function verifyKeyOwnership(key: string, userId: string): void {
+  if (typeof key !== 'string' || !key.trim()) {
+    throw new HttpError(400, 'invalid s3 key');
+  }
+  // Prevent directory traversal, path escaping, absolute paths, or double slashes
+  if (
+    key.includes('..') ||
+    key.includes('\\') ||
+    key.startsWith('/') ||
+    key.includes('//') ||
+    key.includes('\0')
+  ) {
+    throw new HttpError(403, 'forbidden: invalid or escaping s3 key sequence');
+  }
   if (!key.startsWith('sources/')) {
     throw new HttpError(403, 'forbidden: s3 key must be within sources/ prefix');
   }
@@ -42,7 +54,9 @@ uploadRouter.post(
     const safeFilename = path.basename(filename).replace(/[^a-zA-Z0-9._-]/g, '_');
     const uploadSessionId = randomUUID();
     const key = `sources/${req.user!.sub}/${uploadSessionId}/${safeFilename}`;
-    const { uploadId, bucket } = await startMultipart(key, contentType);
+    const storage = getStorageProvider();
+    const { uploadId } = await storage.startMultipartUpload({ key, contentType });
+    const bucket = storage.bucket;
 
     const project = await prisma.project.create({
       data: { userId: req.user!.sub, title: title ?? filename, status: 'UPLOADING' },
@@ -93,7 +107,8 @@ uploadRouter.post(
       }
     }
 
-    const url = await presignUploadPart(key, uploadId, partNumber);
+    const storage = getStorageProvider();
+    const url = await storage.presignUploadPart({ key, uploadId, partNumber });
     res.json({ url });
   }),
 );
@@ -150,7 +165,8 @@ uploadRouter.post(
       throw new HttpError(400, 's3 key does not match upload session');
     }
 
-    await completeMultipart(key, uploadId, parts);
+    const storage = getStorageProvider();
+    await storage.completeMultipartUpload({ key, uploadId, parts });
     await clearUploadSession(uploadId);
 
     // Metadata probing is useful but must not make a completed S3 upload fail.
@@ -158,7 +174,8 @@ uploadRouter.post(
     const meta = await (async () => {
       try {
         await fs.mkdir(env.RENDER_WORK_DIR, { recursive: true });
-        const dl = await fetch(await presignDownload(key), { signal: AbortSignal.timeout(30_000) });
+        const downloadUrl = await storage.createDownloadUrl({ key });
+        const dl = await fetch(downloadUrl, { signal: AbortSignal.timeout(30_000) });
         if (!dl.ok) throw new Error(`probe download failed: ${dl.status}`);
         await fs.writeFile(tmp, Buffer.from(await dl.arrayBuffer()));
         return await probe(tmp);
@@ -181,7 +198,7 @@ uploadRouter.post(
       data: {
         kind: 'SOURCE_VIDEO',
         s3Key: key,
-        bucket: env.S3_BUCKET,
+        bucket: storage.bucket,
         mimeType: contentType,
         sizeBytes: BigInt(sizeBytes),
         durationSec: meta?.durationSec,
@@ -196,7 +213,7 @@ uploadRouter.post(
       data: { status: 'UPLOADED', sourceAssetId: asset.id },
     });
 
-    const job = await enqueueAnalysis({ projectId, s3Key: key, bucket: env.S3_BUCKET });
+    const job = await enqueueAnalysis({ projectId, s3Key: key, bucket: storage.bucket });
     await prisma.job.create({
       data: { bullId: job.id, projectId, type: 'ANALYZE', status: 'QUEUED' },
     });
@@ -247,7 +264,8 @@ uploadRouter.post(
       }
     }
 
-    await abortMultipart(key, uploadId);
+    const storage = getStorageProvider();
+    await storage.abortMultipartUpload({ key, uploadId });
     await clearUploadSession(uploadId);
 
     res.json({ ok: true });

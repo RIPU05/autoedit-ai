@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { bullConnection as connection } from '../../lib/redis.js';
 import { prisma } from '../../lib/prisma.js';
-import { presignDownload } from '../../lib/s3.js';
+import { getStorageProvider } from '../../storage/index.js';
 import { probe, detectSilences, extractAudio, hasAudioStream } from '../../ffmpeg/probe.js';
 import { type TranscriptCue } from '../../services/claude.service.js';
 import { transcribeRich } from '../../services/transcribe.service.js';
@@ -71,8 +71,9 @@ export const analysisWorker = new Worker<AnalysisJobData>(
         })
         .catch(() => {});
 
-    // 1. pull source from S3
-    const sourceUrl = await presignDownload(s3Key);
+    // 1. pull source from storage
+    const storage = getStorageProvider();
+    const sourceUrl = await storage.createDownloadUrl({ key: s3Key });
     await timeStage('download', projectId, () => download(sourceUrl, localVideo));
 
     // 2. probe + silence detection (FFmpeg)

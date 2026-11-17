@@ -1,30 +1,30 @@
-# AutoAI Edit — Modular Storage Provider Foundation (Step 3B.1)
+# AutoAI Edit — Modular Storage Provider & Consumer Migration (Step 3B.1 & 3B.2)
 
-## 1. Overview & Purpose
+## 1. Overview & Architecture Evolution
 
-In Step 3B.1, AutoAI Edit introduces a clean, unified storage provider interface (`MediaStorageProvider`) to decouple media storage operations from the underlying infrastructure. 
+In Step 3B.1 and Step 3B.2, AutoAI Edit completed the transition from tightly coupled AWS S3 SDK calls to a clean, modular storage boundary centered on the `MediaStorageProvider` interface.
 
-Prior to Step 3B.1, direct calls to `@aws-sdk/client-s3` and helper methods in `apps/api/src/lib/s3.ts` were tightly coupled throughout routes and workers. With this modular abstraction, AutoAI Edit can seamlessly operate with:
-- **Local MinIO** for 100% offline, zero-cost development and testing.
-- **AWS S3** for production deployment on Render/AWS.
-- **Cloudflare R2** for zero-egress-fee production object storage.
-- **Generic S3-Compatible Storage** (Ceph, Wasabi, Backblaze B2, MinIO clusters) without changing any route or worker code.
+- **Step 3B.1:** Defined `MediaStorageProvider` interface, built `S3StorageProvider` supporting MinIO, AWS S3, Cloudflare R2, and custom S3 endpoints, and created a backward-compatibility facade in `apps/api/src/lib/s3.ts`.
+- **Step 3B.2:** Migrated all production application code (upload routes, project routes, analysis background worker, render background worker, and health checks) to depend directly on `MediaStorageProvider` via `getStorageProvider()`.
+
+Zero production application files now import `lib/s3.ts` or directly instantiate AWS SDK S3 commands.
 
 ---
 
-## 2. Core Storage Interface: `MediaStorageProvider`
+## 2. Storage Provider Interface: `MediaStorageProvider`
 
-The interface is defined in `apps/api/src/storage/storage.types.ts`:
+Defined in `apps/api/src/storage/storage.types.ts`:
 
 ```typescript
 export interface MediaStorageProvider {
   readonly providerType: StorageProviderType;
+  readonly defaultBucket: string;
   readonly bucket: string;
 
   // Basic Object Operations
   putObject(input: PutObjectInput): Promise<PutObjectOutput>;
   getObject(input: GetObjectInput): Promise<GetObjectOutput>;
-  getObjectMetadata(input: GetObjectMetadataInput): Promise<GetObjectMetadataOutput>;
+  getObjectMetadata(input: GetObjectMetadataInput): Promise<ObjectMetadata>;
   deleteObject(input: DeleteObjectInput): Promise<DeleteObjectOutput>;
 
   // Multipart Upload Lifecycle
@@ -37,100 +37,109 @@ export interface MediaStorageProvider {
   createDownloadUrl(input: CreateDownloadUrlInput): Promise<string>;
 
   // Health Diagnostics
-  checkHealth(): Promise<StorageHealthCheckResult>;
+  checkHealth(bucket?: string): Promise<StorageHealthCheckResult>;
 }
 ```
 
-### Key Responsibilities
+### Core Interface Responsibilities
 1. **Direct Object Operations (`putObject`, `getObject`, `getObjectMetadata`, `deleteObject`)**:
-   Used by workers and routes for reading video assets, uploading generated clips, probing asset headers (content length, etags), and deleting transient media.
-2. **Multipart Upload Management (`startMultipartUpload`, `presignUploadPart`, `completeMultipartUpload`, `abortMultipartUpload`)**:
-   Enables chunked browser uploads for large video files directly to the storage bucket via presigned PUT URLs, preventing API server buffering or network bottlenecks.
+   Used by workers and routes for writing rendered MP4 exports, downloading media for processing, probing asset metadata, and deleting transient assets.
+2. **Multipart Upload Lifecycle (`startMultipartUpload`, `presignUploadPart`, `completeMultipartUpload`, `abortMultipartUpload`)**:
+   Empowers browsers to stream multi-gigabyte video uploads directly to the storage bucket via presigned PUT URLs, preventing memory saturation and thread starvation on the API server.
 3. **Presigned Download (`createDownloadUrl`)**:
-   Generates secure, time-limited GET URLs for web preview players, worker video fetching, and client MP4 export downloads.
+   Issues signed, time-limited GET URLs for web preview players, worker video fetching, and client MP4 export downloads.
 4. **Health Check (`checkHealth`)**:
-   Probes bucket accessibility via `HeadBucketCommand` and returns latency in milliseconds without leaking secrets.
+   Validates bucket connectivity and measures latency in milliseconds without exposing credentials.
 
 ---
 
-## 3. Configuration & Provider Types
+## 3. Production Caller Inventory & Migration Status
 
-The storage provider is resolved at runtime via `apps/api/src/storage/storage.factory.ts` and configured by environment variables in `apps/api/src/config/env.ts`.
+All production application callers have been migrated to use `getStorageProvider()`:
 
-### Storage Providers Supported
+| Caller Component | Source File | Migrated Operation | Migration Status |
+| :--- | :--- | :--- | :--- |
+| **Upload Initiation** | `apps/api/src/routes/upload.routes.ts` | `storage.startMultipartUpload()` | **Migrated (Step 3B.2)** |
+| **Upload Part Signing** | `apps/api/src/routes/upload.routes.ts` | `storage.presignUploadPart()` | **Migrated (Step 3B.2)** |
+| **Upload Completion** | `apps/api/src/routes/upload.routes.ts` | `storage.completeMultipartUpload()` & `storage.createDownloadUrl()` | **Migrated (Step 3B.2)** |
+| **Upload Abort** | `apps/api/src/routes/upload.routes.ts` | `storage.abortMultipartUpload()` | **Migrated (Step 3B.2)** |
+| **Source Video Preview** | `apps/api/src/routes/projects.routes.ts` | `storage.createDownloadUrl()` | **Migrated (Step 3B.2)** |
+| **Analysis Worker Download**| `apps/api/src/queue/workers/analysis.worker.ts` | `storage.createDownloadUrl()` | **Migrated (Step 3B.2)** |
+| **Render Worker Source** | `apps/api/src/queue/workers/render.worker.ts` | `storage.createDownloadUrl()` | **Migrated (Step 3B.2)** |
+| **Render Worker Export** | `apps/api/src/queue/workers/render.worker.ts` | `storage.putObject()` & `storage.createDownloadUrl()` | **Migrated (Step 3B.2)** |
+| **Infrastructure Health** | `apps/api/src/routes/health.routes.ts` | `storage.checkHealth()` | **Migrated (Step 3B.2)** |
 
-| Provider | `STORAGE_PROVIDER` | `S3_ENDPOINT` Required? | `S3_FORCE_PATH_STYLE` | Description |
+---
+
+## 4. Provider Configuration Rules & Precedence
+
+Storage configuration resolution follows strict, documented precedence in `apps/api/src/storage/storage.factory.ts`:
+
+1. **Explicit Overrides:** Function argument parameters passed to `createStorageProvider(overrides)` or `resolveStorageConfig(overrides)` take top priority (used in tests and isolated scripts).
+2. **Runtime Environment Variables:** Explicit values in `process.env.STORAGE_PROVIDER`, `process.env.S3_ENDPOINT`, `process.env.S3_BUCKET`, etc.
+3. **Validated Defaults:** Static validated configuration from `apps/api/src/config/env.ts`.
+
+### Configuration Rules & Fail-Closed Validation
+- **Provider Types:** Must be one of `s3`, `minio`, `r2`, `custom-s3`. Any unsupported provider string fails immediately with an explicit error.
+- **Auto-Detection Fallback:** When `STORAGE_PROVIDER` is unset or default `s3`, custom endpoints are evaluated:
+  - Endpoints containing `r2.cloudflarestorage.com` resolve to `r2`.
+  - Local loopback endpoints (`127.0.0.1`, `localhost`, `minio`) resolve to `minio`.
+  - Any other custom endpoint resolves to `custom-s3`.
+- **Endpoint Requirements:** Both `r2` and `custom-s3` require a non-empty `S3_ENDPOINT`; missing endpoints fail validation immediately.
+- **Bucket and Credentials:** `S3_BUCKET`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY` must be non-empty strings.
+- **Presigned URL TTL Bounding:** Presigned TTL is strictly bounded between **60 seconds (1 minute)** and **604,800 seconds (7 days)**, with a default of 3,600 seconds.
+
+---
+
+## 5. Bucket & Key Ownership Security Boundaries
+
+1. **Server-Controlled Bucket:**
+   Clients cannot specify a bucket parameter. Bucket selection is strictly controlled by server configuration (`storage.bucket`).
+2. **Namespace Isolation:**
+   All client upload keys must reside under the `sources/<userId>/<sessionId>/<filename>` prefix.
+3. **Directory Traversal Prevention:**
+   The `verifyKeyOwnership` guard strictly rejects:
+   - Directory traversal sequences (`..`)
+   - Windows backslash delimiters (`\`)
+   - Leading slashes (`/`)
+   - Double slashes (`//`)
+   - Null bytes (`\0`)
+4. **Ownership Verification:**
+   The `userId` extracted from the key path must strictly match `req.user.sub` from the verified JWT.
+5. **Session Integrity:**
+   Upload ID, project ID, and S3 key must strictly match the registered upload session in Redis/memory.
+
+---
+
+## 6. Deprecated Compatibility Facade (`apps/api/src/lib/s3.ts`)
+
+The file `apps/api/src/lib/s3.ts` is maintained exclusively as a backward-compatibility facade:
+- Methods (`startMultipart`, `presignUploadPart`, `completeMultipart`, `abortMultipart`, `putObject`, `presignDownload`) delegate all calls to `getStorageProvider()`.
+- Exported `s3` client is retained for legacy integration tests (`tests/integration/minio-storage.test.ts`), configuration tests (`tests/unit/s3-config.test.ts`), and standalone tools (`scripts/s3-upload-reliability.ts`).
+- No production application code imports `lib/s3.ts`.
+
+---
+
+## 7. Cloudflare R2 & Self-Hosted Storage Target Notes
+
+| Provider | `STORAGE_PROVIDER` | `S3_ENDPOINT` Example | `forcePathStyle` | Region |
 | :--- | :--- | :--- | :--- | :--- |
-| **Local MinIO** | `minio` (or `s3` with endpoint) | Yes (`http://127.0.0.1:9002`) | `true` | Local Docker-based MinIO container for local dev/test. |
-| **AWS S3** | `s3` (default) | No (uses AWS defaults) | `false` | Standard AWS S3 in `us-east-1` (or configured region). |
-| **Cloudflare R2** | `r2` | Yes (`https://<account_id>.r2.cloudflarestorage.com`) | `false` | S3-compatible zero-egress object storage. |
-| **Generic S3** | `custom-s3` | Yes | Configurable (`true`/`false`) | Self-hosted MinIO, Ceph, Wasabi, or Backblaze. |
+| **AWS S3** | `s3` | *(Unset)* | `false` | `us-east-1` (or configured) |
+| **Local MinIO** | `minio` | `http://127.0.0.1:9002` | `true` | `us-east-1` |
+| **Cloudflare R2** | `r2` | `https://<account-id>.r2.cloudflarestorage.com` | `false` | `auto` |
+| **Generic S3** | `custom-s3` | `https://s3.custom-domain.com` | Configurable | Configured region |
 
-### Path-Style vs. Virtual-Hosted Addressing
-
-- **Path-Style (`http(s)://endpoint/bucket/key`)**:
-  - **When Required**: Local development with MinIO or IP-based storage endpoints (`127.0.0.1`, `localhost`, raw IP addresses). Because DNS cannot dynamically route subdomains like `bucket.127.0.0.1`, path-style addressing is mandatory.
-  - **Configuration**: Set `S3_FORCE_PATH_STYLE=true`.
-- **Virtual-Hosted-Style (`https://bucket.s3.region.amazonaws.com/key`)**:
-  - **When Required**: Standard AWS S3 and modern production cloud deployments. AWS deprecated path-style for new buckets; virtual-hosted style routes through AWS edge DNS.
-  - **Configuration**: Set `S3_FORCE_PATH_STYLE=false` (the default when `S3_ENDPOINT` is unset).
+### Limitations & Caveats
+- **Cloudflare R2:** Compatible target verified against AWS SDK v3 contracts. Does not claim live cloud verification in local tests.
+- **Path-Style Addressing:** Required for IP-based or local endpoints (`127.0.0.1`) where DNS subdomain routing is unavailable. Virtual-hosted style is used for AWS and R2.
 
 ---
 
-## 4. Multipart Upload Lifecycle
-
-Large video uploads follow a 6-stage lifecycle using presigned URLs:
-
-```
-[Browser / Client]                   [AutoAI API]                      [Storage Provider / MinIO]
-       |                                   |                                        |
-  (1)  | --- POST /upload/initiate ------> |                                        |
-       |                                   | --- startMultipartUpload() ----------> |
-       |                                   | <--- returns uploadId ---------------- |
-       | <--- returns uploadId ------------|                                        |
-       |                                   |                                        |
-  (2)  | --- POST /upload/part-url ------> |                                        |
-       |     (uploadId, partNumber: 1)     | --- presignUploadPart() -------------> |
-       | <--- returns presigned PUT URL ---|                                        |
-       |                                   |                                        |
-  (3)  | ========================= PUT Part 1 Raw Bytes ==========================> |
-       | <======================== returns ETag 1 ================================= |
-       |                                   |                                        |
-  (4)  | --- POST /upload/part-url ------> |                                        |
-       |     (uploadId, partNumber: 2)     | --- presignUploadPart() -------------> |
-       | <--- returns presigned PUT URL ---|                                        |
-       |                                   |                                        |
-  (5)  | ========================= PUT Part 2 Raw Bytes ==========================> |
-       | <======================== returns ETag 2 ================================= |
-       |                                   |                                        |
-  (6)  | --- POST /upload/complete ------> |                                        |
-       |     (uploadId, [ETag1, ETag2])    | --- completeMultipartUpload() -------> |
-       |                                   | <--- stitched object ready ----------- |
-       | <--- returns 200 OK --------------|                                        |
-       |                                   |                                        |
- [Abort| --- POST /upload/abort ---------> |                                        |
-  Flow]|     (uploadId)                    | --- abortMultipartUpload() ----------> |
-       | <--- returns 200 OK --------------|                                        |
-```
-
----
-
-## 5. Backward Compatibility & Consumer Delegation
-
-To maintain 100% backward compatibility with existing tests and scripts:
-1. `apps/api/src/lib/s3.ts` acts as a facade delegating all operations to `getStorageProvider()`.
-2. Existing routes (`apps/api/src/routes/upload.routes.ts`, `apps/api/src/routes/projects.routes.ts`) continue working without disruption.
-3. Workers (`apps/api/src/queue/workers/analysis.worker.ts`, `render.worker.ts`) interact through standard functions or provider instances.
-4. Health routes (`apps/api/src/routes/health.routes.ts`) verify bucket connectivity using the active provider.
-
----
-
-## 6. Scope Boundaries & What Is NOT In Step 3B.1
+## 8. Scope Boundaries & What Is NOT In Step 3B.2
 
 In accordance with strict step isolation:
-- **No AI Provider Refactoring**: Transcription (Whisper) and Claude fallback logic remain untouched.
-- **No Remote URL Ingestion**: No downloading from external YouTube, Twitch, or HTTP video URLs.
-- **No Livestream Ingestion**: No RTMP, HLS, or live chunk ingestion.
-- **No Billing / Referral Logic**: Free tiers, credit balances, and referral tracking are out of scope.
-- **No Cloud-Specific Native SDKs**: No `@google-cloud/storage` or `@azure/storage-blob`; only S3-compatible providers via AWS SDK v3 are supported.
-- **No Production Deployments or Master Commits**: Master branch remains untouched; Render/Vercel production remains unaffected.
+- **No AI Provider Refactoring:** Transcription (Whisper) and Claude fallback logic remain unchanged.
+- **No Remote URL Ingestion:** No external YouTube, Twitch, or video URL downloading.
+- **No Livestream Ingestion:** No RTMP, HLS, or live chunk ingestion.
+- **No Billing / Referral Logic:** Free tiers, credit balances, and referral tracking are out of scope.
+- **No Production Deployments or Master Commits:** Master branch remains untouched; Render/Vercel production platforms remain unaffected.

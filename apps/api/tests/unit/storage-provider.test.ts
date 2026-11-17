@@ -6,6 +6,7 @@ import {
   getStorageProvider,
   setStorageProvider,
   type StorageConfig,
+  type MediaStorageProvider,
 } from '../../src/storage/index.js';
 import {
   PutObjectCommand,
@@ -18,8 +19,10 @@ import {
   AbortMultipartUploadCommand,
   HeadBucketCommand,
 } from '@aws-sdk/client-s3';
+import { verifyKeyOwnership } from '../../src/routes/upload.routes.js';
+import * as legacyS3 from '../../src/lib/s3.js';
 
-describe('Storage Provider Abstraction Unit Tests (Step 3B.1)', () => {
+describe('Storage Provider Abstraction & Migration Unit Tests (Step 3B.2)', () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
@@ -44,8 +47,8 @@ describe('Storage Provider Abstraction Unit Tests (Step 3B.1)', () => {
     setStorageProvider(null);
   });
 
-  describe('Storage Configuration and Provider Resolution', () => {
-    it('resolves AWS S3 default configuration when no endpoint is provided', () => {
+  describe('Storage Configuration and Provider Resolution Precedence', () => {
+    it('resolves AWS S3 default configuration when no custom endpoint is provided', () => {
       const config = resolveStorageConfig();
 
       expect(config.providerType).toBe('s3');
@@ -54,10 +57,11 @@ describe('Storage Provider Abstraction Unit Tests (Step 3B.1)', () => {
       expect(config.accessKeyId).toBe('test-access-key-id');
       expect(config.secretAccessKey).toBe('test-secret-access-key');
       expect(config.endpoint).toBeUndefined();
-      expect(config.forcePathStyle).toBeUndefined();
+      expect(config.forcePathStyle).toBe(false);
+      expect(config.presignTtlSec).toBe(3600);
     });
 
-    it('auto-detects minio provider and enables forcePathStyle when S3_ENDPOINT is set', () => {
+    it('auto-detects minio provider and enables forcePathStyle when S3_ENDPOINT is set to local address', () => {
       process.env.S3_ENDPOINT = 'http://127.0.0.1:9002';
       const config = resolveStorageConfig();
 
@@ -72,6 +76,8 @@ describe('Storage Provider Abstraction Unit Tests (Step 3B.1)', () => {
 
       expect(config.providerType).toBe('r2');
       expect(config.endpoint).toBe('https://my-account-id.r2.cloudflarestorage.com');
+      expect(config.region).toBe('auto');
+      expect(config.forcePathStyle).toBe(false);
     });
 
     it('respects explicit STORAGE_PROVIDER override over auto-detection', () => {
@@ -81,6 +87,38 @@ describe('Storage Provider Abstraction Unit Tests (Step 3B.1)', () => {
 
       expect(config.providerType).toBe('custom-s3');
       expect(config.endpoint).toBe('http://127.0.0.1:9002');
+    });
+
+    it('fails explicitly for unsupported provider type', () => {
+      expect(() => {
+        resolveStorageConfig({ providerType: 'azure-blob' as any });
+      }).toThrow(/Invalid storage provider type "azure-blob"/);
+    });
+
+    it('fails explicitly when Cloudflare R2 is configured without an endpoint', () => {
+      expect(() => {
+        resolveStorageConfig({ providerType: 'r2', endpoint: undefined });
+      }).toThrow(/Cloudflare R2 storage provider requires S3_ENDPOINT/);
+    });
+
+    it('fails explicitly when custom-s3 is configured without an endpoint', () => {
+      expect(() => {
+        resolveStorageConfig({ providerType: 'custom-s3', endpoint: undefined });
+      }).toThrow(/custom-s3 storage provider requires S3_ENDPOINT/);
+    });
+
+    it('clamps presignTtlSec within safe bounds (60s minimum, 7 days maximum)', () => {
+      // Lower bound clamp (e.g. 10s -> 60s)
+      const low = resolveStorageConfig({ presignTtlSec: 10 });
+      expect(low.presignTtlSec).toBe(60);
+
+      // Upper bound clamp (e.g. 1,000,000s -> 604,800s)
+      const high = resolveStorageConfig({ presignTtlSec: 1_000_000 });
+      expect(high.presignTtlSec).toBe(604800);
+
+      // Invalid NaN -> fallback to default 3600
+      const nan = resolveStorageConfig({ presignTtlSec: NaN as any });
+      expect(nan.presignTtlSec).toBe(3600);
     });
 
     it('createStorageProvider creates an S3StorageProvider with correct providerType and bucket', () => {
@@ -103,6 +141,133 @@ describe('Storage Provider Abstraction Unit Tests (Step 3B.1)', () => {
       const mockProvider: any = { providerType: 'custom-s3', defaultBucket: 'mock' };
       setStorageProvider(mockProvider);
       expect(getStorageProvider()).toBe(mockProvider);
+    });
+  });
+
+  describe('Bucket and Object-Key Security Validation (verifyKeyOwnership)', () => {
+    it('accepts valid authorized user key with sources/ prefix', () => {
+      expect(() => {
+        verifyKeyOwnership('sources/user_123/session_abc/video.mp4', 'user_123');
+      }).not.toThrow();
+    });
+
+    it('rejects keys without sources/ prefix with 403 Forbidden', () => {
+      expect(() => {
+        verifyKeyOwnership('renders/user_123/video.mp4', 'user_123');
+      }).toThrow(/must be within sources\/ prefix/);
+    });
+
+    it('rejects keys belonging to another user with 403 Forbidden', () => {
+      expect(() => {
+        verifyKeyOwnership('sources/victim_user/session_abc/video.mp4', 'attacker_user');
+      }).toThrow(/does not belong to user/);
+    });
+
+    it('rejects directory traversal attempts with 403 Forbidden', () => {
+      expect(() => {
+        verifyKeyOwnership('sources/user_123/../../other/secret.mp4', 'user_123');
+      }).toThrow(/invalid or escaping s3 key sequence/);
+    });
+
+    it('rejects backslash path escaping attempts with 403 Forbidden', () => {
+      expect(() => {
+        verifyKeyOwnership('sources\\user_123\\video.mp4', 'user_123');
+      }).toThrow(/invalid or escaping s3 key sequence/);
+    });
+
+    it('rejects leading slashes and double slashes with 403 Forbidden', () => {
+      expect(() => {
+        verifyKeyOwnership('/sources/user_123/video.mp4', 'user_123');
+      }).toThrow(/invalid or escaping s3 key sequence/);
+
+      expect(() => {
+        verifyKeyOwnership('sources//user_123/video.mp4', 'user_123');
+      }).toThrow(/invalid or escaping s3 key sequence/);
+    });
+  });
+
+  describe('Backward Compatibility Facade (apps/api/src/lib/s3.ts)', () => {
+    let mockProvider: MediaStorageProvider;
+
+    beforeEach(() => {
+      mockProvider = {
+        providerType: 's3',
+        bucket: 'facade-test-bucket',
+        putObject: vi.fn(async (input) => ({ key: input.key, bucket: input.bucket || 'facade-test-bucket' })),
+        getObject: vi.fn(async () => ({ body: Buffer.from('facade-bytes'), contentType: 'text/plain' })),
+        getObjectMetadata: vi.fn(async () => ({ contentLength: 100, contentType: 'text/plain' })),
+        deleteObject: vi.fn(async (input) => ({ success: true, key: input.key, bucket: 'facade-test-bucket' })),
+        startMultipartUpload: vi.fn(async (input) => ({ uploadId: 'facade-up-1', key: input.key, bucket: 'facade-test-bucket' })),
+        presignUploadPart: vi.fn(async () => 'https://facade.test/part-1'),
+        completeMultipartUpload: vi.fn(async (input) => ({ key: input.key, bucket: 'facade-test-bucket', etag: '"facade-etag"' })),
+        abortMultipartUpload: vi.fn(async (input) => ({ success: true, key: input.key, uploadId: input.uploadId })),
+        createDownloadUrl: vi.fn(async (input) => `https://facade.test/download/${input.key}`),
+        checkHealth: vi.fn(async () => ({ ok: true, provider: 's3', bucket: 'facade-test-bucket', ms: 2 })),
+      };
+      setStorageProvider(mockProvider);
+    });
+
+    it('startMultipart delegates to getStorageProvider().startMultipartUpload', async () => {
+      const res = await legacyS3.startMultipart('sources/u1/v.mp4', 'video/mp4');
+      expect(mockProvider.startMultipartUpload).toHaveBeenCalledWith({
+        key: 'sources/u1/v.mp4',
+        contentType: 'video/mp4',
+        bucket: expect.any(String),
+      });
+      expect(res.uploadId).toBe('facade-up-1');
+    });
+
+    it('presignUploadPart delegates to getStorageProvider().presignUploadPart', async () => {
+      const url = await legacyS3.presignUploadPart('sources/u1/v.mp4', 'up-1', 1);
+      expect(mockProvider.presignUploadPart).toHaveBeenCalledWith({
+        key: 'sources/u1/v.mp4',
+        uploadId: 'up-1',
+        partNumber: 1,
+        bucket: expect.any(String),
+      });
+      expect(url).toBe('https://facade.test/part-1');
+    });
+
+    it('completeMultipart delegates to getStorageProvider().completeMultipartUpload', async () => {
+      const parts = [{ PartNumber: 1, ETag: '"e1"' }];
+      const res = await legacyS3.completeMultipart('sources/u1/v.mp4', 'up-1', parts);
+      expect(mockProvider.completeMultipartUpload).toHaveBeenCalledWith({
+        key: 'sources/u1/v.mp4',
+        uploadId: 'up-1',
+        parts,
+        bucket: expect.any(String),
+      });
+      expect(res).toBeDefined();
+    });
+
+    it('abortMultipart delegates to getStorageProvider().abortMultipartUpload', async () => {
+      const res = await legacyS3.abortMultipart('sources/u1/v.mp4', 'up-1');
+      expect(mockProvider.abortMultipartUpload).toHaveBeenCalledWith({
+        key: 'sources/u1/v.mp4',
+        uploadId: 'up-1',
+        bucket: expect.any(String),
+      });
+      expect(res.success).toBe(true);
+    });
+
+    it('putObject delegates to getStorageProvider().putObject', async () => {
+      const res = await legacyS3.putObject('renders/out.mp4', Buffer.from('data'), 'video/mp4');
+      expect(mockProvider.putObject).toHaveBeenCalledWith({
+        key: 'renders/out.mp4',
+        body: expect.any(Buffer),
+        contentType: 'video/mp4',
+        bucket: expect.any(String),
+      });
+      expect(res.key).toBe('renders/out.mp4');
+    });
+
+    it('presignDownload delegates to getStorageProvider().createDownloadUrl', async () => {
+      const url = await legacyS3.presignDownload('sources/u1/v.mp4');
+      expect(mockProvider.createDownloadUrl).toHaveBeenCalledWith({
+        key: 'sources/u1/v.mp4',
+        bucket: expect.any(String),
+      });
+      expect(url).toBe('https://facade.test/download/sources/u1/v.mp4');
     });
   });
 

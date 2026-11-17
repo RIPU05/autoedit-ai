@@ -11,7 +11,7 @@ import {
   UnsupportedPromptError,
 } from '../services/claude.service.js';
 import { createVersion, getHeadVersion, diffVersions, restoreVersion } from '../services/version.service.js';
-import { presignDownload } from '../lib/s3.js';
+import { getStorageProvider } from '../storage/index.js';
 import { buildPromptInjection, learnFromPromptEdit } from '../services/creator-memory.service.js';
 import { getConnectedClaudeApiKey } from '../services/integration-events.service.js';
 
@@ -245,7 +245,9 @@ projectRouter.get(
       include: { sourceAsset: true },
     });
     if (!project?.sourceAsset) throw new HttpError(404, 'no source video');
-    res.json({ url: await presignDownload(project.sourceAsset.s3Key) });
+    const storage = getStorageProvider();
+    const url = await storage.createDownloadUrl({ key: project.sourceAsset.s3Key });
+    res.json({ url });
   }),
 );
 
