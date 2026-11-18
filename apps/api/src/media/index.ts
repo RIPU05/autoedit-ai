@@ -4,4 +4,7 @@ export * from './canonical-source.js';
 export * from './ingestion-coordinator.js';
 export * from './shared-cache.js';
 export * from './highlight-detector.js';
+export * from './durable-media-registry.js';
+export * from './durable-artifact-publisher.js';
+export * from './durable-shared-pipeline.js';
 export * from './live/index.js';

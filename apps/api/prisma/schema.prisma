@@ -37,6 +37,7 @@ model User {
   feedback      Feedback[]
   integrationAccounts IntegrationAccount[]
   integrationEventLogs IntegrationEventLog[]
+  ownedMediaSources   MediaSource[] @relation("OwnedMediaSources")
 }
 
 enum IntegrationProvider {
@@ -115,6 +116,8 @@ model Project {
   user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   sourceAsset Asset?        @relation("SourceAsset", fields: [sourceAssetId], references: [id])
   sourceAssetId String?     @unique
+  mediaSourceId String?
+  mediaSource MediaSource?  @relation("ProjectMediaSource", fields: [mediaSourceId], references: [id], onDelete: SetNull)
   analysis    Analysis?
   timeline    EditTimeline?
   transcript  Transcript?
@@ -123,6 +126,7 @@ model Project {
   jobs        Job[]
 
   @@index([userId, createdAt])
+  @@index([mediaSourceId])
 }
 
 enum AssetKind {
@@ -435,4 +439,210 @@ model Feedback {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Durable Media Source Registry, Rights Grants & Transactional Shared Artifact Cache (Step 3B.7)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum MediaSourceProviderEnum {
+  UPLOAD
+  YOUTUBE
+  TWITCH
+  KICK
+  DIRECT_MEDIA
+}
+
+enum MediaSourceTypeEnum {
+  LIVE
+  VOD
+  UPLOADED
+}
+
+enum MediaIdentityScopeEnum {
+  IMMUTABLE_BROADCAST
+  IMMUTABLE_VOD
+  IMMUTABLE_UPLOAD
+}
+
+enum MediaAcquisitionCapabilityEnum {
+  DIRECT_UPLOAD
+  APPROVED_API
+  PERMITTED_STREAM
+  PERMITTED_DIRECT_URL
+  UNSUPPORTED
+}
+
+enum MediaRightsStatusEnum {
+  USER_OWNED
+  PERMITTED_PUBLIC
+  REQUIRES_AUTHORIZATION
+  RESTRICTED_DRM
+  DENIED
+  UNKNOWN
+}
+
+enum MediaSourceAvailabilityEnum {
+  AVAILABLE
+  LIVE_NOW
+  ENDED_PROCESSING
+  OFFLINE
+  UNAVAILABLE
+  UNKNOWN
+}
+
+enum RightsGrantScopeEnum {
+  ACQUISITION_ONLY
+  SHARED_REUSE
+  PRIVATE_OWNER
+}
+
+enum SharedArtifactKindEnum {
+  SOURCE_MEDIA
+  SOURCE_SEGMENT
+  TRANSCRIPTION
+  HIGHLIGHT_ANALYSIS
+  BASE_CLIP
+}
+
+enum SharedArtifactStateEnum {
+  PENDING
+  PUBLISHED
+  REPAIRING
+  INVALIDATED
+  EXPIRED
+}
+
+enum ArtifactAttemptStateEnum {
+  RESERVED
+  UPLOADED
+  COMMITTED
+  ABANDONED
+  SUPERSEDED
+  FAILED
+}
+
+model MediaSource {
+  id                     String                         @id @default(cuid())
+  canonicalId            String                         @unique
+  identityScope          MediaIdentityScopeEnum
+  provider               MediaSourceProviderEnum
+  sourceType             MediaSourceTypeEnum
+  externalId             String
+  channelId              String?
+  broadcastId            String?
+  vodId                  String?
+  associatedLiveSourceId String?
+  sourceRevision         String                         @default("v1")
+  normalizedUrl          String?
+  availability           MediaSourceAvailabilityEnum    @default(UNKNOWN)
+  acquisitionCapability  MediaAcquisitionCapabilityEnum @default(UNSUPPORTED)
+  rightsStatus           MediaRightsStatusEnum          @default(UNKNOWN)
+  rightsScope            String                         @default("NONE")
+  rightsProvenance       String                         @default("UNVERIFIED")
+  ownerUserId            String?
+  lastVerifiedAt         DateTime?
+  retentionExpiresAt     DateTime?
+  metadata               Json?
+  createdAt              DateTime                       @default(now())
+  updatedAt              DateTime                       @updatedAt
+
+  ownerUser              User?                          @relation("OwnedMediaSources", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  associatedLiveSource   MediaSource?                   @relation("VodToLiveAssociation", fields: [associatedLiveSourceId], references: [id], onDelete: SetNull)
+  associatedVods         MediaSource[]                  @relation("VodToLiveAssociation")
+  rightsGrants           MediaRightsGrant[]
+  artifacts              SharedCacheArtifact[]
+  projects               Project[]                      @relation("ProjectMediaSource")
+
+  @@index([provider, channelId])
+  @@index([provider, broadcastId])
+  @@index([provider, vodId])
+  @@index([ownerUserId])
+  @@index([rightsStatus, availability])
+  @@index([retentionExpiresAt])
+}
+
+model MediaRightsGrant {
+  id               String               @id @default(cuid())
+  mediaSourceId    String
+  grantScope       RightsGrantScopeEnum
+  granteeUserId    String?
+  allowAcquisition Boolean              @default(false)
+  allowSharedReuse Boolean              @default(false)
+  provenance       String
+  grantedBy        String
+  reason           String?
+  grantedAt        DateTime             @default(now())
+  expiresAt        DateTime?
+  revokedAt        DateTime?
+  revokedReason    String?
+
+  mediaSource      MediaSource          @relation(fields: [mediaSourceId], references: [id], onDelete: Cascade)
+
+  @@index([mediaSourceId, revokedAt, expiresAt])
+  @@index([granteeUserId])
+}
+
+model SharedCacheArtifact {
+  id                  String                  @id @default(cuid())
+  cacheKey            String                  @unique
+  mediaSourceId       String
+  artifactKind        SharedArtifactKindEnum
+  rightsScope         String
+  ownerUserId         String?
+  sourceRevision      String                  @default("v1")
+  algorithmVersion    String                  @default("v1")
+  renderSettingsHash  String?
+  windowStartSec      Float?
+  windowEndSec        Float?
+  state               SharedArtifactStateEnum @default(PENDING)
+
+  // Durable monotonic generation counter (never resets on Redis restart/eviction)
+  latestReservedGen   Int                     @default(0)
+  publishedGeneration Int                     @default(0)
+  activeAttemptId     String?
+
+  // Authoritative published immutable object pointer (preserved intact during failed replacement)
+  storageKeyPrefix    String
+  publishedObjectKey  String?
+  contentSha256       String?
+  etag                String?
+  sizeBytes           BigInt?
+  mimeType            String?
+  mediaMetadata       Json?
+
+  expiresAt           DateTime?
+  cleanedAt           DateTime?
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+
+  mediaSource         MediaSource             @relation(fields: [mediaSourceId], references: [id], onDelete: Cascade)
+  attempts            SharedArtifactAttempt[]
+
+  @@index([mediaSourceId, artifactKind, state])
+  @@index([rightsScope, ownerUserId])
+  @@index([state, expiresAt])
+}
+
+model SharedArtifactAttempt {
+  id                   String                   @id @default(cuid())
+  artifactId           String
+  generation           Int
+  workerId             String
+  leaseExpiresAt       DateTime
+  state                ArtifactAttemptStateEnum @default(RESERVED)
+  objectKey            String?
+  contentSha256        String?
+  etag                 String?
+  sizeBytes            BigInt?
+  errorMessage         String?
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+  cleanupEligibleAfter DateTime?
+  cleanedUpAt          DateTime?
+
+  artifact             SharedCacheArtifact      @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+
+  @@unique([artifactId, generation])
+  @@index([state, cleanupEligibleAfter, cleanedUpAt])
 }
