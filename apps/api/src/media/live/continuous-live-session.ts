@@ -1085,13 +1085,13 @@ export class ContinuousLiveSessionService {
 
               await this.cache.putCachedManifest(auth, clipDescriptor, clipManifest);
 
-              stopClipHb();
               await this.coordinator.markReady({
                 canonicalSourceId: clipWorkId,
                 workerId: `${req.workerId}_clip`,
                 fencingToken: clipCoord.fencingToken,
                 artifactRef: storedObj.objectKey,
               });
+              stopClipHb();
 
               const nowMs = Date.now();
               entry = {
