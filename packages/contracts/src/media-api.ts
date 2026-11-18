@@ -240,6 +240,7 @@ export type ApplyPrivateProjectEditRequest = z.infer<typeof ApplyPrivateProjectE
  */
 export const MediaProcessJobPayloadSchema = z.object({
   sharedWorkKey: z.string().min(1),
+  generation: z.number().int().positive().optional(),
   mediaSourceId: ResourceIdSchema,
   canonicalSourceId: z.string().min(1),
   sourceType: MediaSourceTypeSchema,

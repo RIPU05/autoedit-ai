@@ -1,17 +1,17 @@
-# Universal Media API, Authenticated Jobs & Private Project Workflow (Step 3B.9)
+# Universal Media API, Durable Shared-Work Coordination & Private Project Workflow (Steps 3B.9 & 3B.9.1)
 
 ## Overview
 
-Step 3B.9 connects AutoAI Edit's durable media processing core — `DurableMediaRegistryService`, `DurableArtifactPublisher`, `UnifiedVodProcessingService`, `ContinuousLiveSessionService`, and private `Project` / `EditTimeline` / `EditVersion` models — to authenticated HTTP APIs (`/api/media/*`), persistent per-user job tracking (`MediaProcessingJob`), and a real BullMQ background worker (`MEDIA_PROCESS_QUEUE = 'media-process'`).
+Steps 3B.9 and 3B.9.1 connect AutoAI Edit's durable media processing core — `DurableMediaRegistryService`, `DurableArtifactPublisher`, `UnifiedVodProcessingService`, `ContinuousLiveSessionService`, and private `Project` / `EditTimeline` / `EditVersion` models — to authenticated HTTP APIs (`/api/media/*`), durable per-user job tracking (`MediaProcessingJob`), a PostgreSQL-authoritative shared-work coordinator (`SharedMediaWork`), owner-tokenized Redis leases (`SharedWorkRedisLock`), and a real BullMQ background worker (`MEDIA_PROCESS_QUEUE = 'media-process'`).
 
 This preserves the non-negotiable AutoAI Edit product workflow:
 
 ```text
 Universal Input (URL | Existing Upload | Dev/Test Controlled Fixture)
   → POST /api/media/sources/resolve          (Truthful capability & rights check)
-  → POST /api/media/jobs                     (Idempotent per-user job + shared-work dedup)
-  → BullMQ Worker ('media-process')          (Live / VOD / Upload execution + PostgreSQL CAS)
-  → GET  /api/media/jobs/:jobId              (Owner-only status polling)
+  → POST /api/media/jobs                     (Idempotent per-user job + durable SharedMediaWork outbox)
+  → BullMQ Worker ('media-process')          (Fenced Live/VOD/Upload execution + continuous lease heartbeat)
+  → GET  /api/media/jobs/:jobId              (Owner-only status polling + idempotent self-heal)
   → GET  /api/media/jobs/:jobId/highlights   (Live rights re-check + 300s signed URLs)
   → POST /api/media/projects/from-source     (Private Project + EditTimeline + root EditVersion)
   → GET  /api/media/projects/:projectId/highlights
@@ -28,9 +28,9 @@ All routes are mounted under `/api/media` behind `requireAuth` (`apps/api/src/ap
 | Method & Path | Purpose | Rate Limiter |
 | --- | --- | --- |
 | `POST /api/media/sources/resolve` | Normalizes input, performs SSRF/URL validation, checks server-side rights/capabilities, returns truthful `capabilityStatus` | `MEDIA_RESOLVE_LIMITER` (60/min per user) |
-| `POST /api/media/jobs` | Idempotently creates a per-user `MediaProcessingJob`, attaches to shared work, and enqueues at most one BullMQ job per `sharedWorkKey` | `MEDIA_JOB_LIMITER` (30/min per user) |
+| `POST /api/media/jobs` | Idempotently attaches a per-user `MediaProcessingJob` to durable `SharedMediaWork` and dispatches at most one BullMQ job per generation | `MEDIA_JOB_LIMITER` (30/min per user) |
 | `GET /api/media/jobs/:jobId` | Returns persistent job status (`QUEUED`, `RUNNING`, `READY`, `FAILED`, `CANCELLED`) strictly to the owning user (`404` to non-owners) | Authenticated |
-| `POST /api/media/jobs/:jobId/cancel` | Cancels only the authenticated user's job; stops shared work only when zero active subscribers remain | Authenticated |
+| `POST /api/media/jobs/:jobId/cancel` | Cancels only the authenticated user's job; stops shared work only when zero active subscribers remain; never regresses `READY → CANCELLED` | Authenticated |
 | `GET /api/media/jobs/:jobId/highlights` | Re-checks live PostgreSQL rights/revocation and returns verified highlights with short-lived (`300s`) signed download URLs (supports live highlights while `RUNNING`) | Authenticated |
 | `POST /api/media/projects/from-source` | Creates a private `Project`, `EditTimeline`, and root `EditVersion` seeded from the user's owned job | Authenticated |
 | `GET /api/media/projects/:projectId/highlights` | Returns authorized highlights for an owned private project (`404` to non-owners; re-checks live rights) | Authenticated |
@@ -40,123 +40,151 @@ All routes are mounted under `/api/media` behind `requireAuth` (`apps/api/src/ap
 
 ## 2. Truthful Source Capability States
 
-`POST /api/media/sources/resolve` never fakes acquisition or bypasses platform restrictions. Every response returns an explicit `capabilityStatus`:
+`POST /api/media/sources/resolve` never fakes acquisition or bypasses platform restrictions:
 
-- **`READY_TO_PROCESS`**: Permitted source ready for queued ingestion/analysis (an existing user-owned upload, or a server-registered non-production controlled test fixture with verified rights).
+- **`READY_TO_PROCESS`**: Permitted source ready for queued ingestion/analysis (existing user-owned upload, or server-registered non-production controlled test fixture with verified rights).
 - **`REQUIRES_PERMISSION`**: Recognized source whose rights status in PostgreSQL is unverified, denied, or revoked.
-- **`UNSUPPORTED_ACQUISITION`**: Valid, recognized external provider VOD/video URL (e.g., YouTube VOD, Twitch VOD, Kick VOD) where AutoAI Edit has no permitted live acquisition adapter enabled in this release. `POST /api/media/jobs` rejects submission with `422 UNSUPPORTED_ACQUISITION` without enqueueing any worker job.
-- **`BROADCAST_UNRESOLVED`**: Live channel URL (e.g., `https://www.twitch.tv/shroud`, YouTube live handle, Kick channel) that has no active resolved broadcast/session ID. Must never be conflated into one cache key across different broadcasts.
+- **`UNSUPPORTED_ACQUISITION`**: Valid, recognized external provider VOD/video URL (YouTube, Twitch, Kick VOD) with no permitted acquisition adapter enabled in this release (`POST /api/media/jobs` rejects with `422` without enqueueing).
+- **`BROADCAST_UNRESOLVED`**: Live channel URL (`twitch.tv/<channel>`, etc.) with no active resolved broadcast/session ID.
 - **`SOURCE_UNAVAILABLE`**: Missing owned upload project/asset, invalid/unreachable fixture, or missing resource.
 
 ---
 
-## 3. Authenticated Request Validation & Server-Trusted Boundaries
+## 3. PostgreSQL vs Redis vs BullMQ Responsibilities (Step 3B.9.1)
 
-All request payloads are validated by strict `.strict()` Zod contracts in `packages/contracts/src/media-api.ts`:
+No single ephemeral layer is trusted as the sole concurrency authority:
 
-- **Authenticated User Identity:** `userId` is always extracted from the verified JWT (`req.user.sub`).
-- **Forged Fields Rejected:** Strict schemas reject unknown or client-forged security fields (`rightsStatus`, `canonicalSourceId`, `ownerUserId`, `storageKey`, `objectKey`, `workerId`, `sharedWorkKey`) with `400 VALIDATION_ERROR`.
-- **No Raw Storage Keys in API Responses:** Responses never expose `s3Key`, `objectKey`, `publishedObjectKey`, bucket names, or filesystem paths — only opaque `highlightId`, `cacheKey`, verified media metadata, and short-lived (`300s`) signed `downloadUrl`s.
-- **No Cross-User Enumeration:** Non-owners requesting `GET /api/media/jobs/:jobId`, `POST /api/media/jobs/:jobId/cancel`, `GET /api/media/jobs/:jobId/highlights`, `GET /api/media/projects/:projectId/highlights`, or `POST /api/media/projects/:projectId/edits` receive `404 SOURCE_UNAVAILABLE`.
-
----
-
-## 4. Job Persistence, Idempotency & Shared-Work Deduplication
-
-### PostgreSQL Model (`MediaProcessingJob`)
-
-Added via additive migration `apps/api/prisma/migrations/20261118110531_media_processing_jobs/migration.sql`:
-
-- Per-user ownership (`userId`) linked to `MediaSource` (`mediaSourceId`) and optional `Project` (`projectId`).
-- Status lifecycle: `QUEUED | RUNNING | READY | FAILED | CANCELLED`, plus `stage`, `progressPercent`, `sharedWorkKey`, `queueJobId`, `errorCode`, `errorMessage`, `resultSummary`, and lifecycle timestamps.
-- Database-enforced per-user idempotency via `@@unique([userId, idempotencyKey])`.
-
-### 1,000 Clippers → 1 Shared Background Job
-
-1. **Per-User Idempotency:** If the same user retries `POST /api/media/jobs` with the same `idempotencyKey`, the existing `MediaProcessingJob` row is returned (`200 OK`) without double-counting quotas or double-enqueueing.
-2. **Instant Cache Reuse (Late Joiners):** If a `READY` job already exists for the same `sharedWorkKey` (e.g., all shared highlights are already published in MinIO + PostgreSQL CAS), the new user's `MediaProcessingJob` is created immediately in `READY` state (`reusedSharedWork: true`) with zero worker execution.
-3. **Concurrent Fan-In Deduplication:** For concurrent submissions sharing the same `sharedWorkKey`, `UniversalMediaApiService` atomically acquires a Redis `SET NX` enqueue lock (`${keyPrefix}enq:${sharedWorkKey}`) and enqueues to BullMQ with a deterministic `jobId = sharedWorkKey`. If 1,000 authorized clippers submit jobs for the same broadcast/VOD simultaneously:
-   - 1,000 isolated `MediaProcessingJob` rows are persisted (one per user).
-   - Strictly **1** BullMQ job is enqueued and processed.
-   - Strictly **1** FFmpeg acquisition/analysis/base-clip render runs.
-   - All 1,000 user rows transition together (`QUEUED → RUNNING → READY`) and serve verified highlights from the single shared cache.
+| Subsystem | Authoritative Responsibility | Failure Behavior |
+| --- | --- | --- |
+| **PostgreSQL (`SharedMediaWork` + `MediaProcessingJob` + `SharedCacheArtifact`)** | Durable source of truth for shared-work identity (`sharedWorkKey`), monotonic `generation`, active `ownerWorkerId`, `ownerToken`, `leaseExpiresAt`, crash-safe outbox `enqueuePayload`, rights grants, artifact CAS publication, and subscriber states. | Survives Redis key eviction/restarts, API crashes, and worker `SIGKILL` crashes. |
+| **Redis (`SharedWorkRedisLock`)** | Fast owner-tokenized lease (`acquire`, `renew`, `verifyOwner`, atomic Lua compare-and-delete `release`) + rate-limit/quota counters + BullMQ backing store. | If Redis deletes/loses a lock key mid-run, PostgreSQL `SharedMediaWork` STILL rejects duplicate worker claims (`ALREADY_OWNED_BY_ACTIVE_WORKER`) and the legitimate worker's next heartbeat re-establishes the Redis lock with its exact `ownerToken`. |
+| **BullMQ (`MEDIA_PROCESS_QUEUE = 'media-process'`)** | Asynchronous job delivery, bounded concurrency (`2`), exponential retry backoff, `UnrecoverableError` short-circuiting, and dead-letter queue routing. | Uses generation-scoped deterministic `jobId` (`${sharedWorkKey}__g${generation}`), deduplicating concurrent dispatches on the same generation while allowing clean crash recovery or post-cancel restarts on `generation + 1`. |
 
 ---
 
-## 5. Multi-Subscriber Cancellation Semantics
+## 4. Durable Shared-Work Lifecycle & PostgreSQL Lock Matrix
 
-`POST /api/media/jobs/:jobId/cancel`:
+Additive PostgreSQL model `SharedMediaWork` (`apps/api/prisma/migrations/20261118121804_shared_media_work_coordination/migration.sql`) tracks one authoritative row per `sharedWorkKey`:
 
-1. Verifies the job belongs to `req.user.sub` (`404` otherwise).
-2. Marks ONLY that user's `MediaProcessingJob` as `CANCELLED`.
-3. Counts remaining `QUEUED` or `RUNNING` subscribers for the same `sharedWorkKey`:
-   - **Remaining subscribers > 0:** Returns `{ status: 'CANCELLED', detachedFromSharedWork: true, sharedWorkStillActive: true }`. Shared background work continues undisturbed for remaining clippers.
-   - **Remaining subscribers === 0:** Sets a Redis cancellation marker (`${keyPrefix}cancel:${sharedWorkKey}`), clears the enqueue lock, and triggers the local worker `AbortController` if running in-process. The BullMQ worker polls subscriber count and aborts FFmpeg/storage work promptly to reclaim CPU and disk.
+```text
+PENDING_ENQUEUE ──(outbox dispatch)──▶ ENQUEUED ──(worker claim)──▶ RUNNING ──(commitWorkReady)──▶ READY
+      │                                   │                           │   │
+      │ (last subscriber cancels)         │ (last subscriber cancels) │   ├──(final failure)──▶ FAILED
+      ▼                                   ▼                           │   └──(all cancelled)──▶ CANCELLED
+  CANCELLED                           CANCELLED                       │
+                                                                      └──(worker SIGKILL / lease expired)──▶ generation++ → PENDING_ENQUEUE
+```
 
----
+### Contention-Free Parallel Attach + Linearizable Terminal Completion
 
-## 6. BullMQ Queue & Worker Lifecycle
+To support 1,000 concurrent clippers attaching without blocking worker heartbeats while preserving strict linearizability on terminal commits, `SharedWorkCoordinator` uses PostgreSQL row lock modes cleanly (zero lock upgrades → zero deadlocks):
 
-- **Queue:** `MEDIA_PROCESS_QUEUE = 'media-process'` (`apps/api/src/queue/queues.ts`), with deterministic `jobId`, bounded retries (`attempts: 3`), and exponential backoff (`2000ms`).
-- **Worker:** `createMediaWorker()` (`apps/api/src/queue/workers/media.worker.ts`), started in `apps/api/src/worker.ts` alongside `analysisWorker`, `renderWorker`, and `n8nWorker` with graceful `SIGTERM`/`SIGINT` shutdown.
-- **Concurrency:** Bounded (`concurrency: 2` by default) to protect CPU and memory under load.
-- **Execution-Time Rights Check:** Before starting media work, the worker re-validates server-authoritative rights in PostgreSQL (`resolveServerTrustedAuth`).
-- **Retry & Dead-Letter Policy:**
-  - Transient errors (Redis hiccups, MinIO network errors, worker crashes) retry up to `attempts` with exponential backoff, updating subscribers to `FAILED` and routing to `deadLetterQueue` only on final exhaustion.
-  - Non-retryable errors (`ACCESS_DENIED`, `RIGHTS_UNVERIFIED`, `DRM_RESTRICTED`, `UNSUPPORTED_ACQUISITION`, `SSRF_BLOCKED`, `INVALID_URL`, `QUOTA_EXCEEDED`, `REQUEST_CANCELLED`) immediately throw BullMQ `UnrecoverableError` without burning retries.
-
----
-
-## 7. Unified Live, VOD & Upload Execution Paths
-
-The single `media-process` worker cleanly routes three permitted execution paths without duplicating editing workflows:
-
-1. **Controlled Live Session (`live`)**: Streams real-time segments via `ContinuousLiveSessionService`, publishing each verified highlight to `resultSummary` as soon as it becomes ready so clippers polling `GET /api/media/jobs/:jobId/highlights` can download highlights while the stream is still `RUNNING`.
-2. **Controlled VOD (`vod`)**: Executes `UnifiedVodProcessingService` (`acquireOrReuseVodSource → analyzeOrReuseVodHighlights → generateOrReuseVodBaseClip`) backed by PostgreSQL CAS (`DurableArtifactPublisher`) and MinIO immutable objects.
-3. **Existing Owned Upload (`uploaded`)**: Downloads the authenticated user's uploaded `MediaAsset`, runs private `PRIVATE_USER` highlight detection + FFmpeg base clip generation, and publishes strictly under that user's private cache namespace without exposing anything to other users.
+| Operation | Row Lock on `SharedMediaWork` | Conflicts with Concurrent Clippers? | Conflicts with Worker Heartbeat (`UPDATE leaseExpiresAt`)? | Conflicts with Terminal Commit / Cancel? |
+| --- | --- | --- | --- | --- |
+| Steady-state subscriber attach (`ENQUEUED` / healthy `RUNNING` / `READY`) | `FOR KEY SHARE` | **No** (parallel fan-in) | **No** (`FOR NO KEY UPDATE` runs unblocked) | **Yes** (`FOR UPDATE`) |
+| Worker lease heartbeat (`renewWorkLease`) | `FOR NO KEY UPDATE` | **No** | Yes (single owner) | **Yes** |
+| Outbox mutation / restart (`PENDING_ENQUEUE`, `FAILED`, `CANCELLED`) | `FOR UPDATE` | Yes | Yes | Yes |
+| Worker terminal commit (`commitWorkReady`, `commitWorkFailed`) | `FOR UPDATE` | **Yes** (waits for in-flight attaches) | Yes | Yes |
+| User cancellation (`detachSubscriberAndEvaluateCancel`) | `FOR UPDATE` | **Yes** | Yes | Yes |
 
 ---
 
-## 8. Private Projects, Timelines & Custom Renders
+## 5. Owner Fencing & Atomic Redis Lock Operations
 
-- `POST /api/media/projects/from-source` creates a completely isolated `Project`, `EditTimeline`, and root `EditVersion` linked to the shared `MediaSource`. Two clippers working from the same VOD get distinct `projectId`, `timelineId`, and `rootVersionId` records.
-- `POST /api/media/projects/:projectId/edits` applies `auto`, `prompt`, `reference`, or `manual` edits, creating immutable child `EditVersion` snapshots and optional `PRIVATE_USER` MP4 renders isolated by `requesterUserId` and `customEditHash`.
-- Cross-user access to another user's project, highlights, or private renders is denied (`404` at API boundary, `ACCESS_DENIED` at storage/cache boundary).
+Implemented in `apps/api/src/media/api/shared-work-lock.ts` (`SharedWorkRedisLock`) and `apps/api/src/media/api/shared-work-coordinator.ts`:
 
----
-
-## 9. Live Revocation & Signed Download URLs
-
-Every call to `GET /api/media/jobs/:jobId/highlights` and `GET /api/media/projects/:projectId/highlights`:
-
-1. Re-queries PostgreSQL `DurableMediaRegistryService.resolveServerTrustedAuth()` live — never relying on stale cached authorization decisions.
-2. Immediately rejects revoked sources with `403 ACCESS_DENIED` (stopping new download URL issuance immediately).
-3. Verifies object existence/size/ETag integrity in MinIO before minting short-lived (`300s` default) signed URLs.
+- **Unique Per-Attempt Tokens:** Every worker claim generates `ownerToken = "${workerId}:g${generation}:${randomUUID()}"`.
+- **Atomic Lua Operations:**
+  - `acquire`: `SET key token PX ttl NX` (idempotent re-acquire for matching token).
+  - `renew`: extends TTL via `PEXPIRE` **only if `GET key == token`**.
+  - `verifyOwner`: returns exact owner match + remaining `PTTL`.
+  - `release`: **atomic compare-and-delete** (`if GET key == token then DEL key else return 0`). An old/stalled worker waking up after another worker acquired the lock receives `0` and **never deletes the newer worker's lock**.
+- **PostgreSQL Generation Fencing:** Every progress update (`publishProgressFenced`), live-highlight update, terminal commit (`commitWorkReady`, `commitWorkFailed`), and lease renewal (`renewWorkLease`) validates `(sharedWorkKey, generation, ownerToken, status = 'RUNNING')` in PostgreSQL. Any stale generation or wrong `ownerToken` is rejected immediately with `LEASE_EXPIRED`.
 
 ---
 
-## 10. Rate Limits, Quotas & SSRF Protection
+## 6. Crash-Safe Enqueue Outbox & Worker Recovery
 
-- **Route Rate Limits:** `MEDIA_RESOLVE_LIMITER` (60 requests/min/user) and `MEDIA_JOB_LIMITER` (30 requests/min/user), returning `429`.
-- **Job Quotas:** Configurable `maxActiveJobsPerUser` (default 5), `maxDailyJobSubmissionsPerUser` (default 50, backed by Redis `INCR` with 24h TTL), and `maxClipsPerUserPerDay` (default 20 for new uncached renders).
-- **SSRF & URL Validation:** `resolveMediaSourceFromUrl()` rejects non-HTTP(S) schemes (`file://`, `ftp://`, `javascript:`), loopback (`127.0.0.1`, `localhost`, `::1`), cloud metadata IPs (`169.254.169.254`), and private RFC1918 ranges with `403 SSRF_BLOCKED` / `400 INVALID_URL`.
+### API Crash / Transient Enqueue Failure Recovery
+
+1. `submitMediaJob` commits BOTH the user's `MediaProcessingJob` row AND `SharedMediaWork` (`status = 'PENDING_ENQUEUE'`, `enqueuePayload`, `nextEnqueueAt = now + 5s`) in ONE PostgreSQL transaction before touching BullMQ.
+2. Immediately after commit, `dispatchPendingEnqueue` enqueues `${sharedWorkKey}__g${generation}` onto BullMQ and marks `SharedMediaWork` `PENDING_ENQUEUE → ENQUEUED`.
+3. If the API process crashes between DB commit and BullMQ `queue.add`, or if BullMQ/Redis fails transiently:
+   - The job stays durably in PostgreSQL `PENDING_ENQUEUE` with exponential backoff (`nextEnqueueAt`).
+   - Bounded `reconcileStrandedWork(batchSize)` (run periodically by workers and on demand) re-dispatches due outbox rows cleanly without creating duplicate active workers, failing cleanly to `FAILED` only after `maxEnqueueAttempts` (default `5`).
+
+### Worker OS Crash (`SIGKILL` / OOM) Recovery
+
+1. Every active worker renews its PostgreSQL `leaseExpiresAt` and Redis lock every `leaseMs / 3` (default 10s on a 30s lease).
+2. If a worker OS process dies abruptly without running `finally`, its durable PostgreSQL `leaseExpiresAt` expires.
+3. `reconcileStrandedWork` detects `status = 'RUNNING' AND leaseExpiresAt <= now` under `FOR UPDATE`, increments `generation = generation + 1`, resets active subscribers to `QUEUED`, and enqueues `${sharedWorkKey}__g${nextGen}` for another healthy worker OS process to claim and complete (bounded by `maxRecoveryGenerations = 5`).
 
 ---
 
-## 11. Production Safety Gate for Controlled Test Fixtures
+## 7. Subscriber Terminal-State Correctness
 
-`apps/api/src/media/api/controlled-fixture-registry.ts`:
+Step 3B.9.1 eliminates Step 3B.9's double `updateMany` sweep completely:
 
-- `areControlledFixturesEnabled()` returns **`false` unconditionally whenever `process.env.NODE_ENV === 'production'`**, even if `ALLOW_CONTROLLED_MEDIA_FIXTURES=true` is accidentally configured.
-- Client requests may only reference an opaque alphanumeric `fixtureKey` (`^[a-zA-Z0-9_-]{3,80}$`) registered server-side in test/dev code — arbitrary client filesystem paths or path-traversal strings (`../`) are rejected at Zod validation.
+- **Zero Late-Subscriber Races:** Because steady-state attach takes `FOR KEY SHARE` and `commitWorkReady` takes `FOR UPDATE` on the exact same `SharedMediaWork` row, PostgreSQL strictly serializes every subscriber either **before** `commitWorkReady` (so `commitWorkReady`'s single `UPDATE` sees and marks it `READY`) or **after** `commitWorkReady` (so the attach transaction reads `work.status === 'READY'` and inserts the subscriber row directly in `READY` state with HTTP `200`).
+- **Monotonic State Transitions:**
+  - `CANCELLED → READY` is impossible (`commitWorkReady` only updates `status IN ('QUEUED', 'RUNNING')`).
+  - `READY → RUNNING` is impossible (`claimWorkExecution` and `publishProgressFenced` never touch `READY` rows).
+  - `READY → CANCELLED` is impossible (`detachSubscriberAndEvaluateCancel` returns `{ status: 'READY', alreadyCompleted: true }` without mutating completed jobs).
+- **Idempotent Read-Side Sync:** `getUserJobStatus` additionally calls `syncSubscriberFromWorkIfNeeded` as belt-and-suspenders without ever touching `CANCELLED` rows.
 
 ---
 
-## 12. Explicitly Deferred Items
+## 8. Cancellation Semantics & Race Handling
 
-The following remain intentionally out of scope for Step 3B.9:
+`cancelUserJob` executes inside `FOR UPDATE` on `SharedMediaWork`:
 
-- Arbitrary third-party scraping or unauthorized YouTube/Twitch/Kick downloaders or DRM/paywall bypasses.
-- Official third-party provider ingestion integrations/agreements (plug into the same `MediaSource` / `UniversalMediaApiService` capability interface when available).
-- Frontend web UI redesign for URL pasting, live highlight feeds, and job progress polling (existing upload workflow remains 100% intact).
-- Production database migrations, production deployments, billing, social-media auto-publishing, and Kubernetes/GPU autoscaling.
+- **Detaches Only Caller:** While any other `QUEUED`/`RUNNING` subscriber remains, `sharedWorkStillActive = true` and shared processing continues untouched.
+- **Cancel Before Enqueue / Before Start:** Marks `PENDING_ENQUEUE`/`ENQUEUED` `SharedMediaWork` as `CANCELLED`; reconciler and worker skip execution (`NO_ACTIVE_SUBSCRIBERS`).
+- **Cancel During Processing:** Propagates `AbortSignal` (`REQUEST_CANCELLED`) scoped strictly to `(sharedWorkKey, generation)` (`${sharedWorkKey}::g${generation}`) into FFmpeg and `ContinuousLiveSessionService`!
+- **Cancel During Retry Backoff:** BullMQ's next retry attempt calls `claimWorkExecution`, sees `0` active subscribers, and exits immediately without re-running work.
+- **Cancel Racing with New Subscriber:** When the worker handles `REQUEST_CANCELLED` inside `commitWorkCancelledIfNoSubscribers` (`FOR UPDATE`), it re-checks active subscribers; if a brand-new clipper arrived concurrently, it bumps `generation + 1` and immediately dispatches the fresh generation so the new clipper is never accidentally cancelled or stranded!
+- **New Subscriber After All Prior Users Cancelled:** Bumps `generation` (`CANCELLED → PENDING_ENQUEUE` at `generation + 1`) and dispatches `${sharedWorkKey}__g${generation + 1}` cleanly.
+
+---
+
+## 9. Long-Running Livestream & VOD Handling
+
+- **No Fixed 300s Lock Limit:** Continuous dual lease renewal (`leaseMs / 3`) keeps multi-hour livestreams and long VODs alive indefinitely while healthy.
+- **Session vs. Subscriber Separation:** One `SharedMediaWork` row represents one active broadcast/VOD processing session; 1,000 clippers create 1,000 independent `MediaProcessingJob` rows attached to that single `SharedMediaWork` row, and later create 1,000 isolated private `Project` / `EditTimeline` / `EditVersion` workflows.
+- **Live Streaming Highlights:** While a livestream `SharedMediaWork` is `RUNNING`, each extracted highlight is published via `publishProgressFenced`, allowing clippers polling `GET /api/media/jobs/:jobId/highlights` to download verified highlights before the stream ends.
+
+---
+
+## 10. Measured Deduplication & Hardening Results (Step 3B.9.1)
+
+Measured against real local PostgreSQL, Redis, MinIO, BullMQ, and FFmpeg (`apps/api/tests/integration/shared-job-hardening.test.ts`):
+
+- **1,000 Concurrent Clippers across 2 Independent API Instances (`apiA` + `apiB`, 1.5s short lease):**
+  - Total elapsed: **13.79s**
+  - BullMQ jobs enqueued: **1**
+  - Worker ownership claims: **1**
+  - FFmpeg VOD source imports: **1**
+  - Highlight analysis passes: **1**
+  - Base clip renders: **1**
+  - Subscribers reaching `READY`: **1,000 / 1,000** (0 stranded)
+  - Heap delta: **+18.3 MB**
+- **20 Concurrent Live Clippers across 2 API Instances:** **1** `ContinuousLiveSessionService` owner, **1** BullMQ job, **20 / 20** `READY`.
+- **Two Separate Worker OS Processes + Real `SIGKILL` Crash:** Worker PID #1 claimed `generation 1` and was abruptly terminated via `SIGKILL`; after lease expiry + bounded reconciliation, Worker PID #2 claimed `generation 2` and produced a verified MP4 passing `ffprobe`.
+
+---
+
+## 11. Security, Rights, Quotas & Production Safety Gate
+
+- Authenticated `userId` strictly from JWT middleware (`req.user.sub`); `.strict()` Zod contracts reject forged `rightsStatus`, `canonicalSourceId`, `ownerUserId`, `storageKey`, `workerId`, and path-traversal `fixtureKey`.
+- Live PostgreSQL rights & revocation re-checked before worker execution and on every highlight/project download; short-lived (`300s`) signed download URLs with zero raw storage key exposure.
+- Rate limits (`MEDIA_RESOLVE_LIMITER`, `MEDIA_JOB_LIMITER`), per-user active-job/daily quotas, and SSRF protection remain enforced.
+- Controlled test fixtures (`apps/api/src/media/api/controlled-fixture-registry.ts`) remain strictly disabled whenever `NODE_ENV === 'production'`.
+
+---
+
+## 12. Remaining Limitations & Explicitly Deferred Items
+
+- **Reconciliation Latency on Abrupt Worker `SIGKILL`:** Recovery occurs after `leaseExpiresAt` elapses plus the worker reconciliation interval (default 30s lease + 15s reconciler tick; configurable per deployment).
+- **Single-Region PostgreSQL Bottleneck Beyond Beta Scale:** Suitable and fast for our target initial 100 free beta users and tested up to 1,000 concurrent clippers; extreme >10,000/s fan-in beyond beta would add read-replica status polling or batched subscriber fan-out.
+- **Cross-Process Immediate Cancel Latency:** Local in-process `AbortController` cancels same-process workers immediately; remote worker OS processes abort on their next heartbeat tick (`leaseMs / 3`, default ~10s, or ~500ms on short leases).
+- **Explicitly Deferred (Not Part of Step 3B.9.1):** Third-party YouTube/Twitch/Kick permitted acquisition integrations, frontend UI wiring for URL input/live highlight feeds, production migrations/deployments, billing, social-media publishing, and GPU/Kubernetes infrastructure.

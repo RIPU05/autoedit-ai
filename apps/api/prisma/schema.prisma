@@ -556,6 +556,7 @@ model MediaSource {
   artifacts              SharedCacheArtifact[]
   projects               Project[]                      @relation("ProjectMediaSource")
   mediaJobs              MediaProcessingJob[]           @relation("SourceMediaJobs")
+  sharedWorks            SharedMediaWork[]              @relation("SourceSharedWork")
 
   @@index([provider, channelId])
   @@index([provider, broadcastId])
@@ -658,31 +659,73 @@ enum MediaJobStatusEnum {
   CANCELLED
 }
 
-model MediaProcessingJob {
-  id              String              @id @default(cuid())
-  userId          String
-  mediaSourceId   String
-  projectId       String?
-  idempotencyKey  String
-  sharedWorkKey   String
-  sourceType      MediaSourceTypeEnum
-  status          MediaJobStatusEnum  @default(QUEUED)
-  stage           String              @default("queued")
-  progressPercent Int                 @default(0)
-  bullJobId       String?
-  options         Json?
-  resultSummary   Json?
-  errorCode       String?
-  errorMessage    String?
-  startedAt       DateTime?
-  completedAt     DateTime?
-  cancelledAt     DateTime?
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
+enum SharedWorkStatusEnum {
+  PENDING_ENQUEUE
+  ENQUEUED
+  RUNNING
+  READY
+  FAILED
+  CANCELLED
+}
 
-  user            User                @relation("UserMediaJobs", fields: [userId], references: [id], onDelete: Cascade)
-  mediaSource     MediaSource         @relation("SourceMediaJobs", fields: [mediaSourceId], references: [id], onDelete: Cascade)
-  project         Project?            @relation("ProjectMediaJobs", fields: [projectId], references: [id], onDelete: SetNull)
+model SharedMediaWork {
+  id                String               @id @default(cuid())
+  sharedWorkKey     String               @unique
+  mediaSourceId     String
+  canonicalSourceId String
+  sourceType        MediaSourceTypeEnum
+  status            SharedWorkStatusEnum @default(PENDING_ENQUEUE)
+  generation        Int                  @default(1)
+  ownerWorkerId     String?
+  ownerToken        String?
+  leaseExpiresAt    DateTime?
+  enqueuePayload    Json?
+  bullJobId         String?
+  enqueueAttempts   Int                  @default(0)
+  nextEnqueueAt     DateTime?
+  stage             String               @default("queued")
+  progressPercent   Int                  @default(0)
+  resultSummary     Json?
+  errorCode         String?
+  errorMessage      String?
+  startedAt         DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  mediaSource       MediaSource          @relation("SourceSharedWork", fields: [mediaSourceId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextEnqueueAt])
+  @@index([status, leaseExpiresAt])
+  @@index([mediaSourceId, status])
+}
+
+model MediaProcessingJob {
+  id                 String              @id @default(cuid())
+  userId             String
+  mediaSourceId      String
+  projectId          String?
+  idempotencyKey     String
+  sharedWorkKey      String
+  attachedGeneration Int?
+  sourceType         MediaSourceTypeEnum
+  status             MediaJobStatusEnum  @default(QUEUED)
+  stage              String              @default("queued")
+  progressPercent    Int                 @default(0)
+  bullJobId          String?
+  options            Json?
+  resultSummary      Json?
+  errorCode          String?
+  errorMessage       String?
+  startedAt          DateTime?
+  completedAt        DateTime?
+  cancelledAt        DateTime?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  user               User                @relation("UserMediaJobs", fields: [userId], references: [id], onDelete: Cascade)
+  mediaSource        MediaSource         @relation("SourceMediaJobs", fields: [mediaSourceId], references: [id], onDelete: Cascade)
+  project            Project?            @relation("ProjectMediaJobs", fields: [projectId], references: [id], onDelete: SetNull)
 
   @@unique([userId, idempotencyKey])
   @@index([userId, createdAt])

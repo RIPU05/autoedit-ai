@@ -34,7 +34,10 @@ const RAW_LOCAL_DB_URL =
   process.env.DATABASE_URL && !process.env.DATABASE_URL.includes('autoedit_test')
     ? process.env.DATABASE_URL
     : 'postgresql://autoedit:autoedit_local_pass@127.0.0.1:5432/autoedit_local?schema=public';
-const LOCAL_DB_URL = RAW_LOCAL_DB_URL.replace('@localhost:', '@127.0.0.1:');
+const BASE_LOCAL_DB_URL = RAW_LOCAL_DB_URL.replace('@localhost:', '@127.0.0.1:');
+const LOCAL_DB_URL = BASE_LOCAL_DB_URL.includes('pool_timeout=')
+  ? BASE_LOCAL_DB_URL
+  : `${BASE_LOCAL_DB_URL}${BASE_LOCAL_DB_URL.includes('?') ? '&' : '?'}connection_limit=8&pool_timeout=30`;
 
 const MINIO_ENDPOINT = process.env.S3_ENDPOINT || 'http://127.0.0.1:9002';
 const MINIO_BUCKET =
@@ -65,6 +68,9 @@ function assertNoRawStorageLeak(payload: unknown): void {
 
 describe('Step 3B.9: Universal Media API, Authenticated Jobs, Real BullMQ Worker & Private Projects', () => {
   const db = new PrismaClient({
+    datasources: { db: { url: LOCAL_DB_URL } },
+  });
+  const dbWorker = new PrismaClient({
     datasources: { db: { url: LOCAL_DB_URL } },
   });
 
@@ -219,13 +225,15 @@ describe('Step 3B.9: Universal Media API, Authenticated Jobs, Real BullMQ Worker
         downloadUrlTtlSec: 300,
         maxClipsPerUserPerDay: 100,
       },
-      enqueueJob: async (payload) => {
+      enqueueJob: async (payload, opts) => {
         totalEnqueuedCount++;
         enqueuedByWorkKey.set(
           payload.sharedWorkKey,
           (enqueuedByWorkKey.get(payload.sharedWorkKey) ?? 0) + 1,
         );
-        const safeJobId = payload.sharedWorkKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const safeJobId =
+          opts?.jobId ??
+          `${payload.sharedWorkKey.replace(/[^a-zA-Z0-9_-]/g, '_')}__g${payload.generation ?? 1}`;
         const job = await testQueue.add('process-media', payload, {
           jobId: safeJobId,
           attempts: 3,
@@ -237,13 +245,14 @@ describe('Step 3B.9: Universal Media API, Authenticated Jobs, Real BullMQ Worker
 
     workerHandle = createMediaWorker({
       queueName,
-      db,
+      db: dbWorker,
       storage,
       redis: redis as any,
       bullConnection,
       workRootDir: workRootWorker,
       keyPrefix,
       concurrency: 2,
+      reconcileIntervalMs: 0,
     });
     await workerHandle.worker.waitUntilReady();
 
@@ -316,7 +325,7 @@ describe('Step 3B.9: Universal Media API, Authenticated Jobs, Real BullMQ Worker
     await fs.rm(workRootApi, { recursive: true, force: true }).catch(() => {});
     await fs.rm(workRootWorker, { recursive: true, force: true }).catch(() => {});
     await fs.rm(workRootProbe, { recursive: true, force: true }).catch(() => {});
-    await db.$disconnect();
+    await Promise.allSettled([dbWorker.$disconnect(), db.$disconnect()]);
   }, 60_000);
 
   it('1–6 & 20 & 22: rejects unauthenticated calls, resolves YouTube/Twitch/Kick VOD & live channel URLs truthfully, blocks SSRF & forged fields, and rejects unsupported job submission without enqueueing', async () => {
@@ -903,8 +912,8 @@ describe('Step 3B.9: Universal Media API, Authenticated Jobs, Real BullMQ Worker
     );
     submittedResults.push(...httpBatch);
 
-    for (let start = 10; start < 1000; start += 50) {
-      const slice = clippers.slice(start, start + 50);
+    for (let start = 10; start < 1000; start += 20) {
+      const slice = clippers.slice(start, start + 20);
       const batchRes = await Promise.all(
         slice.map((c, idx) =>
           service.submitMediaJob(c.id, {

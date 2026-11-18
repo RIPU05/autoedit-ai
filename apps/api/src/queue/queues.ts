@@ -57,16 +57,21 @@ export const enqueueN8n = (data: N8nJobData) =>
 
 /**
  * Enqueues shared media ingestion/analysis/clip generation onto BullMQ using a
- * deterministic jobId derived from sharedWorkKey so concurrent clippers deduplicate
- * cleanly onto one background job.
+ * generation-scoped deterministic jobId (`${sharedWorkKey}__g${generation}`) so
+ * concurrent clippers on the same generation deduplicate cleanly onto one job,
+ * while crash recovery or post-cancel restarts get a fresh generation jobId.
  */
 export const enqueueMediaProcess = (
   data: MediaProcessJobData,
   opts?: { jobId?: string; attempts?: number; backoffDelayMs?: number },
-) =>
-  mediaProcessQueue.add('process-media', data, {
+) => {
+  const safeKey = data.sharedWorkKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const defaultJobId =
+    data.generation !== undefined ? `${safeKey}__g${data.generation}` : `${safeKey}__g1`;
+  return mediaProcessQueue.add('process-media', data, {
     ...defaultJobOpts,
-    jobId: opts?.jobId ?? data.sharedWorkKey.replace(/[^a-zA-Z0-9_-]/g, '_'),
+    jobId: opts?.jobId ?? defaultJobId,
     attempts: opts?.attempts ?? 3,
     backoff: { type: 'exponential' as const, delay: opts?.backoffDelayMs ?? 1500 },
   });
+};

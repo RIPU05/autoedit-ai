@@ -41,6 +41,11 @@ import {
   areControlledFixturesEnabled,
   getControlledTestFixture,
 } from './controlled-fixture-registry.js';
+import {
+  SharedWorkCoordinator,
+  buildGenerationBullJobId,
+  type ReconcileStrandedResult,
+} from './shared-work-coordinator.js';
 import type { CacheArtifactDescriptor } from '../shared-cache.js';
 
 export interface MediaApiQuotaConfig {
@@ -68,18 +73,58 @@ export interface UniversalMediaServiceDeps {
   workRootDir?: string;
   keyPrefix?: string;
   quotas?: Partial<MediaApiQuotaConfig>;
-  enqueueJob?: (payload: MediaProcessJobPayload) => Promise<{ id?: string }>;
+  /** Optional durable worker lease duration in ms (defaults to 30_000). */
+  leaseMs?: number;
+  /** Optional max outbox enqueue retry attempts (defaults to 5). */
+  maxEnqueueAttempts?: number;
+  /** Optional max worker crash recovery generations (defaults to 5). */
+  maxRecoveryGenerations?: number;
+  /** Injectable clock for deterministic lease/recovery tests. */
+  now?: () => Date;
+  /** Optional test hook: if true, persists DB outbox row and skips immediate enqueue (simulates API crash before enqueue!). */
+  skipImmediateEnqueue?: boolean;
+  enqueueJob?: (
+    payload: MediaProcessJobPayload,
+    opts?: { jobId?: string },
+  ) => Promise<{ id?: string }>;
 }
 
-/** Active shared-work AbortControllers inside this worker process (for immediate cancellation when last subscriber cancels). */
+/**
+ * Active shared-work AbortControllers inside this process, strictly scoped by
+ * `(sharedWorkKey, generation)` so cancelling generation N NEVER aborts a brand-new generation N+1!
+ */
 const localSharedWorkAborts = new Map<string, AbortController>();
 
-export function registerLocalSharedWorkAbort(sharedWorkKey: string, ctrl: AbortController): void {
-  localSharedWorkAborts.set(sharedWorkKey, ctrl);
+function abortMapKey(sharedWorkKey: string, generation: number): string {
+  return `${sharedWorkKey}::g${generation}`;
 }
 
-export function unregisterLocalSharedWorkAbort(sharedWorkKey: string): void {
-  localSharedWorkAborts.delete(sharedWorkKey);
+export function registerLocalSharedWorkAbort(
+  sharedWorkKey: string,
+  generation: number,
+  ctrl: AbortController,
+): void {
+  localSharedWorkAborts.set(abortMapKey(sharedWorkKey, generation), ctrl);
+}
+
+export function unregisterLocalSharedWorkAbort(
+  sharedWorkKey: string,
+  generation: number,
+): void {
+  localSharedWorkAborts.delete(abortMapKey(sharedWorkKey, generation));
+}
+
+export function abortLocalSharedWorkGeneration(
+  sharedWorkKey: string,
+  generation: number,
+  reason = 'All subscribers cancelled.',
+): boolean {
+  const ctrl = localSharedWorkAborts.get(abortMapKey(sharedWorkKey, generation));
+  if (ctrl && !ctrl.signal.aborted) {
+    ctrl.abort(new MediaSourceError({ code: 'REQUEST_CANCELLED', message: reason }));
+    return true;
+  }
+  return false;
 }
 
 function fromPrismaProvider(p: MediaSourceProviderEnum): MediaSourceProvider {
@@ -157,10 +202,15 @@ export class UniversalMediaApiService {
   readonly registry: DurableMediaRegistryService;
   readonly publisher: DurableArtifactPublisher;
   readonly coordinator: SharedIngestionCoordinator;
+  readonly sharedWork: SharedWorkCoordinator;
   readonly vodService: UnifiedVodProcessingService;
   readonly quotas: MediaApiQuotaConfig;
   readonly keyPrefix: string;
-  private readonly enqueueFn: (payload: MediaProcessJobPayload) => Promise<{ id?: string }>;
+  private readonly skipImmediateEnqueue: boolean;
+  private readonly enqueueFn: (
+    payload: MediaProcessJobPayload,
+    opts: { jobId: string },
+  ) => Promise<{ id?: string }>;
   private readonly localDailySubmissions = new Map<string, number>();
 
   constructor(deps: UniversalMediaServiceDeps = {}) {
@@ -169,6 +219,7 @@ export class UniversalMediaApiService {
     this.redis = deps.redis ?? (defaultRedis as unknown as RedisLikeClient);
     this.keyPrefix = deps.keyPrefix ?? 'autoedit:media:api:';
     this.quotas = { ...DEFAULT_MEDIA_API_QUOTAS, ...(deps.quotas ?? {}) };
+    this.skipImmediateEnqueue = Boolean(deps.skipImmediateEnqueue);
     const workRootDir = deps.workRootDir ?? path.resolve(process.cwd(), 'tmp', 'media-api-work');
 
     const store = new RedisCoordinationStore(this.redis, {
@@ -176,6 +227,13 @@ export class UniversalMediaApiService {
       recordTtlMs: 24 * 60 * 60 * 1000,
     });
     this.coordinator = new SharedIngestionCoordinator(store);
+    this.sharedWork = new SharedWorkCoordinator(this.db, this.redis, {
+      keyPrefix: this.keyPrefix,
+      defaultLeaseMs: deps.leaseMs ?? 30_000,
+      maxEnqueueAttempts: deps.maxEnqueueAttempts ?? 5,
+      maxRecoveryGenerations: deps.maxRecoveryGenerations ?? 5,
+      now: deps.now,
+    });
     this.registry = new DurableMediaRegistryService(this.db);
     this.publisher = new DurableArtifactPublisher(
       this.db,
@@ -196,17 +254,22 @@ export class UniversalMediaApiService {
         quotaPrefix: `${this.keyPrefix}quota:`,
       },
     );
-    this.enqueueFn =
-      deps.enqueueJob ??
-      ((payload) => enqueueMediaProcess(payload, { jobId: payload.sharedWorkKey }));
+    this.enqueueFn = deps.enqueueJob
+      ? (payload, opts) => deps.enqueueJob!(payload, opts)
+      : (payload, opts) =>
+          enqueueMediaProcess(payload, {
+            jobId: opts.jobId || buildGenerationBullJobId(payload.sharedWorkKey, payload.generation ?? 1),
+          });
   }
 
-  private cancelRedisKey(sharedWorkKey: string): string {
-    return `${this.keyPrefix}cancel:${sharedWorkKey}`;
-  }
-
-  private enqueueLockRedisKey(sharedWorkKey: string): string {
-    return `${this.keyPrefix}enq:${sharedWorkKey}`;
+  /**
+   * Bounded crash reconciliation for stranded outbox PENDING_ENQUEUE rows and expired RUNNING leases.
+   */
+  async reconcileStrandedWork(batchSize = 20): Promise<ReconcileStrandedResult> {
+    return this.sharedWork.reconcileStrandedWork({
+      enqueueFn: this.enqueueFn,
+      batchSize,
+    });
   }
 
   /**
@@ -582,160 +645,52 @@ export class UniversalMediaApiService {
       28,
     )}`;
 
-    // 4. Check if another job on the EXACT same sharedWorkKey is already READY (late joiner instant reuse!)
-    const existingReady =
-      scope === 'SHARED_PERMITTED'
-        ? await this.db.mediaProcessingJob.findFirst({
-            where: { sharedWorkKey, status: 'READY' },
-            orderBy: { completedAt: 'desc' },
-          })
-        : null;
-
-    let createdJob;
-    try {
-      createdJob = await this.db.mediaProcessingJob.create({
-        data: {
-          userId,
-          mediaSourceId: resolved.mediaSourceId,
-          projectId: resolved.uploadProjectId ?? null,
-          idempotencyKey: req.idempotencyKey,
-          sharedWorkKey,
-          sourceType: toPrismaSourceType(resolved.response.sourceType),
-          status: existingReady ? 'READY' : 'QUEUED',
-          stage: existingReady ? 'ready_cached' : 'queued',
-          progressPercent: existingReady ? 100 : 0,
-          options: options as Prisma.InputJsonValue,
-          resultSummary: existingReady
-            ? ({
-                ...((existingReady.resultSummary as Record<string, unknown> | null) ?? {}),
-                deduplicatedSharedWork: true,
-              } as Prisma.InputJsonValue)
-            : ({ deduplicatedSharedWork: false } as Prisma.InputJsonValue),
-          completedAt: existingReady ? new Date() : null,
-        },
-        include: { mediaSource: { select: { provider: true } } },
-      });
-    } catch (err: any) {
-      // Concurrent duplicate POST with same (userId, idempotencyKey) -> return existing row cleanly!
-      if (err?.code === 'P2002') {
-        const winner = await this.db.mediaProcessingJob.findUniqueOrThrow({
-          where: { userId_idempotencyKey: { userId, idempotencyKey: req.idempotencyKey } },
-          include: { mediaSource: { select: { provider: true } } },
-        });
-        return {
-          job: this.formatJobResponse(winner, true),
-          httpStatus: 200,
-          sharedWorkKey: winner.sharedWorkKey,
-        };
-      }
-      throw err;
-    }
-
-    if (existingReady) {
-      return {
-        job: this.formatJobResponse(createdJob, true),
-        httpStatus: 200,
-        sharedWorkKey,
-      };
-    }
-
-    // 5. Deduplicate BullMQ enqueue atomically via Redis SET NX so 1,000 clippers enqueue strictly ONE shared worker job!
-    let shouldEnqueue = true;
-    try {
-      const lockRes = await this.redis.eval(
-        `local k = KEYS[1]; if redis.call('EXISTS', k) == 1 then return 0 end; redis.call('SET', k, ARGV[1], 'PX', tonumber(ARGV[2])); return 1`,
-        1,
-        this.enqueueLockRedisKey(sharedWorkKey),
-        createdJob.id,
-        300_000,
-      );
-      shouldEnqueue = Number(lockRes) === 1;
-    } catch {
-      // If Redis is momentarily unavailable, fall back to BullMQ's own deterministic jobId deduplication
-      shouldEnqueue = true;
-    }
-
-    // Re-check for a READY job after acquiring/checking the enqueue lock to close the
-    // completion race window when 1,000 clippers arrive right as the worker finishes!
-    if (scope === 'SHARED_PERMITTED') {
-      const lateReady = await this.db.mediaProcessingJob.findFirst({
-        where: { sharedWorkKey, status: 'READY' },
-        orderBy: { completedAt: 'desc' },
-      });
-      if (lateReady) {
-        if (shouldEnqueue) {
-          await this.redis
-            .eval(`return redis.call('DEL', KEYS[1])`, 1, this.enqueueLockRedisKey(sharedWorkKey))
-            .catch(() => {});
-        }
-        const promoted = await this.db.mediaProcessingJob.update({
-          where: { id: createdJob.id },
-          data: {
-            status: 'READY',
-            stage: 'ready_cached',
-            progressPercent: 100,
-            completedAt: new Date(),
-            resultSummary: {
-              ...((lateReady.resultSummary as Record<string, unknown> | null) ?? {}),
-              deduplicatedSharedWork: true,
-            } as Prisma.InputJsonValue,
-          },
-          include: { mediaSource: { select: { provider: true } } },
-        });
-        return {
-          job: this.formatJobResponse(promoted, true),
-          httpStatus: 200,
-          sharedWorkKey,
-        };
-      }
-    }
-
-    // Clear any stale cancel flag since an active subscriber just joined
-    await this.redis
-      .eval(`return redis.call('DEL', KEYS[1])`, 1, this.cancelRedisKey(sharedWorkKey))
-      .catch(() => {});
-
-    if (shouldEnqueue) {
-      const payload: MediaProcessJobPayload = {
+    // 4. Atomically attach subscriber & reserve/reuse SharedMediaWork under ONE PostgreSQL row lock
+    //    (eliminates late-subscriber races, fixed 300s Redis TTL expiry, and crash-before-enqueue gaps!)
+    const attached = await this.sharedWork.attachSubscriberAndReserveWork({
+      userId,
+      mediaSourceId: resolved.mediaSourceId,
+      canonicalSourceId: resolved.canonicalSourceId,
+      projectId: resolved.uploadProjectId ?? null,
+      idempotencyKey: req.idempotencyKey,
+      sharedWorkKey,
+      sourceType: toPrismaSourceType(resolved.response.sourceType),
+      options,
+      allowSharedReuse: scope === 'SHARED_PERMITTED',
+      baseEnqueuePayload: {
         sharedWorkKey,
         mediaSourceId: resolved.mediaSourceId,
         canonicalSourceId: resolved.canonicalSourceId,
         sourceType: resolved.response.sourceType,
         initiatedByUserId: userId,
-        userJobId: createdJob.id,
         controlledFixtureKey: resolved.controlledFixtureKey,
         uploadProjectId: resolved.uploadProjectId,
         options,
-      };
-      const bullJob = await this.enqueueFn(payload);
-      if (bullJob?.id) {
-        await this.db.mediaProcessingJob
-          .update({
-            where: { id: createdJob.id },
-            data: { bullJobId: String(bullJob.id) },
-          })
-          .catch(() => {});
-      }
-    } else {
-      await this.db.mediaProcessingJob
-        .updateMany({
-          where: { id: createdJob.id, status: 'QUEUED' },
-          data: {
-            resultSummary: { deduplicatedSharedWork: true } as Prisma.InputJsonValue,
-          },
-        })
-        .catch(() => {});
+      },
+    });
+
+    // 5. Crash-safe outbox dispatch: if this call opened/restarted PENDING_ENQUEUE, dispatch to BullMQ
+    //    using generation-scoped jobId. If enqueue fails or API crashes before enqueue, PostgreSQL
+    //    retains PENDING_ENQUEUE + payload for bounded reconciliation recovery!
+    if (attached.needsEnqueue && attached.enqueuePayload && !this.skipImmediateEnqueue) {
+      await this.sharedWork.dispatchPendingEnqueue({
+        sharedWorkKey,
+        generation: attached.work.generation,
+        payload: attached.enqueuePayload,
+        enqueueFn: this.enqueueFn,
+      });
     }
 
     return {
-      job: this.formatJobResponse(createdJob, !shouldEnqueue),
-      httpStatus: 202,
+      job: this.formatJobResponse(attached.job, attached.deduplicatedSharedWork),
+      httpStatus: attached.httpStatus,
       sharedWorkKey,
     };
   }
 
   /**
    * Returns job status strictly to the owning user (returns 404 to other users — no enumeration).
+   * Performs idempotent read-side sync against durable SharedMediaWork if needed.
    */
   async getUserJobStatus(userId: string, jobId: string): Promise<MediaJobResponse> {
     const job = await this.db.mediaProcessingJob.findFirst({
@@ -749,73 +704,46 @@ export class UniversalMediaApiService {
         statusCode: 404,
       });
     }
-    return this.formatJobResponse(job);
+    const synced = await this.sharedWork.syncSubscriberFromWorkIfNeeded(job);
+    return this.formatJobResponse(synced);
   }
 
   /**
-   * Cancels ONLY the authenticated user's job.
-   * Leaves shared source processing running if any other clipper is still attached;
-   * signals shared worker abort ONLY when zero active subscribers remain!
+   * Cancels ONLY the authenticated user's job, serialized under SharedMediaWork FOR UPDATE:
+   * - Never regresses READY -> CANCELLED or FAILED -> CANCELLED.
+   * - Leaves shared processing running while any other eligible subscriber remains.
+   * - When the final subscriber detaches, cancels pending work or aborts strictly the
+   *   current generation's worker so concurrent new subscribers on generation+1 are unaffected.
    */
   async cancelUserJob(
     userId: string,
     jobId: string,
   ): Promise<{
     jobId: string;
-    status: 'CANCELLED';
+    status: 'CANCELLED' | 'READY' | 'FAILED';
+    alreadyCompleted?: boolean;
     detachedFromSharedWork: boolean;
     sharedWorkStillActive: boolean;
   }> {
-    const job = await this.db.mediaProcessingJob.findFirst({
-      where: { id: jobId, userId },
-    });
-    if (!job) {
-      throw new MediaSourceError({
-        code: 'SOURCE_UNAVAILABLE',
-        message: 'Media job not found.',
-        statusCode: 404,
-      });
-    }
-
-    if (job.status !== 'CANCELLED' && job.status !== 'READY' && job.status !== 'FAILED') {
-      await this.db.mediaProcessingJob.update({
-        where: { id: job.id },
-        data: {
-          status: 'CANCELLED',
-          stage: 'cancelled',
-          cancelledAt: new Date(),
-        },
-      });
-    }
-
-    const remainingActive = await this.db.mediaProcessingJob.count({
-      where: {
-        sharedWorkKey: job.sharedWorkKey,
-        status: { in: ['QUEUED', 'RUNNING'] },
-      },
+    const res = await this.sharedWork.detachSubscriberAndEvaluateCancel({
+      userId,
+      jobId,
     });
 
-    if (remainingActive === 0) {
-      // Last active subscriber cancelled -> signal shared worker to stop and free CPU/disk!
-      await this.redis
-        .eval(
-          `redis.call('SET', KEYS[1], '1', 'PX', 300000); redis.call('DEL', KEYS[2]); return 1`,
-          2,
-          this.cancelRedisKey(job.sharedWorkKey),
-          this.enqueueLockRedisKey(job.sharedWorkKey),
-        )
-        .catch(() => {});
-      const localCtrl = localSharedWorkAborts.get(job.sharedWorkKey);
-      if (localCtrl && !localCtrl.signal.aborted) {
-        localCtrl.abort(new MediaSourceError({ code: 'REQUEST_CANCELLED', message: 'All subscribers cancelled.' }));
-      }
+    if (res.generationToAbort !== undefined) {
+      abortLocalSharedWorkGeneration(
+        res.sharedWorkKey,
+        res.generationToAbort,
+        'All subscribers cancelled.',
+      );
     }
 
     return {
-      jobId: job.id,
-      status: 'CANCELLED',
-      detachedFromSharedWork: true,
-      sharedWorkStillActive: remainingActive > 0,
+      jobId: res.jobId,
+      status: res.status,
+      ...(res.alreadyCompleted !== undefined ? { alreadyCompleted: res.alreadyCompleted } : {}),
+      detachedFromSharedWork: res.detachedFromSharedWork,
+      sharedWorkStillActive: res.sharedWorkStillActive,
     };
   }
 

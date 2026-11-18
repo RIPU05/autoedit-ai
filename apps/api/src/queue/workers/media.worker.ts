@@ -2,13 +2,14 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { Worker, UnrecoverableError, type Job } from 'bullmq';
 import type { Prisma, PrismaClient } from '@prisma/client';
-import type { CacheableSourceId } from '@autoedit/contracts';
+import type { CacheableSourceId, MediaProcessJobPayload } from '@autoedit/contracts';
 import { bullConnection as defaultBullConnection, connection as defaultRedis } from '../../lib/redis.js';
 import { prisma as defaultPrisma } from '../../lib/prisma.js';
 import { getStorageProvider } from '../../storage/index.js';
 import type { MediaStorageProvider } from '../../storage/storage.types.js';
 import {
   MEDIA_PROCESS_QUEUE,
+  enqueueMediaProcess,
   moveToDeadLetter,
   type MediaProcessJobData,
 } from '../queues.js';
@@ -22,6 +23,10 @@ import { UnifiedVodProcessingService } from '../../media/vod/unified-vod-pipelin
 import { ControlledVodAcquisitionAdapter } from '../../media/vod/controlled-vod.adapter.js';
 import { ContinuousLiveSessionService } from '../../media/live/continuous-live-session.js';
 import { getControlledTestFixture } from '../../media/api/controlled-fixture-registry.js';
+import {
+  SharedWorkCoordinator,
+  buildGenerationBullJobId,
+} from '../../media/api/shared-work-coordinator.js';
 import {
   registerLocalSharedWorkAbort,
   unregisterLocalSharedWorkAbort,
@@ -39,6 +44,7 @@ const NON_RETRYABLE_CODES = new Set([
   'SSRF_BLOCKED',
   'PRIVATE_NETWORK_BLOCKED',
   'REQUEST_CANCELLED',
+  'LEASE_EXPIRED',
 ]);
 
 async function streamToFile(stream: NodeJS.ReadableStream, outPath: string): Promise<void> {
@@ -64,18 +70,41 @@ export interface CreateMediaWorkerOptions {
   workRootDir?: string;
   keyPrefix?: string;
   concurrency?: number;
+  /** Durable PostgreSQL & Redis lease duration in ms; renewed continuously every leaseMs/3. Defaults to 30_000. */
+  leaseMs?: number;
+  /** Periodic stranded-work reconciliation interval in ms (0 disables timer). Defaults to 15_000. */
+  reconcileIntervalMs?: number;
+  /** Optional custom enqueue function for crash-recovery re-dispatch (defaults to enqueueMediaProcess). */
+  enqueueRecoveryJob?: (
+    payload: MediaProcessJobPayload,
+    opts: { jobId: string },
+  ) => Promise<{ id?: string }>;
+  /** Injectable clock for deterministic lease/recovery tests. */
+  now?: () => Date;
+  /** Optional worker identity prefix (useful in multi-worker tests). */
+  workerIdPrefix?: string;
+  /** Optional lifecycle hook invoked right after durable PostgreSQL ownership claim. */
+  onClaimed?: (ctx: {
+    sharedWorkKey: string;
+    generation: number;
+    ownerToken: string;
+    workerId: string;
+  }) => Promise<void> | void;
 }
 
 /**
  * Factory creating a real BullMQ Worker for universal media jobs (controlled VODs,
  * existing private user uploads, and controlled continuous livestreams).
  *
- * - Bounded concurrency (`2` by default, suitable for 100 initial beta users).
- * - Fan-out updates ALL non-cancelled MediaProcessingJob rows referencing `sharedWorkKey`.
- * - Non-retryable rights/validation/unsupported errors fail immediately via UnrecoverableError
- *   instead of retrying endlessly.
- * - Transient crashes retry with exponential backoff and park in dead-letter queue on exhaustion.
- * - Respects subscriber cancellation: aborts ONLY when zero active subscribers remain!
+ * Step 3B.9.1 Reliability & Fencing Guarantees:
+ * - Durable PostgreSQL ownership claim (`SharedMediaWork` `FOR UPDATE` + monotonic `generation`
+ *   + unique `ownerToken` + `leaseExpiresAt`) prevents duplicate execution even if Redis loses keys.
+ * - Continuous dual heartbeat (PostgreSQL + Redis) keeps long VODs & multi-hour livestreams
+ *   alive past any fixed TTL, and immediately aborts FFmpeg if ownership is fenced out.
+ * - Atomic Lua compare-and-delete lock release in `finally` NEVER deletes a newer owner's lock.
+ * - Single-transaction `commitWorkReady` under `SharedMediaWork FOR UPDATE` eliminates late-subscriber
+ *   races and guarantees `CANCELLED -> READY` and `READY -> RUNNING` regressions never occur.
+ * - Bounded background reconciler recovers stranded `PENDING_ENQUEUE` and expired `RUNNING` leases.
  */
 export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
   const queueName = opts.queueName ?? MEDIA_PROCESS_QUEUE;
@@ -86,93 +115,150 @@ export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
   const keyPrefix = opts.keyPrefix ?? 'autoedit:media:api:';
   const workRootDir = opts.workRootDir ?? path.resolve(process.cwd(), 'tmp', 'media-worker');
   const concurrency = opts.concurrency ?? 2;
+  const leaseMs = opts.leaseMs ?? 30_000;
+  const reconcileIntervalMs = opts.reconcileIntervalMs ?? 15_000;
+  const workerIdPrefix = opts.workerIdPrefix ?? `bull_media_${process.pid}`;
+
+  const enqueueRecoveryFn =
+    opts.enqueueRecoveryJob ??
+    ((payload: MediaProcessJobPayload, enqueueOpts: { jobId: string }) =>
+      enqueueMediaProcess(payload, {
+        jobId:
+          enqueueOpts.jobId ||
+          buildGenerationBullJobId(payload.sharedWorkKey, payload.generation ?? 1),
+      }));
 
   const coordStore = new RedisCoordinationStore(redis, {
     keyPrefix: `${keyPrefix}coord:`,
     recordTtlMs: 24 * 60 * 60 * 1000,
   });
   const coordinator = new SharedIngestionCoordinator(coordStore);
+  const sharedWork = new SharedWorkCoordinator(db, redis, {
+    keyPrefix,
+    defaultLeaseMs: leaseMs,
+    now: opts.now,
+  });
   const vodService = new UnifiedVodProcessingService(db, coordinator, storage, workRootDir, {
     quotaRedis: redis,
     quotaPrefix: `${keyPrefix}quota:`,
   });
   const liveService = new ContinuousLiveSessionService(coordinator, storage, workRootDir);
 
-  const updateActiveSubscribers = async (
-    sharedWorkKey: string,
-    data: Prisma.MediaProcessingJobUpdateManyMutationInput,
-  ) => {
-    await db.mediaProcessingJob.updateMany({
-      where: {
-        sharedWorkKey,
-        status: { in: ['QUEUED', 'RUNNING'] },
-      },
-      data,
-    });
-  };
-
-  const markActiveSubscribersReady = async (
-    sharedWorkKey: string,
-    resultSummary: Prisma.InputJsonValue,
-  ) => {
-    const readyData: Prisma.MediaProcessingJobUpdateManyMutationInput = {
-      status: 'READY',
-      stage: 'completed',
-      progressPercent: 100,
-      completedAt: new Date(),
-      resultSummary,
-    };
-    // 1st commit makes READY visible to subsequent lateReady queries;
-    // 2nd sweep catches any rows whose INSERT committed during the 1st UPDATE's MVCC snapshot!
-    await updateActiveSubscribers(sharedWorkKey, readyData);
-    await updateActiveSubscribers(sharedWorkKey, readyData);
-  };
-
-  const hasActiveSubscribers = async (sharedWorkKey: string): Promise<boolean> => {
-    const count = await db.mediaProcessingJob.count({
-      where: {
-        sharedWorkKey,
-        status: { in: ['QUEUED', 'RUNNING'] },
-      },
-    });
-    return count > 0;
-  };
+  let reconcileTimer: NodeJS.Timeout | null = null;
+  if (reconcileIntervalMs > 0) {
+    reconcileTimer = setInterval(() => {
+      sharedWork
+        .reconcileStrandedWork({ enqueueFn: enqueueRecoveryFn, batchSize: 10 })
+        .catch(() => {});
+    }, reconcileIntervalMs);
+    reconcileTimer.unref?.();
+  }
 
   const worker = new Worker<MediaProcessJobData>(
     queueName,
     async (job: Job<MediaProcessJobData>) => {
       const data = job.data;
       const attemptNum = job.attemptsMade + 1;
-      const workerId = `bull_media_${process.pid}_${job.id ?? Date.now()}_a${attemptNum}`;
-      const abortCtrl = new AbortController();
-      registerLocalSharedWorkAbort(data.sharedWorkKey, abortCtrl);
+      const workerId = `${workerIdPrefix}_${job.id ?? Date.now()}_a${attemptNum}`;
 
-      // Periodic check: abort ONLY if zero active subscribers remain (or Redis cancel flag set)
-      const cancelPoll = setInterval(async () => {
-        try {
-          const active = await hasActiveSubscribers(data.sharedWorkKey);
-          if (!active && !abortCtrl.signal.aborted) {
-            abortCtrl.abort(
-              new MediaSourceError({
-                code: 'REQUEST_CANCELLED',
-                message: 'All clippers cancelled; stopping shared work.',
-              }),
-            );
+      // 1. Durable PostgreSQL ownership claim (fences stale generations & duplicate workers even if Redis flushed!)
+      const claim = await sharedWork.claimWorkExecution({
+        sharedWorkKey: data.sharedWorkKey,
+        payloadGeneration: data.generation,
+        workerId,
+        bullJobId: job.id ? String(job.id) : undefined,
+        leaseMs,
+      });
+
+      if (claim.action !== 'CLAIMED') {
+        return {
+          skipped: true,
+          reason: claim.action,
+          sharedWorkKey: data.sharedWorkKey,
+        };
+      }
+
+      const claimedGen = claim.generation;
+      const ownerToken = claim.ownerToken;
+      const abortCtrl = new AbortController();
+      registerLocalSharedWorkAbort(data.sharedWorkKey, claimedGen, abortCtrl);
+
+      if (opts.onClaimed) {
+        await opts.onClaimed({
+          sharedWorkKey: data.sharedWorkKey,
+          generation: claimedGen,
+          ownerToken,
+          workerId,
+        });
+      }
+
+      // 2. Continuous dual heartbeat (PostgreSQL lease + Redis lock) + zero-subscriber cancellation watchdog
+      const hbIntervalMs = Math.max(150, Math.floor(leaseMs / 3));
+      let hbStopped = false;
+      let hbTimer: NodeJS.Timeout | null = null;
+
+      const scheduleHeartbeat = () => {
+        if (hbStopped || abortCtrl.signal.aborted) return;
+        hbTimer = setTimeout(async () => {
+          if (hbStopped || abortCtrl.signal.aborted) return;
+          try {
+            const hb = await sharedWork.renewWorkLease({
+              sharedWorkKey: data.sharedWorkKey,
+              generation: claimedGen,
+              ownerToken,
+              leaseMs,
+            });
+            if (!hb.renewed) {
+              if (!abortCtrl.signal.aborted) {
+                abortCtrl.abort(
+                  new MediaSourceError({
+                    code: 'LEASE_EXPIRED',
+                    message: `Worker ${workerId} lost durable ownership lease on ${data.sharedWorkKey} (gen ${claimedGen}).`,
+                  }),
+                );
+              }
+              return;
+            }
+            if (hb.activeSubscribers === 0 && !abortCtrl.signal.aborted) {
+              abortCtrl.abort(
+                new MediaSourceError({
+                  code: 'REQUEST_CANCELLED',
+                  message: 'All clippers cancelled; stopping shared work.',
+                }),
+              );
+              return;
+            }
+          } catch {
+            // Single transient DB/network hiccup -> retry on next tick; PostgreSQL CAS still enforces lease strictly!
           }
-        } catch {
-          // ignore transient poll error
+          scheduleHeartbeat();
+        }, hbIntervalMs);
+        hbTimer.unref?.();
+      };
+      scheduleHeartbeat();
+
+      const stopHeartbeat = () => {
+        hbStopped = true;
+        if (hbTimer) {
+          clearTimeout(hbTimer);
+          hbTimer = null;
         }
-      }, 250);
-      cancelPoll.unref?.();
+      };
+
+      const assertNotAborted = () => {
+        if (abortCtrl.signal.aborted) {
+          const reason = abortCtrl.signal.reason;
+          if (reason instanceof Error) throw reason;
+          throw new MediaSourceError({
+            code: 'REQUEST_CANCELLED',
+            message: 'Shared media job aborted.',
+          });
+        }
+      };
 
       const tempUploadDir = path.join(workRootDir, `up_${job.id ?? Date.now()}_${Date.now()}`);
-      let releaseEnqLock = true;
 
       try {
-        if (!(await hasActiveSubscribers(data.sharedWorkKey))) {
-          return { skipped: true, reason: 'all_subscribers_cancelled' };
-        }
-
         // Re-check authoritative PostgreSQL rights at execution time (never trust enqueue-time state!)
         const scope = data.sourceType === 'uploaded' ? 'PRIVATE_USER' : 'SHARED_PERMITTED';
         await vodService.registry.resolveServerTrustedAuth({
@@ -182,16 +268,10 @@ export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
           requireSharedReuse: scope === 'SHARED_PERMITTED',
         });
 
-        await updateActiveSubscribers(data.sharedWorkKey, {
-          status: 'RUNNING',
-          stage: 'acquiring_source',
-          progressPercent: 10,
-          startedAt: new Date(),
-          bullJobId: job.id ? String(job.id) : null,
-        });
+        assertNotAborted();
 
         // ─────────────────────────────────────────────────────────────────────
-        // PATH A: Controlled Continuous Livestream Session
+        // PATH A: Controlled Test Fixture (LIVE or VOD — strictly disabled in prod!)
         // ─────────────────────────────────────────────────────────────────────
         if (data.controlledFixtureKey) {
           const fixture = getControlledTestFixture(data.controlledFixtureKey);
@@ -205,6 +285,8 @@ export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
           if (fixture.onWorkerAttempt) {
             await fixture.onWorkerAttempt(attemptNum);
           }
+
+          assertNotAborted();
 
           if (fixture.kind === 'live') {
             const liveHighlights: Array<Record<string, unknown>> = [];
@@ -234,18 +316,23 @@ export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
                   clipMeta: clip.clipMeta,
                   reusedFromCache: clip.reusedFromCache,
                 });
-                // Surface newly generated live highlights IMMEDIATELY while stream stays RUNNING!
-                await updateActiveSubscribers(data.sharedWorkKey, {
+                // Fenced live-highlight update while stream stays RUNNING!
+                await sharedWork.publishProgressFenced({
+                  sharedWorkKey: data.sharedWorkKey,
+                  generation: claimedGen,
+                  ownerToken,
                   stage: `streaming_live_${liveHighlights.length}_highlights`,
                   progressPercent: Math.min(95, 25 + liveHighlights.length * 20),
                   resultSummary: {
                     highlightsCount: liveHighlights.length,
                     highlights: liveHighlights,
                     streamStatus: 'LIVE',
-                  } as Prisma.InputJsonValue,
+                  } as unknown as Prisma.InputJsonValue,
                 });
               },
             });
+
+            assertNotAborted();
 
             const finalSummaryHighlights = liveRes.highlights.map((clip) => ({
               candidate: clip.candidate,
@@ -256,14 +343,20 @@ export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
               reusedFromCache: clip.reusedFromCache,
             }));
 
-            await markActiveSubscribersReady(data.sharedWorkKey, {
-              highlightsCount: finalSummaryHighlights.length,
-              highlights: finalSummaryHighlights,
-              streamStatus: 'ENDED',
-            } as unknown as Prisma.InputJsonValue);
+            await sharedWork.commitWorkReady({
+              sharedWorkKey: data.sharedWorkKey,
+              generation: claimedGen,
+              ownerToken,
+              resultSummary: {
+                highlightsCount: finalSummaryHighlights.length,
+                highlights: finalSummaryHighlights,
+                streamStatus: 'ENDED',
+              } as unknown as Prisma.InputJsonValue,
+            });
 
             return {
               sharedWorkKey: data.sharedWorkKey,
+              generation: claimedGen,
               highlightsCount: finalSummaryHighlights.length,
             };
           }
@@ -281,7 +374,11 @@ export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
             signal: abortCtrl.signal,
           });
 
-          await updateActiveSubscribers(data.sharedWorkKey, {
+          assertNotAborted();
+          await sharedWork.publishProgressFenced({
+            sharedWorkKey: data.sharedWorkKey,
+            generation: claimedGen,
+            ownerToken,
             stage: 'analyzing_highlights',
             progressPercent: 45,
           });
@@ -301,14 +398,18 @@ export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
             signal: abortCtrl.signal,
           });
 
-          await updateActiveSubscribers(data.sharedWorkKey, {
+          assertNotAborted();
+          await sharedWork.publishProgressFenced({
+            sharedWorkKey: data.sharedWorkKey,
+            generation: claimedGen,
+            ownerToken,
             stage: 'generating_base_clips',
             progressPercent: 70,
           });
 
           const generatedClips = [];
           for (const cand of anaRes.candidates) {
-            if (abortCtrl.signal.aborted) break;
+            assertNotAborted();
             const clip = await vodService.generateOrReuseVodBaseClip({
               canonicalSourceId: data.canonicalSourceId as CacheableSourceId,
               sourceDescriptor: srcRes.descriptor,
@@ -317,18 +418,6 @@ export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
               workerId,
               sourceRevision: optsIn.sourceRevision ?? 'v1',
               rightsScope: scope,
-              renderSettings: optsIn.renderSettings
-                ? {
-                    format: optsIn.renderSettings.format ?? 'reel',
-                    width: optsIn.renderSettings.width ?? 1280,
-                    height: optsIn.renderSettings.height ?? 720,
-                    fps: optsIn.renderSettings.fps ?? 30,
-                    subtitles: optsIn.renderSettings.subtitles ?? false,
-                    zooms: optsIn.renderSettings.zooms ?? false,
-                    transitions: optsIn.renderSettings.transitions ?? 'none',
-                    music: optsIn.renderSettings.music ?? false,
-                  }
-                : undefined,
               signal: abortCtrl.signal,
             });
             generatedClips.push({
@@ -341,12 +430,22 @@ export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
             });
           }
 
-          await markActiveSubscribersReady(data.sharedWorkKey, {
-            highlightsCount: generatedClips.length,
-            highlights: generatedClips,
-          } as unknown as Prisma.InputJsonValue);
+          assertNotAborted();
+          await sharedWork.commitWorkReady({
+            sharedWorkKey: data.sharedWorkKey,
+            generation: claimedGen,
+            ownerToken,
+            resultSummary: {
+              highlightsCount: generatedClips.length,
+              highlights: generatedClips,
+            } as unknown as Prisma.InputJsonValue,
+          });
 
-          return { sharedWorkKey: data.sharedWorkKey, highlightsCount: generatedClips.length };
+          return {
+            sharedWorkKey: data.sharedWorkKey,
+            generation: claimedGen,
+            highlightsCount: generatedClips.length,
+          };
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -390,7 +489,11 @@ export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
             signal: abortCtrl.signal,
           });
 
-          await updateActiveSubscribers(data.sharedWorkKey, {
+          assertNotAborted();
+          await sharedWork.publishProgressFenced({
+            sharedWorkKey: data.sharedWorkKey,
+            generation: claimedGen,
+            ownerToken,
             stage: 'analyzing_highlights',
             progressPercent: 50,
           });
@@ -410,6 +513,7 @@ export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
 
           const generatedClips = [];
           for (const cand of anaRes.candidates) {
+            assertNotAborted();
             const clip = await vodService.generateOrReuseVodBaseClip({
               canonicalSourceId: data.canonicalSourceId as CacheableSourceId,
               sourceDescriptor: srcRes.descriptor,
@@ -429,12 +533,22 @@ export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
             });
           }
 
-          await markActiveSubscribersReady(data.sharedWorkKey, {
-            highlightsCount: generatedClips.length,
-            highlights: generatedClips,
-          } as unknown as Prisma.InputJsonValue);
+          assertNotAborted();
+          await sharedWork.commitWorkReady({
+            sharedWorkKey: data.sharedWorkKey,
+            generation: claimedGen,
+            ownerToken,
+            resultSummary: {
+              highlightsCount: generatedClips.length,
+              highlights: generatedClips,
+            } as unknown as Prisma.InputJsonValue,
+          });
 
-          return { sharedWorkKey: data.sharedWorkKey, highlightsCount: generatedClips.length };
+          return {
+            sharedWorkKey: data.sharedWorkKey,
+            generation: claimedGen,
+            highlightsCount: generatedClips.length,
+          };
         }
 
         throw new MediaSourceError({
@@ -442,49 +556,100 @@ export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
           message: 'No permitted acquisition adapter available for this job payload.',
         });
       } catch (err) {
+        stopHeartbeat();
         const isMediaErr = err instanceof MediaSourceError;
-        const code = isMediaErr ? err.code : 'INFRA_ERROR';
+        const abortReason = abortCtrl.signal.aborted ? abortCtrl.signal.reason : undefined;
+        const effectiveCode =
+          isMediaErr
+            ? err.code
+            : abortReason instanceof MediaSourceError
+              ? abortReason.code
+              : 'INFRA_ERROR';
         const message = err instanceof Error ? err.message : String(err);
-        const nonRetryable = isMediaErr && NON_RETRYABLE_CODES.has(err.code);
+        const nonRetryable = NON_RETRYABLE_CODES.has(effectiveCode);
         const maxAttempts = job.opts.attempts ?? 3;
         const isFinalAttempt = nonRetryable || attemptNum >= maxAttempts;
 
-        if (isFinalAttempt) {
-          if (code !== 'REQUEST_CANCELLED') {
-            await updateActiveSubscribers(data.sharedWorkKey, {
-              status: 'FAILED',
-              stage: 'failed',
-              errorCode: code,
-              errorMessage: message,
-            });
-            await moveToDeadLetter(queueName, data, `${code}: ${message}`).catch(() => {});
+        if (effectiveCode === 'REQUEST_CANCELLED') {
+          const cancelRes = await sharedWork
+            .commitWorkCancelledIfNoSubscribers({
+              sharedWorkKey: data.sharedWorkKey,
+              generation: claimedGen,
+              ownerToken,
+            })
+            .catch(() => ({ cancelled: false, newSubscribersJoined: false }));
+          if (cancelRes.newSubscribersJoined) {
+            // A new subscriber joined right as we cancelled -> dispatch its bumped generation immediately!
+            await sharedWork
+              .reconcileStrandedWork({ enqueueFn: enqueueRecoveryFn, batchSize: 5 })
+              .catch(() => {});
           }
-          releaseEnqLock = true;
+          throw new UnrecoverableError(`REQUEST_CANCELLED: ${message}`);
+        }
+
+        if (effectiveCode === 'LEASE_EXPIRED') {
+          // Ownership was already fenced out by PostgreSQL -> NEVER mutate SharedMediaWork or subscribers!
+          throw new UnrecoverableError(`LEASE_EXPIRED: ${message}`);
+        }
+
+        if (isFinalAttempt) {
+          const committedFail = await sharedWork
+            .commitWorkFailed({
+              sharedWorkKey: data.sharedWorkKey,
+              generation: claimedGen,
+              ownerToken,
+              errorCode: effectiveCode,
+              errorMessage: message,
+            })
+            .catch(() => false);
+          if (committedFail) {
+            await moveToDeadLetter(queueName, data, `${effectiveCode}: ${message}`).catch(() => {});
+          }
         } else {
-          // Keep enqueue lock held during bounded BullMQ retry backoff so late joiners attach
-          releaseEnqLock = false;
+          // Release PostgreSQL RUNNING lease back to ENQUEUED so BullMQ's next retry attempt can claim cleanly!
+          await sharedWork
+            .releaseLeaseForRetry({
+              sharedWorkKey: data.sharedWorkKey,
+              generation: claimedGen,
+              ownerToken,
+              errorCode: effectiveCode,
+              errorMessage: message,
+            })
+            .catch(() => {});
         }
 
         if (nonRetryable) {
-          throw new UnrecoverableError(`${code}: ${message}`);
+          throw new UnrecoverableError(`${effectiveCode}: ${message}`);
         }
         throw err;
       } finally {
-        clearInterval(cancelPoll);
-        unregisterLocalSharedWorkAbort(data.sharedWorkKey);
-        if (releaseEnqLock) {
-          await redis
-            .eval(`return redis.call('DEL', KEYS[1])`, 1, `${keyPrefix}enq:${data.sharedWorkKey}`)
-            .catch(() => {});
-        }
+        stopHeartbeat();
+        unregisterLocalSharedWorkAbort(data.sharedWorkKey, claimedGen);
+        // Atomic Lua compare-and-delete: NEVER deletes a newer worker's lock!
+        await sharedWork.lock
+          .release({
+            sharedWorkKey: data.sharedWorkKey,
+            token: ownerToken,
+          })
+          .catch(() => {});
         await fs.rm(tempUploadDir, { recursive: true, force: true }).catch(() => {});
       }
     },
     {
       connection: bullConn,
       concurrency,
+      lockDuration: 60_000,
     },
   );
 
-  return { worker, vodService, liveService };
+  const originalClose = worker.close.bind(worker);
+  worker.close = (async (force?: boolean) => {
+    if (reconcileTimer) {
+      clearInterval(reconcileTimer);
+      reconcileTimer = null;
+    }
+    return originalClose(force);
+  }) as typeof worker.close;
+
+  return { worker, vodService, liveService, sharedWork };
 }
