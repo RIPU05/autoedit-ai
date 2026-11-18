@@ -5,22 +5,26 @@ import type {
   RenderJobPayload,
   N8nJobPayload,
   MediaProcessJobPayload,
+  PrivateRenderQueuePayload,
 } from '@autoedit/contracts';
 
 export const ANALYSIS_QUEUE = 'analysis';
 export const RENDER_QUEUE = 'render';
 export const N8N_QUEUE = 'n8n-dispatch';
 export const MEDIA_PROCESS_QUEUE = 'media-process';
+export const PRIVATE_RENDER_QUEUE = 'private-render';
 
 export type AnalysisJobData = AnalysisJobPayload;
 export type RenderJobData = RenderJobPayload;
 export type N8nJobData = N8nJobPayload;
 export type MediaProcessJobData = MediaProcessJobPayload;
+export type PrivateRenderJobData = PrivateRenderQueuePayload;
 
 export const analysisQueue = new Queue<AnalysisJobData>(ANALYSIS_QUEUE, { connection });
 export const renderQueue = new Queue<RenderJobData>(RENDER_QUEUE, { connection });
 export const n8nQueue = new Queue<N8nJobData>(N8N_QUEUE, { connection });
 export const mediaProcessQueue = new Queue<MediaProcessJobData>(MEDIA_PROCESS_QUEUE, { connection });
+export const privateRenderQueue = new Queue<PrivateRenderJobData>(PRIVATE_RENDER_QUEUE, { connection });
 
 // Dead-letter queue: jobs that exhaust all retries are parked here for
 // inspection / manual replay instead of vanishing (Phase 6).
@@ -73,5 +77,24 @@ export const enqueueMediaProcess = (
     jobId: opts?.jobId ?? defaultJobId,
     attempts: opts?.attempts ?? 3,
     backoff: { type: 'exponential' as const, delay: opts?.backoffDelayMs ?? 1500 },
+  });
+};
+
+/**
+ * Enqueues a durable owner-scoped private clip render job onto BullMQ using a
+ * generation-scoped deterministic jobId (`priv_${renderJobId}__g${generation}`)
+ * so retries and crash recovery generations never collide with completed or superseded attempts.
+ */
+export const enqueuePrivateRender = (
+  data: PrivateRenderJobData,
+  opts?: { jobId?: string; attempts?: number; backoffDelayMs?: number },
+) => {
+  const safeId = data.renderJobId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const defaultJobId = `priv_${safeId}__g${data.generation}`;
+  return privateRenderQueue.add('private-render', data, {
+    ...defaultJobOpts,
+    jobId: opts?.jobId ?? defaultJobId,
+    attempts: opts?.attempts ?? 3,
+    backoff: { type: 'exponential' as const, delay: opts?.backoffDelayMs ?? 2000 },
   });
 };

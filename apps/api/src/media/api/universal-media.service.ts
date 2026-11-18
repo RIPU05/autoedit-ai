@@ -2,9 +2,12 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import type {
   ApplyPrivateProjectEditRequest,
+  ApplyPrivateProjectEditResponse,
   CacheRenderSettings,
   CacheRightsScope,
   CacheableSourceId,
+  CancelPrivateRenderResponse,
+  CreatePrivateRenderRequest,
   CreateProjectFromSourceRequest,
   CreateProjectFromSourceResponse,
   HighlightWindowCandidate,
@@ -16,6 +19,8 @@ import type {
   MediaProcessJobPayload,
   MediaSourceProvider,
   MediaSourceType,
+  PrivateRenderJobResponse,
+  PrivateRenderQueuePayload,
   ResolveMediaSourceResponse,
   SourceCapabilityStatus,
   SubmitMediaJobRequest,
@@ -46,6 +51,10 @@ import {
   buildGenerationBullJobId,
   type ReconcileStrandedResult,
 } from './shared-work-coordinator.js';
+import {
+  PrivateRenderService,
+  type PrivateRenderPolicyConfig,
+} from './private-render.service.js';
 import type { CacheArtifactDescriptor } from '../shared-cache.js';
 
 export interface MediaApiQuotaConfig {
@@ -85,6 +94,13 @@ export interface UniversalMediaServiceDeps {
   skipImmediateEnqueue?: boolean;
   enqueueJob?: (
     payload: MediaProcessJobPayload,
+    opts?: { jobId?: string },
+  ) => Promise<{ id?: string }>;
+  /** Optional policy override for durable background private rendering. */
+  privateRenderPolicy?: Partial<PrivateRenderPolicyConfig>;
+  /** Optional custom enqueue hook for private background renders (used in tests). */
+  enqueuePrivateRenderJob?: (
+    payload: PrivateRenderQueuePayload,
     opts?: { jobId?: string },
   ) => Promise<{ id?: string }>;
 }
@@ -203,6 +219,7 @@ export class UniversalMediaApiService {
   readonly publisher: DurableArtifactPublisher;
   readonly coordinator: SharedIngestionCoordinator;
   readonly sharedWork: SharedWorkCoordinator;
+  readonly privateRenders: PrivateRenderService;
   readonly vodService: UnifiedVodProcessingService;
   readonly quotas: MediaApiQuotaConfig;
   readonly keyPrefix: string;
@@ -233,6 +250,19 @@ export class UniversalMediaApiService {
       maxEnqueueAttempts: deps.maxEnqueueAttempts ?? 5,
       maxRecoveryGenerations: deps.maxRecoveryGenerations ?? 5,
       now: deps.now,
+    });
+    this.privateRenders = new PrivateRenderService({
+      db: this.db,
+      storage: this.storage,
+      redis: this.redis,
+      keyPrefix: `${this.keyPrefix}priv_render:`,
+      policy: {
+        downloadUrlTtlSec: this.quotas.downloadUrlTtlSec,
+        ...(deps.privateRenderPolicy ?? {}),
+      },
+      now: deps.now,
+      skipImmediateEnqueue: this.skipImmediateEnqueue,
+      enqueueJob: deps.enqueuePrivateRenderJob,
     });
     this.registry = new DurableMediaRegistryService(this.db);
     this.publisher = new DurableArtifactPublisher(
@@ -1060,69 +1090,45 @@ export class UniversalMediaApiService {
 
   /**
    * Applies a private Auto/Prompt/Reference/Manual timeline edit on an owned Project,
-   * creating an immutable EditVersion and optionally rendering an isolated PRIVATE_USER MP4.
+   * creating ONE immutable EditVersion and—when `renderOutput: true`—enqueuing a durable
+   * background PrivateRenderJob without blocking the HTTP request on FFmpeg.
    */
   async applyPrivateProjectEdit(
     userId: string,
     projectId: string,
     req: ApplyPrivateProjectEditRequest,
-  ): Promise<{
-    projectId: string;
-    versionId: string;
-    parentVersionId: string | null;
-    customEditHash: string;
-    downloadUrl?: string;
-    downloadUrlExpiresInSec?: number;
-  }> {
-    const project = await this.db.project.findFirst({
-      where: { id: projectId, userId },
-      include: { mediaSource: true },
-    });
-    if (!project) {
-      throw new MediaSourceError({
-        code: 'SOURCE_UNAVAILABLE',
-        message: 'Project not found.',
-        statusCode: 404,
-      });
-    }
+  ): Promise<{ response: ApplyPrivateProjectEditResponse; httpStatus: 200 | 201 | 202 }> {
+    return this.privateRenders.applyPrivateEditAndMaybeEnqueueRender(userId, projectId, req);
+  }
 
-    let sourceDescriptor: CacheArtifactDescriptor | undefined;
-    let canonicalSourceId: CacheableSourceId | undefined;
+  async enqueuePrivateRenderForVersion(
+    userId: string,
+    projectId: string,
+    req: CreatePrivateRenderRequest,
+  ): Promise<{ renderJob: PrivateRenderJobResponse; httpStatus: 200 | 202 }> {
+    return this.privateRenders.enqueueRenderForExistingVersion(userId, projectId, req);
+  }
 
-    if (req.renderOutput && project.mediaSource) {
-      const scope: CacheRightsScope =
-        project.mediaSource.provider === 'UPLOAD' ? 'PRIVATE_USER' : 'SHARED_PERMITTED';
-      canonicalSourceId = project.mediaSource.canonicalId as CacheableSourceId;
-      sourceDescriptor = {
-        artifactKind: 'SOURCE_MEDIA',
-        sourceRevision: project.mediaSource.sourceRevision,
-        algorithmVersion: 'vod-import-v1',
-        rightsScope: scope,
-      };
-    }
+  async listPrivateProjectRenders(
+    userId: string,
+    projectId: string,
+  ): Promise<{ projectId: string; renders: PrivateRenderJobResponse[] }> {
+    return this.privateRenders.listProjectPrivateRenders(userId, projectId);
+  }
 
-    const editRes = await this.vodService.applyPrivateTimelineEdit({
-      projectId: project.id,
-      requesterUserId: userId,
-      mode: req.mode,
-      versionName: req.versionName,
-      userPrompt: req.userPrompt,
-      windowStartSec: req.windowStartSec,
-      windowEndSec: req.windowEndSec,
-      effects: req.effects,
-      renderOutput: req.renderOutput,
-      canonicalSourceId,
-      sourceDescriptor,
-      workerId: `api_priv_${userId}`,
-    });
+  async getPrivateRenderStatus(
+    userId: string,
+    projectId: string,
+    renderJobId: string,
+  ): Promise<PrivateRenderJobResponse> {
+    return this.privateRenders.getPrivateRenderStatus(userId, projectId, renderJobId);
+  }
 
-    return {
-      projectId: editRes.projectId,
-      versionId: editRes.versionId,
-      parentVersionId: editRes.parentVersionId,
-      customEditHash: editRes.customEditHash,
-      downloadUrl: editRes.privateRender?.downloadUrl,
-      downloadUrlExpiresInSec: editRes.privateRender ? this.quotas.downloadUrlTtlSec : undefined,
-    };
+  async cancelPrivateRender(
+    userId: string,
+    projectId: string,
+    renderJobId: string,
+  ): Promise<CancelPrivateRenderResponse> {
+    return this.privateRenders.cancelPrivateRender(userId, projectId, renderJobId);
   }
 }

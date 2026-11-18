@@ -4,6 +4,8 @@ import type {
 } from '@autoedit/contracts';
 
 export const ACTIVE_MEDIA_JOB_STORAGE_KEY = 'autoedit_active_media_job_v1';
+export const ACTIVE_PRIVATE_RENDER_STORAGE_PREFIX = 'autoedit_active_priv_render_v1_';
+export const MEDIA_TAB_SYNC_CHANNEL = 'autoedit_media_job_sync_v1';
 
 /**
  * Honest free-beta resource limits surfaced clearly in the UI.
@@ -15,7 +17,9 @@ export const FREE_BETA_LIMITS = {
   maxDirectUploadGb: 5,
   maxActiveJobs: 5,
   maxDailyJobs: 50,
+  maxActivePrivateRenders: 2,
   maxDailyClipRenders: 20,
+  maxPrivateClipDurationSec: 180,
   signedUrlTtlMinutes: 5,
 } as const;
 
@@ -312,5 +316,141 @@ export function clearActiveMediaJobRef(): void {
     window.sessionStorage.removeItem(ACTIVE_MEDIA_JOB_STORAGE_KEY);
   } catch {
     // ignore
+  }
+}
+
+export function formatPrivateRenderStageLabel(stage: string, status: MediaApiJobStatus): string {
+  if (status === 'QUEUED') {
+    if (stage === 'retrying') return 'Retrying private render';
+    if (stage === 'recovering_after_worker_crash') return 'Recovering private render automatically';
+    return 'Waiting in private render queue';
+  }
+  if (status === 'READY') return 'Private MP4 verified & ready';
+  if (status === 'CANCELLED') return 'Private render cancelled';
+  if (status === 'FAILED') return 'Private render failed';
+  switch (stage) {
+    case 'preparing_source':
+      return 'Verifying source footage';
+    case 'rendering_clip':
+      return 'Encoding private MP4 clip';
+    case 'validating_output':
+      return 'Validating MP4 streams with FFmpeg';
+    case 'uploading_output':
+      return 'Saving private MP4 securely';
+    default:
+      return stage.replace(/_/g, ' ');
+  }
+}
+
+export interface ActivePrivateRenderRef {
+  projectId: string;
+  renderJobId: string;
+  savedAt: number;
+}
+
+/**
+ * Stores ONLY an opaque private render job ID for a project in sessionStorage so
+ * refreshing resumes background status polling. NEVER stores signed URLs or storage keys.
+ */
+export function saveActivePrivateRenderRef(projectId: string, renderJobId: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(
+      `${ACTIVE_PRIVATE_RENDER_STORAGE_PREFIX}${projectId}`,
+      JSON.stringify({ projectId, renderJobId, savedAt: Date.now() }),
+    );
+  } catch {
+    // ignore
+  }
+}
+
+export function loadActivePrivateRenderRef(projectId: string): ActivePrivateRenderRef | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(`${ACTIVE_PRIVATE_RENDER_STORAGE_PREFIX}${projectId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<ActivePrivateRenderRef>;
+    if (
+      parsed.projectId !== projectId ||
+      typeof parsed.renderJobId !== 'string' ||
+      !/^[a-zA-Z0-9_-]{4,128}$/.test(parsed.renderJobId)
+    ) {
+      return null;
+    }
+    return {
+      projectId,
+      renderJobId: parsed.renderJobId,
+      savedAt: typeof parsed.savedAt === 'number' ? parsed.savedAt : Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function clearActivePrivateRenderRef(projectId: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(`${ACTIVE_PRIVATE_RENDER_STORAGE_PREFIX}${projectId}`);
+  } catch {
+    // ignore
+  }
+}
+
+export function areSignedLinksStale(fetchedAtMs: number | null, ttlSec = 300): boolean {
+  if (!fetchedAtMs) return false;
+  const safeMarginMs = Math.max(15_000, Math.min(45_000, Math.floor((ttlSec * 1000) * 0.15)));
+  return Date.now() - fetchedAtMs >= ttlSec * 1000 - safeMarginMs;
+}
+
+export interface MediaTabSyncMessage {
+  jobId: string;
+  status: MediaApiJobStatus;
+  ts: number;
+}
+
+/**
+ * Broadcasts an opaque job status hint across tabs of the same browser session.
+ * Contains ONLY `{ jobId, status, ts }` — NEVER signed URLs, cookies, or storage keys.
+ */
+export function broadcastMediaJobSync(msg: MediaTabSyncMessage): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      const ch = new BroadcastChannel(MEDIA_TAB_SYNC_CHANNEL);
+      ch.postMessage(msg);
+      ch.close();
+    }
+  } catch {
+    // ignore unsupported BroadcastChannel environments
+  }
+}
+
+export function subscribeMediaJobSync(
+  handler: (msg: MediaTabSyncMessage) => void,
+): () => void {
+  if (typeof window === 'undefined' || typeof BroadcastChannel === 'undefined') {
+    return () => {};
+  }
+  try {
+    const ch = new BroadcastChannel(MEDIA_TAB_SYNC_CHANNEL);
+    const onMsg = (ev: MessageEvent) => {
+      const data = ev.data as Partial<MediaTabSyncMessage> | null;
+      if (
+        data &&
+        typeof data.jobId === 'string' &&
+        /^[a-zA-Z0-9_-]{4,128}$/.test(data.jobId) &&
+        typeof data.status === 'string' &&
+        typeof data.ts === 'number'
+      ) {
+        handler(data as MediaTabSyncMessage);
+      }
+    };
+    ch.addEventListener('message', onMsg);
+    return () => {
+      ch.removeEventListener('message', onMsg);
+      ch.close();
+    };
+  } catch {
+    return () => {};
   }
 }

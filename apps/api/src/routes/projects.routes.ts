@@ -1,7 +1,8 @@
 import { Router } from 'express';
-import { Prisma } from '@prisma/client';
+import { Prisma, type PrismaClient } from '@prisma/client';
 import { z } from 'zod';
-import { prisma } from '../lib/prisma.js';
+import { prisma as defaultPrisma } from '../lib/prisma.js';
+import type { MediaStorageProvider } from '../storage/storage.types.js';
 import { requireAuth, asyncHandler, HttpError } from '../middleware/auth.js';
 import { enqueueRender } from '../queue/queues.js';
 import {
@@ -11,24 +12,30 @@ import {
   UnsupportedPromptError,
 } from '../services/claude.service.js';
 import { createVersion, getHeadVersion, diffVersions, restoreVersion } from '../services/version.service.js';
-import { getStorageProvider } from '../storage/index.js';
-import { DurableMediaRegistryService } from '../media/durable-media-registry.js';
+import { getVerifiedProjectSourcePreview } from '../media/api/source-preview.service.js';
 import { MediaSourceError } from '../media/errors.js';
 import { buildPromptInjection, learnFromPromptEdit } from '../services/creator-memory.service.js';
 import { getConnectedClaudeApiKey } from '../services/integration-events.service.js';
 
-export const projectRouter = Router();
-projectRouter.use(requireAuth);
-
-// helper: load a project owned by the caller or 404
-async function ownedProject(userId: string, id: string) {
-  const p = await prisma.project.findFirst({ where: { id, userId } });
-  if (!p) throw new HttpError(404, 'project not found');
-  return p;
+export interface CreateProjectRouterOptions {
+  db?: PrismaClient;
+  storage?: MediaStorageProvider;
 }
 
-// List projects (dashboard "recent projects")
-projectRouter.get(
+export function createProjectRouter(options: CreateProjectRouterOptions = {}): Router {
+  const prisma = options.db ?? defaultPrisma;
+  const router = Router();
+  router.use(requireAuth);
+
+  // helper: load a project owned by the caller or 404
+  async function ownedProject(userId: string, id: string) {
+    const p = await prisma.project.findFirst({ where: { id, userId } });
+    if (!p) throw new HttpError(404, 'project not found');
+    return p;
+  }
+
+  // List projects (dashboard "recent projects")
+  router.get(
   '/',
   asyncHandler(async (req, res) => {
     const projects = await prisma.project.findMany({
@@ -50,7 +57,7 @@ projectRouter.get(
 );
 
 // Full project detail (analysis + timeline + renders)
-projectRouter.get(
+router.get(
   '/:id',
   asyncHandler(async (req, res) => {
     await ownedProject(req.user!.sub, req.params.id);
@@ -60,7 +67,18 @@ projectRouter.get(
         analysis: true,
         timeline: true,
         renders: true,
-        sourceAsset: true,
+        sourceAsset: {
+          select: {
+            id: true,
+            kind: true,
+            mimeType: true,
+            durationSec: true,
+            width: true,
+            height: true,
+            fps: true,
+            createdAt: true,
+          },
+        },
         mediaSource: {
           select: { id: true, provider: true, sourceType: true, metadata: true },
         },
@@ -71,7 +89,7 @@ projectRouter.get(
 );
 
 // Update the editable timeline (operations/effects/outputs) and approve it
-projectRouter.patch(
+router.patch(
   '/:id/timeline',
   asyncHandler(async (req, res) => {
     await ownedProject(req.user!.sub, req.params.id);
@@ -92,7 +110,7 @@ projectRouter.patch(
 );
 
 // Kick off a render for a given output format
-projectRouter.post(
+router.post(
   '/:id/render',
   asyncHandler(async (req, res) => {
     const project = await ownedProject(req.user!.sub, req.params.id);
@@ -116,7 +134,7 @@ projectRouter.post(
 );
 
 // Poll a render's status (frontend polls or use SSE/websocket in prod)
-projectRouter.get(
+router.get(
   '/:id/renders/:renderId',
   asyncHandler(async (req, res) => {
     await ownedProject(req.user!.sub, req.params.id);
@@ -129,7 +147,7 @@ projectRouter.get(
 );
 
 // Prompt-based editing: user describes the edit, Claude rewrites the timeline
-projectRouter.post(
+router.post(
   '/:id/edit',
   asyncHandler(async (req, res) => {
     await ownedProject(req.user!.sub, req.params.id);
@@ -213,7 +231,7 @@ const PLATFORM_CONFIG: Record<
   x: { format: 'landscape', copyKey: 'tiktok' },
 };
 
-projectRouter.post(
+router.post(
   '/:id/repurpose',
   asyncHandler(async (req, res) => {
     const project = await ownedProject(req.user!.sub, req.params.id);
@@ -256,67 +274,35 @@ projectRouter.post(
   }),
 );
 
-// Presigned URL for the source video (used by the preview player)
-projectRouter.get(
+// Presigned URL for the verified full source video (used by the preview player)
+// Never trusts client-supplied keys, never substitutes a BASE_CLIP as full source,
+// and re-checks live PostgreSQL rights + MinIO object integrity on every request.
+router.get(
   '/:id/source-url',
   asyncHandler(async (req, res) => {
     const userId = req.user!.sub;
-    await ownedProject(userId, req.params.id);
-    const project = await prisma.project.findUnique({
-      where: { id: req.params.id },
-      include: { sourceAsset: true, mediaSource: true },
-    });
-    const storage = getStorageProvider();
-
-    if (project?.sourceAsset) {
-      const url = await storage.createDownloadUrl({ key: project.sourceAsset.s3Key });
-      return res.json({ url });
-    }
-
-    // Projects created from /api/media/projects/from-source verify live rights before previewing
-    if (project?.mediaSource) {
-      const registry = new DurableMediaRegistryService(prisma);
-      const scope = project.mediaSource.provider === 'UPLOAD' ? 'PRIVATE_USER' : 'SHARED_PERMITTED';
-      try {
-        await registry.resolveServerTrustedAuth({
-          requesterUserId: userId,
-          canonicalSourceId: project.mediaSource.canonicalId,
-          requireSharedReuse: scope === 'SHARED_PERMITTED',
-        });
-      } catch (err) {
-        if (err instanceof MediaSourceError) {
-          throw new HttpError(err.statusCode, err.message);
-        }
-        throw new HttpError(403, 'Source access denied.');
-      }
-
-      const artifact = await prisma.sharedCacheArtifact.findFirst({
-        where: {
-          mediaSourceId: project.mediaSource.id,
-          artifactKind: { in: ['SOURCE_MEDIA', 'BASE_CLIP'] },
-          state: 'PUBLISHED',
-          publishedObjectKey: { not: null },
-          ...(scope === 'PRIVATE_USER'
-            ? { rightsScope: 'PRIVATE_USER', ownerUserId: userId }
-            : { rightsScope: 'SHARED_PERMITTED' }),
-        },
-        orderBy: [{ artifactKind: 'asc' }, { updatedAt: 'desc' }],
+    try {
+      const preview = await getVerifiedProjectSourcePreview({
+        userId,
+        projectId: req.params.id,
+        db: prisma,
+        storage: options.storage,
       });
-      if (artifact?.publishedObjectKey) {
-        const url = await storage.createDownloadUrl({
-          key: artifact.publishedObjectKey,
-          expiresIn: 300,
+      return res.status(200).json(preview);
+    } catch (err) {
+      if (err instanceof MediaSourceError) {
+        return res.status(err.statusCode).json({
+          error: err.message,
+          code: err.code,
         });
-        return res.json({ url, expiresInSec: 300 });
       }
+      throw err;
     }
-
-    throw new HttpError(404, 'no source video');
   }),
 );
 
 // Explainable AI: why is a given clip kept/removed?
-projectRouter.post(
+router.post(
   '/:id/explain',
   asyncHandler(async (req, res) => {
     await ownedProject(req.user!.sub, req.params.id);
@@ -346,7 +332,7 @@ projectRouter.post(
 // ─── Version history ──────────────────────────────────────────────────────────
 
 // List all versions (newest first) + which one is the current head
-projectRouter.get(
+router.get(
   '/:id/versions',
   asyncHandler(async (req, res) => {
     await ownedProject(req.user!.sub, req.params.id);
@@ -369,7 +355,7 @@ projectRouter.get(
 );
 
 // Compare two versions — registered BEFORE :versionId so "compare" isn't swallowed
-projectRouter.get(
+router.get(
   '/:id/versions/compare',
   asyncHandler(async (req, res) => {
     await ownedProject(req.user!.sub, req.params.id);
@@ -379,7 +365,7 @@ projectRouter.get(
 );
 
 // Get a single version (full snapshot)
-projectRouter.get(
+router.get(
   '/:id/versions/:versionId',
   asyncHandler(async (req, res) => {
     await ownedProject(req.user!.sub, req.params.id);
@@ -392,7 +378,7 @@ projectRouter.get(
 );
 
 // Restore an older version (append-only — never overwrites history)
-projectRouter.post(
+router.post(
   '/:id/versions/:versionId/restore',
   asyncHandler(async (req, res) => {
     await ownedProject(req.user!.sub, req.params.id);
@@ -402,7 +388,7 @@ projectRouter.post(
 );
 
 // Rename a version (the one mutable field — does not change the snapshot)
-projectRouter.patch(
+router.patch(
   '/:id/versions/:versionId',
   asyncHandler(async (req, res) => {
     await ownedProject(req.user!.sub, req.params.id);
@@ -420,7 +406,7 @@ projectRouter.patch(
 );
 
 // Regenerate social copy (cheap Claude call)
-projectRouter.post(
+router.post(
   '/:id/social/regenerate',
   asyncHandler(async (req, res) => {
     await ownedProject(req.user!.sub, req.params.id);
@@ -433,6 +419,11 @@ projectRouter.post(
   }),
 );
 
+  return router;
+}
+
+export const projectRouter = createProjectRouter();
+
 // ─── Dashboard aggregates ─────────────────────────────────────────────────────
 export const dashboardRouter = Router();
 dashboardRouter.use(requireAuth);
@@ -442,19 +433,19 @@ dashboardRouter.get(
   asyncHandler(async (req, res) => {
     const userId = req.user!.sub;
     const [projects, renders, runs, logs] = await Promise.all([
-      prisma.project.count({ where: { userId } }),
-      prisma.render.findMany({
+      defaultPrisma.project.count({ where: { userId } }),
+      defaultPrisma.render.findMany({
         where: { project: { userId } },
         orderBy: { createdAt: 'desc' },
         take: 10,
         include: { project: { select: { title: true } } },
       }),
-      prisma.workflowRun.findMany({
+      defaultPrisma.workflowRun.findMany({
         where: { connection: { userId } },
         orderBy: { createdAt: 'desc' },
         take: 10,
       }),
-      prisma.activityLog.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, take: 20 }),
+      defaultPrisma.activityLog.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, take: 20 }),
     ]);
     res.json({ stats: { projects }, recentRenders: renders, workflowRuns: runs, activity: logs });
   }),

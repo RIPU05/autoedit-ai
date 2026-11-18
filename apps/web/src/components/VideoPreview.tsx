@@ -17,18 +17,27 @@ interface Seg {
  */
 export function VideoPreview({
   url,
+  unavailableReason,
+  onRefreshUrl,
   playhead,
   onTime,
   segments,
 }: {
   url: string | null;
+  unavailableReason?: string | null;
+  onRefreshUrl?: () => void;
   playhead: number;
   onTime: (t: number) => void;
   segments: Seg[];
 }) {
   const ref = useRef<HTMLVideoElement>(null);
   const [previewEdit, setPreviewEdit] = useState(false);
+  const [autoRefreshed, setAutoRefreshed] = useState(false);
   const segIndex = useRef(0);
+
+  useEffect(() => {
+    setAutoRefreshed(false);
+  }, [url]);
 
   const kept = segments.filter((s) => s.keep !== false).sort((a, b) => a.start - b.start);
 
@@ -71,8 +80,20 @@ export function VideoPreview({
 
   if (!url) {
     return (
-      <div className="aspect-video rounded-lg bg-panel border border-edge flex items-center justify-center text-sm text-white/40">
-        Loading preview…
+      <div
+        data-testid={unavailableReason ? 'source-preview-unavailable' : 'source-preview-loading'}
+        className="aspect-video rounded-lg bg-panel border border-edge px-6 flex flex-col items-center justify-center text-center gap-3 text-sm text-white/55"
+      >
+        <span>{unavailableReason || 'Loading preview…'}</span>
+        {unavailableReason && onRefreshUrl && (
+          <button
+            type="button"
+            onClick={onRefreshUrl}
+            className="text-xs px-3 py-1.5 rounded-md border border-edge bg-ink text-white/75 hover:border-accent hover:text-white"
+          >
+            Retry preview
+          </button>
+        )}
       </div>
     );
   }
@@ -84,9 +105,15 @@ export function VideoPreview({
         src={url}
         controls
         onTimeUpdate={handleTimeUpdate}
+        onError={() => {
+          if (!autoRefreshed && onRefreshUrl) {
+            setAutoRefreshed(true);
+            onRefreshUrl();
+          }
+        }}
         className="w-full rounded-lg border border-edge bg-black"
       />
-      <div className="mt-2 flex items-center gap-3">
+      <div className="mt-2 flex flex-wrap items-center gap-3">
         <button
           onClick={startPreviewEdit}
           disabled={kept.length === 0}
@@ -97,6 +124,15 @@ export function VideoPreview({
         {previewEdit && (
           <button onClick={() => { ref.current?.pause(); setPreviewEdit(false); }} className="text-sm text-white/50">
             Stop
+          </button>
+        )}
+        {onRefreshUrl && (
+          <button
+            type="button"
+            onClick={onRefreshUrl}
+            className="text-xs text-white/45 hover:text-white"
+          >
+            Refresh preview link
           </button>
         )}
         <span className="font-mono text-[11px] text-white/30">jumps across cuts to play only kept clips</span>

@@ -226,6 +226,8 @@ export const ApplyPrivateProjectEditRequestSchema = z
       .strict()
       .optional(),
     renderOutput: z.boolean().optional(),
+    format: z.enum(['reel', 'short', 'landscape']).optional(),
+    idempotencyKey: IdempotencyKeySchema.optional(),
   })
   .strict()
   .refine((d) => d.windowEndSec > d.windowStartSec, {
@@ -234,6 +236,94 @@ export const ApplyPrivateProjectEditRequestSchema = z
   });
 
 export type ApplyPrivateProjectEditRequest = z.infer<typeof ApplyPrivateProjectEditRequestSchema>;
+
+/**
+ * POST /api/media/projects/:projectId/renders
+ * Enqueue a durable background private render for an existing owned EditVersion.
+ */
+export const CreatePrivateRenderRequestSchema = z
+  .object({
+    editVersionId: ResourceIdSchema,
+    idempotencyKey: IdempotencyKeySchema,
+    format: z.enum(['reel', 'short', 'landscape']).optional(),
+  })
+  .strict();
+
+export type CreatePrivateRenderRequest = z.infer<typeof CreatePrivateRenderRequestSchema>;
+
+/**
+ * Private background render job response (never leaks raw storage keys).
+ * Signed downloadUrl is minted dynamically on GET only when status === READY and rights + storage verify.
+ */
+export const PrivateRenderJobResponseSchema = z.object({
+  renderJobId: ResourceIdSchema,
+  projectId: ResourceIdSchema,
+  editVersionId: ResourceIdSchema,
+  idempotencyKey: IdempotencyKeySchema,
+  customEditHash: z.string().min(1),
+  mode: z.enum(['auto', 'prompt', 'reference', 'manual']),
+  windowStartSec: z.number().finite().nonnegative(),
+  windowEndSec: z.number().finite().positive(),
+  status: MediaApiJobStatusSchema,
+  stage: z.string().min(1),
+  progressPercent: z.number().min(0).max(100),
+  durationSec: z.number().finite().positive().nullable().optional(),
+  width: z.number().int().positive().nullable().optional(),
+  height: z.number().int().positive().nullable().optional(),
+  sizeBytes: z.number().int().nonnegative().nullable().optional(),
+  downloadUrl: z.string().url().optional(),
+  downloadUrlExpiresInSec: z.number().int().positive().optional(),
+  errorCode: z.string().nullable().optional(),
+  errorMessage: z.string().nullable().optional(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  completedAt: z.string().datetime().nullable().optional(),
+});
+
+export type PrivateRenderJobResponse = z.infer<typeof PrivateRenderJobResponseSchema>;
+
+export const ApplyPrivateProjectEditResponseSchema = z.object({
+  projectId: ResourceIdSchema,
+  versionId: ResourceIdSchema,
+  parentVersionId: ResourceIdSchema.nullable(),
+  customEditHash: z.string().min(1),
+  renderJob: PrivateRenderJobResponseSchema.optional(),
+});
+
+export type ApplyPrivateProjectEditResponse = z.infer<typeof ApplyPrivateProjectEditResponseSchema>;
+
+export const CancelPrivateRenderResponseSchema = z.object({
+  renderJobId: ResourceIdSchema,
+  status: z.enum(['CANCELLED', 'READY', 'FAILED']),
+  alreadyCompleted: z.boolean().optional(),
+});
+
+export type CancelPrivateRenderResponse = z.infer<typeof CancelPrivateRenderResponseSchema>;
+
+/**
+ * BullMQ private-render queue payload (internal server queue contract)
+ */
+export const PrivateRenderQueuePayloadSchema = z.object({
+  renderJobId: ResourceIdSchema,
+  projectId: ResourceIdSchema,
+  userId: ResourceIdSchema,
+  generation: z.number().int().positive(),
+});
+
+export type PrivateRenderQueuePayload = z.infer<typeof PrivateRenderQueuePayloadSchema>;
+
+/**
+ * Verified source preview response (GET /api/projects/:id/source-url)
+ */
+export const ProjectSourcePreviewResponseSchema = z.object({
+  url: z.string().url(),
+  expiresInSec: z.number().int().positive(),
+  sourceKind: z.enum(['PRIVATE_UPLOAD', 'SOURCE_MEDIA']),
+  sourceRevision: z.string().min(1).optional(),
+  publishedGeneration: z.number().int().positive().optional(),
+});
+
+export type ProjectSourcePreviewResponse = z.infer<typeof ProjectSourcePreviewResponseSchema>;
 
 /**
  * BullMQ media-process queue payload (internal server queue contract)

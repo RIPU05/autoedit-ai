@@ -68,10 +68,11 @@ const schema = z.object({
   BACKGROUND_MUSIC_VOLUME: z.coerce.number().default(0.1),
   MAX_UPLOAD_BYTES: z.coerce.number().default(5_368_709_120),
 
-  // queue + worker controls (Phase 6)
+  // queue + worker controls (Phase 6 & Step 3C.1.1)
   ANALYSIS_CONCURRENCY: z.coerce.number().default(2),
   ANALYSIS_LOCK_DURATION_MS: z.coerce.number().default(1000 * 60 * 15),
   RENDER_CONCURRENCY: z.coerce.number().default(1),
+  PRIVATE_RENDER_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
   RENDER_TIMEOUT_MS: z.coerce.number().default(1000 * 60 * 60), // 1h ceiling
   MEMORY_THRESHOLD_MB: z.coerce.number().default(1536),
 

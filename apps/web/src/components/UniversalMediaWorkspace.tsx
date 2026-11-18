@@ -25,6 +25,8 @@ import {
 import { media as mediaApi } from '@/lib/api';
 import {
   FREE_BETA_LIMITS,
+  areSignedLinksStale,
+  broadcastMediaJobSync,
   clearActiveMediaJobRef,
   computeNextPollDelayMs,
   createSubmissionIdempotencyKey,
@@ -35,6 +37,7 @@ import {
   isTerminalJobStatus,
   loadActiveMediaJobRef,
   saveActiveMediaJobRef,
+  subscribeMediaJobSync,
   validatePublicMediaUrlInput,
 } from '@/lib/media-workspace';
 import { cn } from '@/lib/utils';
@@ -99,6 +102,8 @@ export function UniversalMediaWorkspace({
   const [job, setJob] = useState<MediaJobResponse | null>(null);
   const [jobSourceLabel, setJobSourceLabel] = useState<string>('');
   const [pollNotice, setPollNotice] = useState<string | null>(null);
+  const [pollExhausted, setPollExhausted] = useState(false);
+  const [pollEpoch, setPollEpoch] = useState(0);
   const [cancelling, setCancelling] = useState(false);
   const [cancelFeedback, setCancelFeedback] = useState<string | null>(null);
 
@@ -110,6 +115,14 @@ export function UniversalMediaWorkspace({
   const [creatingProjectFor, setCreatingProjectFor] = useState<string | null>(null);
   const [projectActionError, setProjectActionError] = useState<string | null>(null);
   const autoRetriedHighlightIdsRef = useRef<Set<string>>(new Set());
+  const activeJobIdRef = useRef<string | null>(null);
+  const jobEpochRef = useRef(0);
+  const linksFetchedAtRef = useRef<number | null>(null);
+  const linksTtlSecRef = useRef<number>(300);
+
+  useEffect(() => {
+    activeJobIdRef.current = job?.jobId ?? null;
+  }, [job?.jobId]);
 
   // Keep selected upload synchronized when projects list loads
   useEffect(() => {
@@ -140,27 +153,41 @@ export function UniversalMediaWorkspace({
 
   const fetchHighlights = useCallback(
     async (jobId: string, opts: { silent?: boolean } = {}) => {
+      const epochAtStart = jobEpochRef.current;
       if (!opts.silent) setHighlightsLoading(true);
       setHighlightsError(null);
       try {
         const res = await mediaApi.getJobHighlights(jobId);
-        setHighlights(res.highlights ?? []);
+        // Discard stale async response if user switched to another job or dismissed!
+        if (activeJobIdRef.current !== jobId || jobEpochRef.current !== epochAtStart) return;
+        const list = res.highlights ?? [];
+        setHighlights(list);
+        linksFetchedAtRef.current = Date.now();
+        linksTtlSecRef.current = list[0]?.downloadUrlExpiresInSec ?? 300;
         autoRetriedHighlightIdsRef.current.clear();
       } catch (err: any) {
+        if (activeJobIdRef.current !== jobId || jobEpochRef.current !== epochAtStart) return;
         const parsed = formatMediaApiError(err);
         if (parsed.requiresLogin) {
           handleAuthRedirect();
           return;
         }
+        // Revoked rights (403) or deleted job (404) -> clear stale highlight URLs immediately!
+        if (err?.status === 403 || err?.status === 404) {
+          setHighlights([]);
+          linksFetchedAtRef.current = null;
+        }
         setHighlightsError(parsed.message);
       } finally {
-        if (!opts.silent) setHighlightsLoading(false);
+        if (!opts.silent && activeJobIdRef.current === jobId && jobEpochRef.current === epochAtStart) {
+          setHighlightsLoading(false);
+        }
       }
     },
     [handleAuthRedirect],
   );
 
-  // Resume existing job on mount (from ?job=<jobId> or sessionStorage opaque ID)
+  // Resume existing job on mount or initialJobId switch (from ?job=<jobId> or sessionStorage opaque ID)
   useEffect(() => {
     let active = true;
     const savedRef = loadActiveMediaJobRef();
@@ -175,11 +202,20 @@ export function UniversalMediaWorkspace({
     const resumeLabel =
       savedRef && savedRef.jobId === resumeJobId ? savedRef.sourceLabel : 'Resumed media job';
 
+    const switchEpoch = ++jobEpochRef.current;
+    activeJobIdRef.current = resumeJobId;
+    setHighlights([]);
+    setHighlightsError(null);
+    setCancelFeedback(null);
+    setPollNotice(null);
+    setPollExhausted(false);
+
     (async () => {
       try {
         const status = await mediaApi.getJobStatus(resumeJobId);
-        if (!active) return;
+        if (!active || jobEpochRef.current !== switchEpoch) return;
         setJob(status);
+        activeJobIdRef.current = status.jobId;
         setJobSourceLabel(resumeLabel);
         saveActiveMediaJobRef({
           jobId: status.jobId,
@@ -191,19 +227,23 @@ export function UniversalMediaWorkspace({
           await fetchHighlights(status.jobId);
         }
       } catch (err: any) {
-        if (!active) return;
+        if (!active || jobEpochRef.current !== switchEpoch) return;
         const parsed = formatMediaApiError(err);
         if (parsed.requiresLogin) {
           handleAuthRedirect();
           return;
         }
-        // 404 (not found or belongs to another account) -> clear stale local ref safely
+        // 404 (cleaned up or belongs to another account) -> clear stale local ref safely
         if (err?.status === 404) {
           clearActiveMediaJobRef();
           syncJobUrlParam(null);
-          if (queryJobId) {
-            setInputError('That media job was not found for your account.');
-          }
+          activeJobIdRef.current = null;
+          setJob(null);
+          setInputError(
+            queryJobId
+              ? 'That media job was not found for your account.'
+              : 'Your previous media job is no longer available after cleanup. Submit a new source below.',
+          );
         }
       }
     })();
@@ -213,24 +253,70 @@ export function UniversalMediaWorkspace({
     };
   }, [initialJobId, fetchHighlights, handleAuthRedirect, syncJobUrlParam]);
 
+  // Multi-tab sync: if another tab cancels or updates the SAME jobId, re-fetch authoritative status from server!
+  // Never clobbers a tab that is viewing a DIFFERENT jobId.
+  useEffect(() => {
+    return subscribeMediaJobSync((msg) => {
+      if (!activeJobIdRef.current || msg.jobId !== activeJobIdRef.current) return;
+      const expectedEpoch = jobEpochRef.current;
+      void (async () => {
+        try {
+          const fresh = await mediaApi.getJobStatus(msg.jobId);
+          if (activeJobIdRef.current !== msg.jobId || jobEpochRef.current !== expectedEpoch) return;
+          setJob(fresh);
+          if (fresh.status === 'READY' || (fresh.status === 'RUNNING' && fresh.highlightsCount > 0)) {
+            await fetchHighlights(fresh.jobId, { silent: true });
+          }
+        } catch (err: any) {
+          if (err?.status === 401) handleAuthRedirect();
+        }
+      })();
+    });
+  }, [fetchHighlights, handleAuthRedirect]);
+
+  // Auto-refresh expired highlight signed links when user returns to an idle tab
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState !== 'visible') return;
+      const currentJobId = activeJobIdRef.current;
+      if (
+        currentJobId &&
+        highlights.length > 0 &&
+        areSignedLinksStale(linksFetchedAtRef.current, linksTtlSecRef.current)
+      ) {
+        void fetchHighlights(currentJobId, { silent: true });
+      }
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [highlights.length, fetchHighlights]);
+
   // Bounded polling loop for active (QUEUED / RUNNING) jobs — stops immediately on terminal status!
   useEffect(() => {
     if (!job || isTerminalJobStatus(job.status)) return;
 
+    const trackedJobId = job.jobId;
+    const trackedEpoch = jobEpochRef.current;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let pollCount = 0;
     let consecutiveErrors = 0;
+    const MAX_CONSECUTIVE_ERRORS = 12;
 
     const tick = async () => {
-      if (cancelled) return;
+      if (cancelled || activeJobIdRef.current !== trackedJobId || jobEpochRef.current !== trackedEpoch) return;
       pollCount++;
       try {
-        const next = await mediaApi.getJobStatus(job.jobId);
-        if (cancelled) return;
+        const next = await mediaApi.getJobStatus(trackedJobId);
+        if (cancelled || activeJobIdRef.current !== trackedJobId || jobEpochRef.current !== trackedEpoch) return;
         consecutiveErrors = 0;
         setPollNotice(null);
+        setPollExhausted(false);
         setJob(next);
+
+        if (isTerminalJobStatus(next.status)) {
+          broadcastMediaJobSync({ jobId: next.jobId, status: next.status, ts: Date.now() });
+        }
 
         if (
           next.status === 'READY' ||
@@ -248,7 +334,7 @@ export function UniversalMediaWorkspace({
           timer = setTimeout(tick, delay);
         }
       } catch (err: any) {
-        if (cancelled) return;
+        if (cancelled || activeJobIdRef.current !== trackedJobId || jobEpochRef.current !== trackedEpoch) return;
         const parsed = formatMediaApiError(err);
         if (parsed.requiresLogin) {
           handleAuthRedirect();
@@ -257,11 +343,20 @@ export function UniversalMediaWorkspace({
         if (err?.status === 404) {
           clearActiveMediaJobRef();
           syncJobUrlParam(null);
+          activeJobIdRef.current = null;
           setJob(null);
+          setHighlights([]);
           setInputError('That media job is no longer available for your account.');
           return;
         }
         consecutiveErrors++;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          setPollExhausted(true);
+          setPollNotice(
+            'Unable to reach server after multiple retries. Your job continues safely on the server — click Check Status to reconnect.',
+          );
+          return;
+        }
         setPollNotice(
           `Connection interrupted while checking progress (retry ${consecutiveErrors}). Your job keeps running safely on the server.`,
         );
@@ -285,11 +380,21 @@ export function UniversalMediaWorkspace({
       timer = setTimeout(tick, initialDelay);
     }
 
+    const onRecoverConnectivity = () => {
+      if (cancelled || document.visibilityState === 'hidden') return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(tick, 250);
+    };
+    window.addEventListener('online', onRecoverConnectivity);
+    document.addEventListener('visibilitychange', onRecoverConnectivity);
+
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      window.removeEventListener('online', onRecoverConnectivity);
+      document.removeEventListener('visibilitychange', onRecoverConnectivity);
     };
-  }, [job?.jobId, job?.status, fetchHighlights, handleAuthRedirect, syncJobUrlParam]);
+  }, [job?.jobId, job?.status, pollEpoch, fetchHighlights, handleAuthRedirect, syncJobUrlParam]);
 
   async function resolveCurrentInput(overrideInput?: {
     input: UniversalMediaInput;
@@ -370,16 +475,21 @@ export function UniversalMediaWorkspace({
         input: resolvedInput,
         idempotencyKey: idemKey,
       });
+      ++jobEpochRef.current;
+      activeJobIdRef.current = submitted.jobId;
+      linksFetchedAtRef.current = null;
       setJob(submitted);
       setJobSourceLabel(resolvedSourceLabel || 'Media job');
       setHighlights([]);
       setPollNotice(null);
+      setPollExhausted(false);
       saveActiveMediaJobRef({
         jobId: submitted.jobId,
         sourceLabel: resolvedSourceLabel || 'Media job',
         savedAt: Date.now(),
       });
       syncJobUrlParam(submitted.jobId);
+      broadcastMediaJobSync({ jobId: submitted.jobId, status: submitted.status, ts: Date.now() });
 
       if (submitted.status === 'READY') {
         await fetchHighlights(submitted.jobId);
@@ -412,6 +522,7 @@ export function UniversalMediaWorkspace({
             }
           : prev,
       );
+      broadcastMediaJobSync({ jobId: job.jobId, status: res.status, ts: Date.now() });
       if (res.alreadyCompleted && res.status === 'READY') {
         setCancelFeedback('Your job already completed before cancellation — highlights are ready below.');
         await fetchHighlights(job.jobId);
@@ -818,12 +929,18 @@ export function UniversalMediaWorkspace({
                 <button
                   type="button"
                   onClick={() => {
+                    ++jobEpochRef.current;
+                    activeJobIdRef.current = null;
+                    linksFetchedAtRef.current = null;
                     clearActiveMediaJobRef();
                     syncJobUrlParam(null);
                     setJob(null);
                     setHighlights([]);
                     setCancelFeedback(null);
                     setHighlightsError(null);
+                    setPollNotice(null);
+                    setPollExhausted(false);
+                    setPendingIdempotencyKey(createSubmissionIdempotencyKey(resolvedSourceLabel || 'media'));
                   }}
                   className="rounded-lg border border-edge px-3 py-1.5 text-xs text-white/60 hover:text-white"
                 >
@@ -861,10 +978,26 @@ export function UniversalMediaWorkspace({
           )}
 
           {pollNotice && (
-            <p className="text-xs text-accent flex items-center gap-1.5">
-              <Clock className="w-3.5 h-3.5 shrink-0" />
-              {pollNotice}
-            </p>
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-accent">
+              <p className="flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5 shrink-0" />
+                {pollNotice}
+              </p>
+              {pollExhausted && (
+                <button
+                  type="button"
+                  data-testid="retry-media-poll-btn"
+                  onClick={() => {
+                    setPollExhausted(false);
+                    setPollNotice(null);
+                    setPollEpoch((e) => e + 1);
+                  }}
+                  className="rounded border border-accent/50 px-2.5 py-1 text-[11px] text-accent hover:bg-accent/10"
+                >
+                  Check Status
+                </button>
+              )}
+            </div>
           )}
 
           {cancelFeedback && (
@@ -1040,6 +1173,17 @@ export function UniversalMediaWorkspace({
                           target="_blank"
                           rel="noopener noreferrer"
                           data-testid="download-highlight-mp4-link"
+                          onClick={(e) => {
+                            if (
+                              areSignedLinksStale(
+                                linksFetchedAtRef.current,
+                                hl.downloadUrlExpiresInSec ?? linksTtlSecRef.current,
+                              )
+                            ) {
+                              e.preventDefault();
+                              void handleRefreshHighlightLinks();
+                            }
+                          }}
                           className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-signal/50 bg-signal/10 px-3 py-2 text-xs font-medium text-signal hover:bg-signal/20"
                         >
                           <Download className="w-3.5 h-3.5" />

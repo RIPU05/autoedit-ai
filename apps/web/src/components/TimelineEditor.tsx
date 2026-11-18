@@ -64,8 +64,34 @@ export function TimelineEditor({
   const [playhead, setPlayhead] = useState(0);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewUnavailableReason, setPreviewUnavailableReason] = useState<string | null>(null);
+
+  async function refreshSourcePreview() {
+    setPreviewUnavailableReason(null);
+    try {
+      const r = await api.sourceUrl(projectId);
+      setPreviewUrl(r.url);
+    } catch (err: any) {
+      setPreviewUrl(null);
+      const status = typeof err?.status === 'number' ? err.status : 0;
+      if (status === 403) {
+        setPreviewUnavailableReason('Full source preview is unavailable because access was denied or revoked.');
+      } else if (status === 404) {
+        setPreviewUnavailableReason(
+          err?.message ||
+            'Full source video is not retained for this project. Highlight clip previews remain available above.',
+        );
+      } else if (status === 502) {
+        setPreviewUnavailableReason('Full source media failed integrity verification and cannot be previewed.');
+      } else {
+        setPreviewUnavailableReason('Full source preview could not be loaded right now.');
+      }
+    }
+  }
+
   useEffect(() => {
-    api.sourceUrl(projectId).then((r) => setPreviewUrl(r.url)).catch(() => setPreviewUrl(null));
+    void refreshSourcePreview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
   // explainable AI: why is a clip kept/removed?
@@ -237,6 +263,8 @@ export function TimelineEditor({
       {/* ── preview + visual timeline ─────────────────────────────────────── */}
       <VideoPreview
         url={previewUrl}
+        unavailableReason={previewUnavailableReason}
+        onRefreshUrl={() => void refreshSourcePreview()}
         playhead={playhead}
         onTime={setPlayhead}
         segments={ops.map((o) => ({ start: o.start, end: o.end, keep: o.keep }))}

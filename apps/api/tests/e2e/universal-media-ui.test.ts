@@ -258,21 +258,57 @@ describe.skipIf(!RUN_E2E)('Step 3C.1: Universal Media Input, Job Progress & High
       expect(await page.getByTestId('edit-mode-reference').isVisible()).toBe(true);
       expect(await page.getByTestId('edit-mode-manual').isVisible()).toBe(true);
 
-      // Scenario 8: Apply private Prompt edit, render private MP4, download & validate with ffprobe!
+      // Scenario 8 (Step 3C.1.1): Apply private Prompt edit -> async HTTP 202 private render -> survives refresh -> READY -> signed URL refresh -> download & validate with ffprobe!
       await page.getByTestId('edit-mode-prompt').click();
       await page.getByTestId('private-edit-version-name').fill('E2E Prompt Hype Cut');
       await page.getByTestId('private-edit-prompt').fill('Tighten around peak moment');
       const editRespPromise = page.waitForResponse(
         (r) => r.url().includes('/api/media/projects/') && r.url().endsWith('/edits'),
-        { timeout: 90_000 },
+        { timeout: 20_000 },
       );
-      await page.getByTestId('private-edit-render-btn').click();
+      // Double-click to verify idempotent single version & single private render submission!
+      await page.getByTestId('private-edit-render-btn').dblclick();
       const editResp = await editRespPromise;
       const editBodyText = await editResp.text();
-      expect(editResp.status(), `POST /edits failed: ${editBodyText}`).toBe(201);
+      expect([200, 202], `POST /edits failed: ${editBodyText}`).toContain(editResp.status());
+
+      // Async private render status card appears immediately
+      const renderCard = page.getByTestId('private-render-status-card');
+      await renderCard.waitFor({ state: 'visible', timeout: 20_000 });
+      const renderJobId = await renderCard.getAttribute('data-render-job-id');
+      expect(renderJobId).toBeTruthy();
+
+      // Verify zero signed URLs or storage keys persisted in sessionStorage for private render!
+      const projectSessionStorage = await page.evaluate(() => JSON.stringify(window.sessionStorage));
+      expect(projectSessionStorage).not.toContain('X-Amz-Signature');
+      expect(projectSessionStorage).not.toContain('private/users/');
+
+      // Scenario 10 (Step 3C.1.1): Refresh browser while/after private render runs -> resumes cleanly!
+      await page.reload({ waitUntil: 'networkidle', timeout: 30_000 });
+      await page.getByTestId('private-render-status-card').waitFor({ state: 'visible', timeout: 20_000 });
+      expect(await page.getByTestId('private-render-status-card').getAttribute('data-render-job-id')).toBe(
+        renderJobId,
+      );
+
+      // Wait for real private-render BullMQ worker to reach READY
+      await page.waitForFunction(
+        () =>
+          document
+            .querySelector('[data-testid="private-render-status-card"]')
+            ?.getAttribute('data-render-status') === 'READY',
+        undefined,
+        { timeout: 120_000 },
+      );
 
       const downloadLink = page.getByTestId('private-edit-download-link');
-      await downloadLink.waitFor({ state: 'visible', timeout: 30_000 });
+      await downloadLink.waitFor({ state: 'visible', timeout: 20_000 });
+      const firstMp4Url = await downloadLink.getAttribute('href');
+      expect(firstMp4Url).toBeTruthy();
+
+      // Scenario 16 (Step 3C.1.1): Refresh signed download URL via button without re-rendering
+      await page.waitForTimeout(1100);
+      await page.getByTestId('refresh-private-render-link-btn').click();
+      await page.waitForTimeout(600);
       const privateMp4Url = await downloadLink.getAttribute('href');
       expect(privateMp4Url).toBeTruthy();
 
@@ -361,13 +397,28 @@ describe.skipIf(!RUN_E2E)('Step 3C.1: Universal Media Input, Job Progress & High
         },
       });
 
-      // Scenario 11: User A cancels their job in UI -> User A becomes CANCELLED, User B stays QUEUED!
+      // Scenario 11 & Step 3C.1.1 Scenario 17 (Multi-tab UI sync):
+      // Same user opens TWO tabs to jobA; cancelling in Tab 1 syncs Tab 2 to CANCELLED while User B stays QUEUED!
+      const pageA2 = await ctxA.newPage();
       await pageA.goto(`${WEB_BASE}/media?job=${jobA.id}`, { waitUntil: 'networkidle', timeout: 30_000 });
+      await pageA2.goto(`${WEB_BASE}/media?job=${jobA.id}`, { waitUntil: 'networkidle', timeout: 30_000 });
       await pageA.getByTestId('cancel-media-job-btn').waitFor({ state: 'visible', timeout: 15_000 });
+      await pageA2.getByTestId('media-job-status-card').waitFor({ state: 'visible', timeout: 15_000 });
+
       await pageA.getByTestId('cancel-media-job-btn').click();
       await pageA.getByTestId('cancel-job-feedback').waitFor({ state: 'visible', timeout: 15_000 });
       expect(await pageA.getByTestId('media-job-status-badge').textContent()).toContain('CANCELLED');
       expect(await pageA.getByTestId('cancel-job-feedback').textContent()).toContain('other clippers');
+
+      // Multi-tab BroadcastChannel sync updates Tab 2 automatically without manual reload!
+      await pageA2.waitForFunction(
+        () =>
+          document.querySelector('[data-testid="media-job-status-card"]')?.getAttribute('data-job-status') ===
+          'CANCELLED',
+        undefined,
+        { timeout: 15_000 },
+      );
+      await pageA2.close();
 
       const freshJobB = await prisma.mediaProcessingJob.findUniqueOrThrow({ where: { id: jobB.id } });
       expect(freshJobB.status).toBe('QUEUED');

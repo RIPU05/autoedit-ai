@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  areSignedLinksStale,
   computeNextPollDelayMs,
   createSubmissionIdempotencyKey,
   describeCapabilityResult,
   formatJobStageLabel,
   formatMediaApiError,
+  formatPrivateRenderStageLabel,
   formatTimestampRange,
   isTerminalJobStatus,
   validatePublicMediaUrlInput,
@@ -98,5 +100,15 @@ describe('Step 3C.1: Universal Media Workspace Frontend Helpers', () => {
     expect(formatMediaApiError({ status: 422, data: { code: 'UNSUPPORTED_ACQUISITION' } }).message).toContain(
       "isn't available",
     );
+
+    // Step 3C.1.1 private render stage & signed link staleness helpers
+    expect(formatPrivateRenderStageLabel('queued', 'QUEUED')).toContain('private render queue');
+    expect(formatPrivateRenderStageLabel('rendering_clip', 'RUNNING')).toContain('Encoding private MP4');
+    expect(formatPrivateRenderStageLabel('validating_output', 'RUNNING')).toContain('Validating MP4');
+    expect(formatPrivateRenderStageLabel('ready', 'READY')).toContain('verified');
+    expect(formatPrivateRenderStageLabel('cancelled', 'CANCELLED')).toContain('cancelled');
+    expect(areSignedLinksStale(Date.now(), 300)).toBe(false);
+    expect(areSignedLinksStale(Date.now() - 280_000, 300)).toBe(true);
+    expect(areSignedLinksStale(null, 300)).toBe(false);
   });
 });

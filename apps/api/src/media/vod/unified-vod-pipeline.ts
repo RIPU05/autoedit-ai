@@ -1437,7 +1437,17 @@ export class UnifiedVodProcessingService {
           name: input.versionName,
           userPrompt: input.userPrompt ?? null,
           aiExplanation: `Applied ${input.mode} mode private edit (${input.windowStartSec}s–${input.windowEndSec}s).`,
-          changes: [{ action: input.mode, start: input.windowStartSec, end: input.windowEndSec }] as Prisma.InputJsonValue,
+          changes: [
+            {
+              action: input.mode,
+              target: `${input.windowStartSec}s–${input.windowEndSec}s`,
+              reasons: [
+                input.userPrompt
+                  ? `${input.mode.toUpperCase()} edit: ${input.userPrompt.slice(0, 120)}`
+                  : `Private ${input.mode} trim (${input.windowStartSec}s–${input.windowEndSec}s)`,
+              ],
+            },
+          ] as Prisma.InputJsonValue,
           timelineJson: { mode: input.mode, operations: ops, effects, customEditHash } as Prisma.InputJsonValue,
         },
       });

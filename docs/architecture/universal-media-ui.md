@@ -1,14 +1,14 @@
-# Universal Media Input, Job Progress & Highlight Workspace UI (Step 3C.1)
+# Universal Media Input, Job Progress & Highlight Workspace UI (Steps 3C.1 & 3C.1.1)
 
 ## Overview
 
-Step 3C.1 connects the Step 3B.9 / 3B.9.1 Universal Media API (`/api/media/*`) directly to the Next.js frontend (`apps/web`), giving independent clippers one cohesive authenticated workspace to:
+Steps 3C.1 and 3C.1.1 connect the Universal Media API (`/api/media/*`) directly to the Next.js frontend (`apps/web`) with production-grade source preview verification, durable asynchronous background private rendering, and resilient workspace state management, giving independent clippers one cohesive authenticated workspace to:
 
 1. Paste a public YouTube, Twitch, or Kick live/VOD link — or pick an existing uploaded video, or upload a new video — with **no mandatory streamer login**.
 2. Receive truthful backend capability feedback (never faking acquisition for unsupported external links).
 3. Submit idempotent highlight-detection jobs backed by PostgreSQL `SharedMediaWork`, `MediaProcessingJob`, and BullMQ (`media-process`).
-4. Monitor real backend progress (`QUEUED`, `RUNNING`, `READY`, `FAILED`, `CANCELLED`), resume seamlessly across browser refreshes, and cancel safely without disrupting other clippers.
-5. Preview detected highlights using short-lived (`300s`) refreshable signed URLs, open a private editing project in the existing timeline editor, edit across Auto / Prompt / Reference / Manual modes, and privately download the final MP4.
+4. Monitor real backend progress (`QUEUED`, `RUNNING`, `READY`, `FAILED`, `CANCELLED`), resume seamlessly across browser refreshes and tabs, and cancel safely without disrupting other clippers.
+5. Preview verified full source media (`SOURCE_MEDIA` / `PRIVATE_UPLOAD`) distinctly from detected highlight clips (`BASE_CLIP`), edit privately across Auto / Prompt / Reference / Manual modes, enqueue durable background private MP4 renders (`PrivateRenderJob` + BullMQ `private-render`), and download verified private MP4s.
 
 AutoAI Edit remains strictly a clipping and editing tool — **no social-media publishing buttons, no streamer approval flows, no billing checkout, and no automatic channel connections**.
 
@@ -53,12 +53,66 @@ All Universal Media calls reuse the existing authenticated `api()` client (`cred
 - `media.getJobHighlights(jobId)` → `GET /api/media/jobs/:jobId/highlights`
 - `media.createProjectFromSource(req)` → `POST /api/media/projects/from-source`
 - `media.getProjectHighlights(projectId)` → `GET /api/media/projects/:projectId/highlights`
-- `media.applyProjectEdit(projectId, req)` → `POST /api/media/projects/:projectId/edits`
+- `media.applyProjectEdit(projectId, req)` → `POST /api/media/projects/:projectId/edits` (fast non-blocking save; returns HTTP `202` with `renderJob` when `renderOutput: true`, HTTP `200` on idempotent replay, HTTP `201` on save-only; no 90-second HTTP timeout)
+- `media.enqueueProjectRender(projectId, req)` → `POST /api/media/projects/:projectId/renders`
+- `media.listProjectRenders(projectId)` → `GET /api/media/projects/:projectId/renders`
+- `media.getPrivateRenderStatus(projectId, renderJobId)` → `GET /api/media/projects/:projectId/renders/:renderJobId`
+- `media.cancelPrivateRender(projectId, renderJobId)` → `POST /api/media/projects/:projectId/renders/:renderJobId/cancel`
 
-Additive backend handoff improvements (`apps/api/src/routes/projects.routes.ts`):
-- `GET /api/projects` returns non-sensitive `sourceAsset` metadata (`id`, `durationSec`, `width`, `height` — never `s3Key`) so the Existing Upload picker lists only projects with uploaded source footage.
-- `GET /api/projects/:id` includes safe `mediaSource` summary (`id`, `provider`, `sourceType`, `metadata`) for duration & header display.
-- `GET /api/projects/:id/source-url` checks live PostgreSQL rights via `DurableMediaRegistryService` for `mediaSource`-backed projects and issues a short-lived (`300s`) signed preview URL when `sourceAsset` is absent.
+### Verified Source Preview (`GET /api/projects/:id/source-url`) & Full Source vs. Highlight Distinction
+
+Implemented in `apps/api/src/media/api/source-preview.service.ts` and `apps/api/src/routes/projects.routes.ts`:
+
+- **Private Ownership & Zero Client-Key Trust:** Verifies `project.userId === req.user.sub` (returning `404` to non-owners) and completely ignores any client-supplied storage keys.
+- **Full Source (`SOURCE_MEDIA`) vs. Highlight Clip (`BASE_CLIP`):**
+  - `GET /api/projects/:id/source-url` resolves **strictly** `SOURCE_MEDIA` via `DurableArtifactPublisher.getAuthorizedPublishedArtifact` matching exact `project.mediaSource.sourceRevision`, `publishedGeneration >= 1`, `PUBLISHED`/`REPAIRING` state, non-expired `expiresAt`, live PostgreSQL rights (`DurableMediaRegistryService.resolveServerTrustedAuth`), and MinIO HEAD size/ETag integrity.
+  - **Never silently substitutes a `BASE_CLIP`** when full `SOURCE_MEDIA` is absent, expired, or unretained — returns `404` (`SOURCE_UNAVAILABLE`) with a truthful unavailable-source message while highlight clip previews remain independently accessible via `GET /api/media/projects/:projectId/highlights`.
+  - **Private Upload Projects (`sourceAsset`):** Preserves direct-upload preview behavior while verifying object existence and positive matching size in MinIO before issuing a short-lived (`300s`) signed URL. `GET /api/projects/:id` excludes `sourceAsset.s3Key` and `bucket` from JSON responses.
+  - **Sanitized Error Codes:** Revoked/denied rights → `403`; corrupt/mismatched MinIO object → `502` (`ARTIFACT_CORRUPT`); missing/expired/unretained source → `404` (`SOURCE_UNAVAILABLE`). Raw object keys are never leaked in responses or errors.
+  - **Frontend Player (`TimelineEditor` + `VideoPreview`):** Displays explicit unavailable/denied messaging instead of stalling on `"Loading preview…"`, performs automatic one-shot signed-URL renewal on `<video onError>`, and provides a manual `"Refresh preview link"` button.
+
+---
+
+## 2A. Durable Background Private Rendering & Lifecycle (Step 3C.1.1)
+
+Implemented in `apps/api/src/media/api/private-render.service.ts`, `apps/api/src/queue/workers/private-render.worker.ts`, Prisma model `PrivateRenderJob`, and BullMQ queue `private-render`:
+
+```text
+POST /api/media/projects/:projectId/edits (renderOutput: true, idempotencyKey)
+  → Verify owner + live PostgreSQL rights + free-beta quotas & backpressure
+  → Single PostgreSQL tx: append ONE immutable EditVersion + create ONE PrivateRenderJob (QUEUED)
+  → Enqueue generation-scoped BullMQ job on `private-render` (HTTP 202 returned immediately)
+  → Private Render Worker (bounded CPU concurrency = PRIVATE_RENDER_CONCURRENCY, default 2)
+      ├─ Atomic PostgreSQL FOR UPDATE claim + continuous lease heartbeat (leaseMs / 3)
+      ├─ Re-verify live rights + fetch verified SOURCE_MEDIA (or private upload) to isolated scratch dir
+      ├─ Run real FFmpeg trim/effects with AbortSignal (SIGKILL immediately on cancel or lease loss!)
+      ├─ Independent ffprobe + SHA-256 validation (rejects empty/incomplete/corrupt MP4s)
+      ├─ Upload immutable MP4 to owner-scoped prefix: private/users/<userId>/renders/...
+      ├─ Re-verify live rights + fenced PostgreSQL READY commit (discard object if cancelled/fenced)
+      └─ Always remove scratch dir in finally
+  → Frontend polls GET /api/media/projects/:projectId/renders/:renderJobId (bounded backoff)
+      ├─ Re-verifies live rights + retention expiry + MinIO HEAD size/ETag
+      └─ Mints fresh 300s signed download URL dynamically (NEVER stored in DB or browser storage)
+```
+
+- **Version Creation vs. Render Lifecycle:** Timeline `EditVersion` records are committed immediately and immutably on save (refreshed in `VersionSidebar` right away). Rendering is decoupled into `PrivateRenderJob` (`QUEUED → RUNNING → READY | FAILED | CANCELLED`). Retrying a failed/cancelled render via `POST /api/media/projects/:projectId/renders` reuses the existing `editVersionId` without creating duplicate timeline versions.
+- **Idempotency & Double-Click Safety:** `(userId, idempotencyKey)` unique constraint in PostgreSQL plus frontend `submitLockRef` ensures rapid double-clicks or retries create strictly ONE `EditVersion`, ONE `PrivateRenderJob`, and ONE BullMQ enqueue.
+- **Crash Recovery & Fencing:** Periodic bounded `reconcileStrandedRenders` reclaims expired `RUNNING` leases by bumping `generation` and re-enqueueing up to `maxAttempts` (default 3), while stale workers are fenced out by `(id, generation, ownerToken)` CAS checks.
+- **Job Persistence, Refresh & Multi-Tab Sync:**
+  - `SourceHighlightsEditorPanel` recovers in-progress and completed private renders across browser refreshes via `GET /api/media/projects/:projectId/renders` + opaque `sessionStorage` `{ projectId, renderJobId }` ref (zero signed URLs stored).
+  - `UniversalMediaWorkspace` guards all async poll/highlight calls with `activeJobIdRef` + request epoch counters so switching jobs never applies stale responses, syncs status across tabs viewing the same `jobId` via opaque `BroadcastChannel` (`{ jobId, status, ts }` — never clobbering tabs viewing other jobs), clears highlights immediately on `403` rights revocation, auto-refreshes stale links on tab focus/download click, and reconnects automatically on `online`/`visibilitychange`.
+
+---
+
+## 2B. User Privacy, Resource Controls & Free-Beta Quotas
+
+- **Strict Private Isolation:** Shared `SOURCE_MEDIA` and `BASE_CLIP` artifacts are reused only when server-verified `SHARED_PERMITTED` rights allow; every user's `Project`, `EditTimeline`, `EditVersion`, `PrivateRenderJob`, and rendered MP4 (`private/users/<userId>/...`) remain 100% isolated (`404` to non-owners). Post-render source rights revocation immediately blocks further downloads (`403`).
+- **CPU-First Free-Beta Controls (100 Free Beta Users):**
+  - Bounded concurrent private FFmpeg renders: `PRIVATE_RENDER_CONCURRENCY=2` (isolated from shared `media-process` ingestion workers).
+  - Per-user fairness & quotas: max **2** active private renders per user (`429`), max **20** private renders per user per day (`429`), max **5** active / **50** daily media ingestion jobs (`429`).
+  - Output bounds: max **180s** clip duration per private render (`400`), resolution ceiling **1280×720** / **30 fps**.
+  - Global backpressure: max **50** queued global private renders (`503` retryable).
+  - Retention & scratch cleanup: per-job scratch directories removed unconditionally in `finally`; private render outputs expire after **24 hours** (`outputExpiresAt`), and signed URLs expire after **300 seconds** (5 minutes).
 
 ---
 
@@ -111,17 +165,24 @@ Implemented in `apps/web/src/lib/media-workspace.ts` and `apps/web/src/component
 
 ---
 
-## 7. Automated Browser E2E & Verification Coverage
+## 7. Automated Verification & Measured Performance
 
-- **Frontend Helper Unit Tests (`apps/api/tests/unit/media-workspace-helpers.test.ts`):** URL/SSRF guard, honest capability messaging, polling backoff & terminal stop, idempotency keys, and API error formatting.
-- **Universal Media UI Playwright Browser E2E (`apps/api/tests/e2e/universal-media-ui.test.ts`):** All 20 Section 10 scenarios verified against live Next.js (`localhost:3000`), Express API (`localhost:4000`), BullMQ worker, PostgreSQL, Redis, MinIO, and FFmpeg (including `ffprobe` validation of downloaded private MP4, browser refresh resume, double-click dedup, multi-subscriber cancel, failed job error, cross-user denial, expired link refresh, and `390×844` mobile layout check).
-- **Existing Upload/Editor Regression E2E (`apps/api/tests/e2e/browser-pipeline.test.ts`):** Full `Register → Upload → Analyze → Prompt Edit → Render → Download` workflow preserved end-to-end.
+- **Step 3C.1.1 Hardening Integration Suite (`apps/api/tests/integration/step3c11-hardening.test.ts`):** 4/4 passed (`45.8s`) against real local PostgreSQL, Redis, MinIO, BullMQ, and FFmpeg — verifying `SOURCE_MEDIA` vs. `BASE_CLIP` non-substitution, live rights revocation, missing/corrupt/expired/stale source rejection, private upload preview, cross-user 404 denial, non-blocking async HTTP `202` render submission (`< 2s` under simulated 2.5s worker delay), exact idempotency (1 version, 1 render job, 1 enqueue), running FFmpeg cancellation, crashed-worker bounded lease recovery (generation 1 → 2), `ffprobe` validation, private output isolation, signed URL renewal, and free-beta quotas/backpressure.
+- **Frontend Helper Unit Tests (`apps/api/tests/unit/media-workspace-helpers.test.ts`):** 4/4 passed (`7ms`).
+- **Universal Media UI Playwright Browser E2E (`apps/api/tests/e2e/universal-media-ui.test.ts`):** 3/3 passed (`57.0s`) — covering async `202` private render, double-click dedup, browser refresh resume on both `/media` and `/projects/[id]`, signed URL renewal, real `ffprobe`-validated private MP4 download, multi-tab `BroadcastChannel` sync, multi-subscriber cancel isolation, cross-user denial, and `390×844` mobile layout.
+- **Existing Upload/Editor Regression E2E (`apps/api/tests/e2e/browser-pipeline.test.ts`):** 4/4 passed (`80.7s`) — full `Register → Upload → Analyze → Prompt Edit → Render → Download` (`1080×1920`, H.264/AAC, `6.2s < 11.578s`) preserved end-to-end.
+- **Shared-Work Scaling & Full API Regression (`AI_PROVIDER=fallback npm test --prefix apps/api`):** **29/29 active files, 245/245 tests passed** (`456.2s`):
+  - `universal-media-api.test.ts`: 9/9 passed (`52.3s`; 1,000 clippers → 1 shared job in `12.2s`).
+  - `shared-job-hardening.test.ts`: 6/6 passed (`94.1s`; 1,000 clippers across 2 API instances: `enqueues=1 | workerClaims=1 | imports=1 | analyses=1 | baseClipRenders=1 | readySubscribers=1000/1000`).
+  - `shared-live-processing.test.ts`: 7/7 passed (`62.1s`; 1,000 clippers in `6.05s`, 5,000 authorized URL issuances in `4.05s`).
+  - Shared contracts (`npm run test:contracts`): 40/40 passed (`2.9s`).
 
 ---
 
-## 8. Remaining Limitations Before the 100-User Beta
+## 8. Remaining Blockers Before the 100-User Beta
 
 - **External Platform Acquisition:** Public YouTube, Twitch, and Kick URLs are truthfully recognized and reported as `UNSUPPORTED_ACQUISITION` / `BROADCAST_UNRESOLVED` until permitted provider acquisition mechanisms are integrated.
+- **Scheduled Expired Private-Render Storage Reaper:** `PrivateRenderJob.outputExpiresAt` already blocks serving expired outputs on read; a periodic background MinIO deletion sweep for expired private render objects should be scheduled before public beta launch to reclaim object storage automatically.
 - **Recent Media Jobs History List:** Currently browser refresh resumes the active/deep-linked job via `sessionStorage` + `?job=<jobId>` + `GET /api/media/jobs/:jobId`; a multi-job history endpoint (`GET /api/media/jobs`) can be added when clippers manage multiple concurrent queued streams.
 - **Reference Mode Style Transfer:** Beta Reference mode persists a versioned pacing/effect preset; automated external reference-video analysis/style transfer is deferred to a future milestone.
-- **Production Deployment & Migrations:** Local/test migrations (`20261118110531_media_processing_jobs`, `20261118121804_shared_media_work_coordination`) have not yet been applied to production pending explicit release approval.
+- **Production Deployment & Migrations:** Local/test migrations (`20261118110531_media_processing_jobs`, `20261118121804_shared_media_work_coordination`, `20261118150221_private_render_jobs`) have not yet been applied to production pending explicit release approval.

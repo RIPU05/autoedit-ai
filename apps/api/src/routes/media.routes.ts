@@ -2,6 +2,7 @@ import { Router, type NextFunction, type Request, type RequestHandler, type Resp
 import { ZodError } from 'zod';
 import {
   ApplyPrivateProjectEditRequestSchema,
+  CreatePrivateRenderRequestSchema,
   CreateProjectFromSourceRequestSchema,
   ResolveMediaSourceRequestSchema,
   SubmitMediaJobRequestSchema,
@@ -143,7 +144,7 @@ export function createMediaRouter(options: CreateMediaRouterOptions = {}): Route
     }),
   );
 
-  // POST /api/media/projects/:projectId/edits — Apply private Auto/Prompt/Reference/Manual edit + optional private render
+  // POST /api/media/projects/:projectId/edits — Save immutable EditVersion + optionally enqueue durable background private render
   router.post(
     '/projects/:projectId/edits',
     asyncHandler(async (req: Request, res: Response) => {
@@ -153,7 +154,63 @@ export function createMediaRouter(options: CreateMediaRouterOptions = {}): Route
       const projectId = assertSafePathId(req.params.projectId, 'projectId');
       const parsed = ApplyPrivateProjectEditRequestSchema.parse(req.body);
       const result = await getService().applyPrivateProjectEdit(userId, projectId, parsed);
-      return res.status(201).json(result);
+      return res.status(result.httpStatus).json(result.response);
+    }),
+  );
+
+  // POST /api/media/projects/:projectId/renders — Enqueue durable background private render for an existing owned EditVersion
+  router.post(
+    '/projects/:projectId/renders',
+    jobLimiter,
+    asyncHandler(async (req: Request, res: Response) => {
+      const userId = req.user?.sub;
+      if (!userId) return res.status(401).json({ error: 'unauthorized' });
+
+      const projectId = assertSafePathId(req.params.projectId, 'projectId');
+      const parsed = CreatePrivateRenderRequestSchema.parse(req.body);
+      const result = await getService().enqueuePrivateRenderForVersion(userId, projectId, parsed);
+      return res.status(result.httpStatus).json(result.renderJob);
+    }),
+  );
+
+  // GET /api/media/projects/:projectId/renders — List owned project's durable private render jobs (for refresh recovery)
+  router.get(
+    '/projects/:projectId/renders',
+    asyncHandler(async (req: Request, res: Response) => {
+      const userId = req.user?.sub;
+      if (!userId) return res.status(401).json({ error: 'unauthorized' });
+
+      const projectId = assertSafePathId(req.params.projectId, 'projectId');
+      const result = await getService().listPrivateProjectRenders(userId, projectId);
+      return res.status(200).json(result);
+    }),
+  );
+
+  // GET /api/media/projects/:projectId/renders/:renderJobId — Poll private render status & mint verified short-lived download URL when READY
+  router.get(
+    '/projects/:projectId/renders/:renderJobId',
+    asyncHandler(async (req: Request, res: Response) => {
+      const userId = req.user?.sub;
+      if (!userId) return res.status(401).json({ error: 'unauthorized' });
+
+      const projectId = assertSafePathId(req.params.projectId, 'projectId');
+      const renderJobId = assertSafePathId(req.params.renderJobId, 'renderJobId');
+      const result = await getService().getPrivateRenderStatus(userId, projectId, renderJobId);
+      return res.status(200).json(result);
+    }),
+  );
+
+  // POST /api/media/projects/:projectId/renders/:renderJobId/cancel — Cancel an owned QUEUED/RUNNING private render job
+  router.post(
+    '/projects/:projectId/renders/:renderJobId/cancel',
+    asyncHandler(async (req: Request, res: Response) => {
+      const userId = req.user?.sub;
+      if (!userId) return res.status(401).json({ error: 'unauthorized' });
+
+      const projectId = assertSafePathId(req.params.projectId, 'projectId');
+      const renderJobId = assertSafePathId(req.params.renderJobId, 'renderJobId');
+      const result = await getService().cancelPrivateRender(userId, projectId, renderJobId);
+      return res.status(200).json(result);
     }),
   );
 
