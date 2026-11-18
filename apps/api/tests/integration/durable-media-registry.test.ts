@@ -375,8 +375,8 @@ describe('Step 3B.7: Durable PostgreSQL Media Registry, Rights & Transactional C
         grantScope: 'SHARED_REUSE',
         allowAcquisition: true,
         allowSharedReuse: true,
-        provenance: 'TEST',
-        grantedBy: 'test',
+        provenance: 'TEST_CONTROLLED_GRANT',
+        grantedBy: 'test:step3b7',
       }),
     ).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
 

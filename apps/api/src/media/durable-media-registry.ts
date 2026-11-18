@@ -138,6 +138,109 @@ export interface RevokeSourceRightsInput {
   fallbackRightsStatus?: 'DENIED' | 'REQUIRES_AUTHORIZATION' | 'UNKNOWN';
 }
 
+const ALLOWED_SERVER_PROVENANCES = new Set([
+  'USER_DIRECT_UPLOAD',
+  'TEST_CONTROLLED_GRANT',
+  'EXPLICIT_PLATFORM_GRANT',
+  'ADMIN_VERIFIED_GRANT',
+]);
+
+const ALLOWED_SERVER_GRANTED_BY_PREFIX = /^(system|admin|test):[a-zA-Z0-9._:-]+$/;
+
+/**
+ * Validates that a rights grant originates from a trusted server subsystem with an
+ * auditable provenance value — never from an unvalidated end-user HTTP request body.
+ */
+export function assertValidServerGrantProvenance(provenance: string, grantedBy: string): void {
+  const cleanProv = provenance?.trim();
+  const cleanBy = grantedBy?.trim();
+  if (!cleanProv || !ALLOWED_SERVER_PROVENANCES.has(cleanProv)) {
+    throw new MediaSourceError({
+      code: 'ACCESS_DENIED',
+      message: `Invalid or untrusted rights grant provenance "${cleanProv ?? ''}".`,
+    });
+  }
+  if (!cleanBy || !ALLOWED_SERVER_GRANTED_BY_PREFIX.test(cleanBy)) {
+    throw new MediaSourceError({
+      code: 'ACCESS_DENIED',
+      message: `Rights grants require a trusted server grantedBy namespace (system:*, admin:*, or test:*); got "${cleanBy ?? ''}".`,
+    });
+  }
+}
+
+/**
+ * Verifies authoritative MediaSource + active MediaRightsGrant validity INSIDE an open
+ * PostgreSQL transaction so rights revocation racing with publication always fails closed.
+ */
+export async function verifyServerRightsInsideTx(
+  tx: Prisma.TransactionClient,
+  input: {
+    mediaSourceId: string;
+    requesterUserId: string;
+    rightsScope: string;
+    now: Date;
+  },
+): Promise<{ ok: true } | { ok: false; code: 'ACCESS_DENIED' | 'DRM_RESTRICTED' | 'RIGHTS_UNVERIFIED'; reason: string }> {
+  const source = await tx.mediaSource.findUnique({
+    where: { id: input.mediaSourceId },
+    include: { rightsGrants: true },
+  });
+  if (!source) {
+    return { ok: false, code: 'ACCESS_DENIED', reason: 'MediaSource no longer exists.' };
+  }
+  if (source.rightsStatus === 'RESTRICTED_DRM') {
+    return { ok: false, code: 'DRM_RESTRICTED', reason: `Source ${source.canonicalId} is DRM-restricted.` };
+  }
+  if (source.rightsStatus === 'DENIED') {
+    return { ok: false, code: 'ACCESS_DENIED', reason: `Rights for ${source.canonicalId} were revoked or denied before commit.` };
+  }
+
+  const activeGrants = source.rightsGrants.filter(
+    (g) =>
+      g.revokedAt === null &&
+      (g.expiresAt === null || g.expiresAt.getTime() > input.now.getTime()) &&
+      (g.granteeUserId === null || g.granteeUserId === input.requesterUserId),
+  );
+  const hadRevoked = source.rightsGrants.some((g) => g.revokedAt !== null);
+
+  if (source.provider === 'UPLOAD') {
+    if (!source.ownerUserId || source.ownerUserId !== input.requesterUserId) {
+      return { ok: false, code: 'ACCESS_DENIED', reason: 'Upload owner mismatch inside commit transaction.' };
+    }
+    if (input.rightsScope === 'SHARED_PERMITTED') {
+      return { ok: false, code: 'ACCESS_DENIED', reason: 'Private user upload cannot commit to SHARED_PERMITTED scope.' };
+    }
+    return { ok: true };
+  }
+
+  if (input.rightsScope === 'SHARED_PERMITTED') {
+    const hasShared =
+      source.rightsStatus === 'PERMITTED_PUBLIC' &&
+      activeGrants.some((g) => g.allowSharedReuse && g.allowAcquisition);
+    if (!hasShared) {
+      return {
+        ok: false,
+        code: hadRevoked ? 'ACCESS_DENIED' : 'RIGHTS_UNVERIFIED',
+        reason: hadRevoked
+          ? `Shared rights for ${source.canonicalId} were revoked before publication commit.`
+          : `Shared rights for ${source.canonicalId} are no longer active.`,
+      };
+    }
+    return { ok: true };
+  }
+
+  // PRIVATE_USER scope on non-upload source still requires active acquisition grant
+  const hasAcq = activeGrants.some((g) => g.allowAcquisition);
+  if (!hasAcq) {
+    return {
+      ok: false,
+      code: hadRevoked ? 'ACCESS_DENIED' : 'RIGHTS_UNVERIFIED',
+      reason: `Acquisition rights for ${source.canonicalId} are not active inside commit transaction.`,
+    };
+  }
+  return { ok: true };
+}
+
 export interface ServerResolvedAuthResult {
   auth: TrustedCacheAuthContext;
   mediaSource: MediaSource;
@@ -286,12 +389,7 @@ export class DurableMediaRegistryService {
     mediaSource: MediaSource;
     grant: MediaRightsGrant;
   }> {
-    if (!input.grantedBy.trim() || !input.provenance.trim()) {
-      throw new MediaSourceError({
-        code: 'ACCESS_DENIED',
-        message: 'Server provenance and grantedBy are required for rights grants.',
-      });
-    }
+    assertValidServerGrantProvenance(input.provenance, input.grantedBy);
 
     return await this.db.$transaction(async (tx) => {
       const source = await tx.mediaSource.findUnique({
