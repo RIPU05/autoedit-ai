@@ -38,6 +38,7 @@ model User {
   integrationAccounts IntegrationAccount[]
   integrationEventLogs IntegrationEventLog[]
   ownedMediaSources   MediaSource[] @relation("OwnedMediaSources")
+  mediaJobs           MediaProcessingJob[] @relation("UserMediaJobs")
 }
 
 enum IntegrationProvider {
@@ -124,6 +125,7 @@ model Project {
   versions    EditVersion[]
   renders     Render[]
   jobs        Job[]
+  mediaJobs   MediaProcessingJob[] @relation("ProjectMediaJobs")
 
   @@index([userId, createdAt])
   @@index([mediaSourceId])
@@ -553,6 +555,7 @@ model MediaSource {
   rightsGrants           MediaRightsGrant[]
   artifacts              SharedCacheArtifact[]
   projects               Project[]                      @relation("ProjectMediaSource")
+  mediaJobs              MediaProcessingJob[]           @relation("SourceMediaJobs")
 
   @@index([provider, channelId])
   @@index([provider, broadcastId])
@@ -645,4 +648,45 @@ model SharedArtifactAttempt {
 
   @@unique([artifactId, generation])
   @@index([state, cleanupEligibleAfter, cleanedUpAt])
+}
+
+enum MediaJobStatusEnum {
+  QUEUED
+  RUNNING
+  READY
+  FAILED
+  CANCELLED
+}
+
+model MediaProcessingJob {
+  id              String              @id @default(cuid())
+  userId          String
+  mediaSourceId   String
+  projectId       String?
+  idempotencyKey  String
+  sharedWorkKey   String
+  sourceType      MediaSourceTypeEnum
+  status          MediaJobStatusEnum  @default(QUEUED)
+  stage           String              @default("queued")
+  progressPercent Int                 @default(0)
+  bullJobId       String?
+  options         Json?
+  resultSummary   Json?
+  errorCode       String?
+  errorMessage    String?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  cancelledAt     DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  user            User                @relation("UserMediaJobs", fields: [userId], references: [id], onDelete: Cascade)
+  mediaSource     MediaSource         @relation("SourceMediaJobs", fields: [mediaSourceId], references: [id], onDelete: Cascade)
+  project         Project?            @relation("ProjectMediaJobs", fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId, createdAt])
+  @@index([userId, status])
+  @@index([sharedWorkKey, status])
+  @@index([mediaSourceId, status])
 }

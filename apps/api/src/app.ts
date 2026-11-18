@@ -12,6 +12,7 @@ import { n8nRouter, webhookRouter } from './routes/n8n.routes.js';
 import { healthRouter } from './routes/health.routes.js';
 import { creatorRouter, analyticsRouter, feedbackRouter } from './routes/account.routes.js';
 import { integrationsRouter } from './routes/integrations.routes.js';
+import { mediaRouter } from './routes/media.routes.js';
 
 export function createApp() {
   const app = express();
@@ -41,6 +42,7 @@ export function createApp() {
   app.use('/api/creator', requireAuth, GENERAL_API_LIMITER, creatorRouter);
   app.use('/api/analytics', requireAuth, GENERAL_API_LIMITER, analyticsRouter);
   app.use('/api/feedback', requireAuth, GENERAL_API_LIMITER, feedbackRouter);
+  app.use('/api/media', requireAuth, mediaRouter);
   app.use('/health', healthRouter);
 
   app.use(errorHandler);

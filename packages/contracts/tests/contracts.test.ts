@@ -12,6 +12,12 @@ import {
   SharedCacheKeyInputSchema,
   RollingBufferConfigSchema,
   HighlightWindowCandidateSchema,
+  ResolveMediaSourceRequestSchema,
+  SubmitMediaJobRequestSchema,
+  CreateProjectFromSourceRequestSchema,
+  ApplyPrivateProjectEditRequestSchema,
+  SourceCapabilityStatusSchema,
+  MediaApiJobStatusSchema,
   MediaSegmentSchema,
   MediaDiscontinuitySchema,
   MediaTimeRangeSchema,
@@ -819,6 +825,106 @@ describe('AutoAI Edit Shared Contracts Suite', () => {
         pinnedSegmentIndices: [12, 13, 14],
       };
       expect(safeValidateContract(HighlightWindowCandidateSchema, candidate).success).toBe(true);
+    });
+  });
+
+  // 16. Step 3B.9: Universal Media Request/Response API Contracts
+  describe('16. Universal Media API Contracts (Step 3B.9)', () => {
+    it('validates universal URL, existing upload, and controlled fixture inputs', () => {
+      expect(
+        safeValidateContract(ResolveMediaSourceRequestSchema, {
+          input: { inputType: 'url', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
+        }).success,
+      ).toBe(true);
+
+      expect(
+        safeValidateContract(ResolveMediaSourceRequestSchema, {
+          input: { inputType: 'upload', projectId: 'proj_abc123' },
+        }).success,
+      ).toBe(true);
+
+      expect(
+        safeValidateContract(ResolveMediaSourceRequestSchema, {
+          input: { inputType: 'controlled_fixture', fixtureKey: 'vod_demo_01' },
+        }).success,
+      ).toBe(true);
+
+      // Path traversal or arbitrary local path characters rejected in fixtureKey
+      expect(
+        safeValidateContract(ResolveMediaSourceRequestSchema, {
+          input: { inputType: 'controlled_fixture', fixtureKey: '../../etc/passwd' },
+        }).success,
+      ).toBe(false);
+    });
+
+    it('rejects client-forged authority fields (rightsStatus, canonicalSourceId, ownerUserId, storageKey, workerId)', () => {
+      const forgedResolve = {
+        input: {
+          inputType: 'url',
+          url: 'https://www.twitch.tv/videos/2284910293',
+          rightsStatus: 'PERMITTED_PUBLIC',
+        },
+      };
+      expect(safeValidateContract(ResolveMediaSourceRequestSchema, forgedResolve).success).toBe(false);
+
+      const forgedSubmit = {
+        input: { inputType: 'url', url: 'https://www.twitch.tv/videos/2284910293' },
+        idempotencyKey: 'idem_123',
+        canonicalSourceId: 'twitch:vod:2284910293',
+        ownerUserId: 'usr_victim',
+        storageKey: 'cache/private/usr_victim/clip.mp4',
+        workerId: 'forged_worker',
+      };
+      expect(safeValidateContract(SubmitMediaJobRequestSchema, forgedSubmit).success).toBe(false);
+
+      const validSubmit = {
+        input: { inputType: 'upload', projectId: 'proj_1' },
+        idempotencyKey: 'idem_valid_1',
+        options: { preRollSec: 6, postRollSec: 4 },
+      };
+      expect(safeValidateContract(SubmitMediaJobRequestSchema, validSubmit).success).toBe(true);
+    });
+
+    it('validates capability statuses, job statuses, project creation, and private edit requests', () => {
+      for (const cap of [
+        'READY_TO_PROCESS',
+        'REQUIRES_PERMISSION',
+        'UNSUPPORTED_ACQUISITION',
+        'BROADCAST_UNRESOLVED',
+        'SOURCE_UNAVAILABLE',
+      ]) {
+        expect(safeValidateContract(SourceCapabilityStatusSchema, cap).success).toBe(true);
+      }
+      for (const st of ['QUEUED', 'RUNNING', 'READY', 'FAILED', 'CANCELLED']) {
+        expect(safeValidateContract(MediaApiJobStatusSchema, st).success).toBe(true);
+      }
+
+      expect(
+        safeValidateContract(CreateProjectFromSourceRequestSchema, {
+          jobId: 'job_123',
+          title: 'My Clip Project',
+        }).success,
+      ).toBe(true);
+
+      expect(
+        safeValidateContract(ApplyPrivateProjectEditRequestSchema, {
+          mode: 'prompt',
+          versionName: 'Punchier cut',
+          userPrompt: 'Cut dead air',
+          windowStartSec: 12,
+          windowEndSec: 18,
+        }).success,
+      ).toBe(true);
+
+      // Inverted window rejected
+      expect(
+        safeValidateContract(ApplyPrivateProjectEditRequestSchema, {
+          mode: 'manual',
+          versionName: 'Bad cut',
+          windowStartSec: 20,
+          windowEndSec: 10,
+        }).success,
+      ).toBe(false);
     });
   });
 });

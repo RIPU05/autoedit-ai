@@ -9,3 +9,4 @@ export * from './durable-artifact-publisher.js';
 export * from './durable-shared-pipeline.js';
 export * from './live/index.js';
 export * from './vod/index.js';
+export * from './api/index.js';
