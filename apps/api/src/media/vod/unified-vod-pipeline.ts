@@ -618,7 +618,16 @@ export class UnifiedVodProcessingService {
             }
             scheduleHb();
           } catch (err) {
-            ownerAbort.abort(err);
+            if (
+              err instanceof MediaSourceError &&
+              (err.code === 'LEASE_EXPIRED' || err.code === 'ACCESS_DENIED')
+            ) {
+              ownerAbort.abort(err);
+            } else {
+              // Transient DB/pool hiccup on one heartbeat tick -> retry on next tick;
+              // PostgreSQL CAS at commit still strictly enforces authoritative lease.
+              scheduleHb();
+            }
           }
         }, hbInterval);
         hbTimer.unref?.();

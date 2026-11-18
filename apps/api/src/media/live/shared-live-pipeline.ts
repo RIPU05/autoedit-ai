@@ -679,6 +679,7 @@ export class SharedLiveProcessingService {
           this.metrics.heartbeatRenewals++;
           scheduleHeartbeat();
         } catch (err) {
+          if (heartbeatStopped || ownerAbort.signal.aborted) return;
           leaseLostError = err instanceof Error ? err : new Error(String(err));
           ownerAbort.abort(leaseLostError);
         }
@@ -720,6 +721,7 @@ export class SharedLiveProcessingService {
         const cold = await params.tryLoadVerifiedDurable({ deepVerify: true });
         if (cold.ok) {
           if (leaseLostError) throw leaseLostError;
+          stopHeartbeat();
           await this.coordinator.markReady({
             canonicalSourceId: params.workId,
             workerId: params.workerId,
@@ -763,6 +765,7 @@ export class SharedLiveProcessingService {
       }
 
       // Mark READY only AFTER durable output was written & verified!
+      stopHeartbeat();
       await this.coordinator.markReady({
         canonicalSourceId: params.workId,
         workerId: params.workerId,

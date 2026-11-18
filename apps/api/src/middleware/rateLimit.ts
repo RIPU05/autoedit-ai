@@ -184,3 +184,5 @@ export const AUTH_LIMITER = AUTH_REGISTER_LIMITER;
 export const UPLOAD_LIMITER = makeLimiter('upload', 20, 60_000, userOrIpKey);
 export const INTEGRATION_LIMITER = makeLimiter('integration', 10, 60_000, userOrIpKey);
 export const GENERAL_API_LIMITER = makeLimiter('general', 100, 60_000, userOrIpKey);
+export const MEDIA_RESOLVE_LIMITER = makeLimiter('media:resolve', 60, 60_000, userOrIpKey);
+export const MEDIA_JOB_LIMITER = makeLimiter('media:jobs', 30, 60_000, userOrIpKey);

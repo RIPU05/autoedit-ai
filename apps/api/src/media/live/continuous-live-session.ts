@@ -416,7 +416,7 @@ export class ContinuousLiveSessionService {
     const scoreThreshold = req.scoreThreshold ?? 65;
     const cooldownSec = req.cooldownSec ?? 12;
     const aggregationWindowSec = req.aggregationWindowSec ?? 3;
-    const leaseMs = req.leaseMs ?? 15_000;
+    const leaseMs = req.leaseMs ?? 30_000;
     const maxRetries = req.maxRetries ?? 3;
     const waitTimeoutMs = req.waitTimeoutMs ?? 60_000;
     const pollInitialMs = req.pollInitialMs ?? 40;
@@ -733,7 +733,7 @@ export class ContinuousLiveSessionService {
       else req.signal.addEventListener('abort', onCallerAbort, { once: true });
     }
 
-    const heartbeatIntervalMs = Math.max(150, Math.floor(leaseMs / 3));
+    const heartbeatIntervalMs = Math.max(150, Math.floor(leaseMs / 4));
     const scheduleHeartbeat = () => {
       if (heartbeatStopped || ownerAbort.signal.aborted) return;
       heartbeatTimer = setTimeout(async () => {
@@ -749,6 +749,7 @@ export class ContinuousLiveSessionService {
           this.counters.heartbeatRenewals++;
           scheduleHeartbeat();
         } catch (err) {
+          if (heartbeatStopped || ownerAbort.signal.aborted) return;
           leaseLostErr = err instanceof Error ? err : new Error(String(err));
           ownerAbort.abort(leaseLostErr);
         }
@@ -981,7 +982,7 @@ export class ContinuousLiveSessionService {
             // Dedicated clip-level lease heartbeat so heavy FFmpeg extraction under CPU load never loses clipWorkId lease
             let clipHbStopped = false;
             let clipHbTimer: NodeJS.Timeout | null = null;
-            const clipHbInterval = Math.max(200, Math.floor(leaseMs / 3));
+            const clipHbInterval = Math.max(200, Math.floor(leaseMs / 4));
             const scheduleClipHb = () => {
               if (clipHbStopped || ownerAbort.signal.aborted) return;
               clipHbTimer = setTimeout(async () => {
@@ -1343,8 +1344,9 @@ export class ContinuousLiveSessionService {
 
       if (leaseLostErr) throw leaseLostErr;
 
-      // Publish final ENDED session manifest and mark Redis coordination READY
+      // Publish final ENDED session manifest, stop heartbeat cleanly, and mark Redis coordination READY
       await publishSessionManifest('ENDED');
+      stopHeartbeat();
       await this.coordinator.markReady({
         canonicalSourceId: sessionWorkId,
         workerId: req.workerId,

@@ -1,18 +1,26 @@
 import { Queue } from 'bullmq';
 import { bullConnection as connection } from '../lib/redis.js';
-import type { AnalysisJobPayload, RenderJobPayload, N8nJobPayload } from '@autoedit/contracts';
+import type {
+  AnalysisJobPayload,
+  RenderJobPayload,
+  N8nJobPayload,
+  MediaProcessJobPayload,
+} from '@autoedit/contracts';
 
 export const ANALYSIS_QUEUE = 'analysis';
 export const RENDER_QUEUE = 'render';
 export const N8N_QUEUE = 'n8n-dispatch';
+export const MEDIA_PROCESS_QUEUE = 'media-process';
 
 export type AnalysisJobData = AnalysisJobPayload;
 export type RenderJobData = RenderJobPayload;
 export type N8nJobData = N8nJobPayload;
+export type MediaProcessJobData = MediaProcessJobPayload;
 
 export const analysisQueue = new Queue<AnalysisJobData>(ANALYSIS_QUEUE, { connection });
 export const renderQueue = new Queue<RenderJobData>(RENDER_QUEUE, { connection });
 export const n8nQueue = new Queue<N8nJobData>(N8N_QUEUE, { connection });
+export const mediaProcessQueue = new Queue<MediaProcessJobData>(MEDIA_PROCESS_QUEUE, { connection });
 
 // Dead-letter queue: jobs that exhaust all retries are parked here for
 // inspection / manual replay instead of vanishing (Phase 6).
@@ -46,3 +54,24 @@ export const enqueueRender = (data: RenderJobData) =>
 
 export const enqueueN8n = (data: N8nJobData) =>
   n8nQueue.add('dispatch', data, { ...defaultJobOpts, attempts: 5 });
+
+/**
+ * Enqueues shared media ingestion/analysis/clip generation onto BullMQ using a
+ * generation-scoped deterministic jobId (`${sharedWorkKey}__g${generation}`) so
+ * concurrent clippers on the same generation deduplicate cleanly onto one job,
+ * while crash recovery or post-cancel restarts get a fresh generation jobId.
+ */
+export const enqueueMediaProcess = (
+  data: MediaProcessJobData,
+  opts?: { jobId?: string; attempts?: number; backoffDelayMs?: number },
+) => {
+  const safeKey = data.sharedWorkKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const defaultJobId =
+    data.generation !== undefined ? `${safeKey}__g${data.generation}` : `${safeKey}__g1`;
+  return mediaProcessQueue.add('process-media', data, {
+    ...defaultJobOpts,
+    jobId: opts?.jobId ?? defaultJobId,
+    attempts: opts?.attempts ?? 3,
+    backoff: { type: 'exponential' as const, delay: opts?.backoffDelayMs ?? 1500 },
+  });
+};

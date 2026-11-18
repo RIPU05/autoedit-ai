@@ -8,6 +8,7 @@
 export * from './common.js';
 export * from './media.js';
 export * from './media-source.js';
+export * from './media-api.js';
 export * from './live.js';
 export * from './platforms.js';
 export * from './highlight.js';
