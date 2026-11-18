@@ -227,30 +227,36 @@ uploadRouter.post(
     await storage.completeMultipartUpload({ key, uploadId, parts });
     await clearUploadSession(uploadId);
 
-    // Metadata probing is useful but must not make a completed S3 upload fail.
+    // Metadata probing is useful for small/medium files, but downloading a large MP4
+    // synchronously inside the HTTP request risks hitting browser request timeouts.
+    // The analysis worker always runs ffprobe on the source before processing.
+    const SYNC_PROBE_MAX_BYTES = 50 * 1024 * 1024; // 50 MB
     const tmp = path.join(env.RENDER_WORK_DIR, `${projectId}-probe.mp4`);
-    const meta = await (async () => {
-      try {
-        await fs.mkdir(env.RENDER_WORK_DIR, { recursive: true });
-        const downloadUrl = await storage.createDownloadUrl({ key });
-        const dl = await fetch(downloadUrl, { signal: AbortSignal.timeout(30_000) });
-        if (!dl.ok) throw new Error(`probe download failed: ${dl.status}`);
-        await fs.writeFile(tmp, Buffer.from(await dl.arrayBuffer()));
-        return await probe(tmp);
-      } catch (err) {
-        console.warn(
-          JSON.stringify({
-            level: 'warn',
-            msg: 'upload.probe_metadata_failed',
-            projectId,
-            error: err instanceof Error ? err.message : String(err),
-          }),
-        );
-        return null;
-      } finally {
-        await fs.rm(tmp, { force: true }).catch(() => {});
-      }
-    })();
+    const meta =
+      sizeBytes <= SYNC_PROBE_MAX_BYTES
+        ? await (async () => {
+            try {
+              await fs.mkdir(env.RENDER_WORK_DIR, { recursive: true });
+              const downloadUrl = await storage.createDownloadUrl({ key });
+              const dl = await fetch(downloadUrl, { signal: AbortSignal.timeout(8_000) });
+              if (!dl.ok) throw new Error(`probe download failed: ${dl.status}`);
+              await fs.writeFile(tmp, Buffer.from(await dl.arrayBuffer()));
+              return await probe(tmp);
+            } catch (err) {
+              console.warn(
+                JSON.stringify({
+                  level: 'warn',
+                  msg: 'upload.probe_metadata_failed',
+                  projectId,
+                  error: err instanceof Error ? err.message : String(err),
+                }),
+              );
+              return null;
+            } finally {
+              await fs.rm(tmp, { force: true }).catch(() => {});
+            }
+          })()
+        : null;
 
     const asset = await prisma.asset.create({
       data: {
@@ -271,10 +277,22 @@ uploadRouter.post(
       data: { status: 'UPLOADED', sourceAssetId: asset.id },
     });
 
-    const job = await enqueueAnalysis({ projectId, s3Key: key, bucket: storage.bucket });
-    await prisma.job.create({
-      data: { bullId: job.id, projectId, type: 'ANALYZE', status: 'QUEUED' },
-    });
+    let job: { id?: string };
+    try {
+      job = await enqueueAnalysis({ projectId, s3Key: key, bucket: storage.bucket });
+      await prisma.job.create({
+        data: { bullId: job.id, projectId, type: 'ANALYZE', status: 'QUEUED' },
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await prisma.job
+        .create({
+          data: { projectId, type: 'ANALYZE', status: 'FAILED', error: `Failed to enqueue analysis job: ${msg}` },
+        })
+        .catch(() => {});
+      await prisma.project.update({ where: { id: projectId }, data: { status: 'FAILED' } }).catch(() => {});
+      throw new HttpError(503, `Upload saved, but queueing analysis failed: ${msg}`);
+    }
 
     void dispatchIntegrationEvent(project.userId, 'upload.completed', {
       projectId,

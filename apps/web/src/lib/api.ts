@@ -162,6 +162,11 @@ export const projects = {
     api<{ renderId: string }>(`/api/projects/${id}/render`, { method: 'POST', body: JSON.stringify({ format }) }),
   renderStatus: (id: string, renderId: string) =>
     api<{ render: any }>(`/api/projects/${id}/renders/${renderId}`),
+  retryAnalysis: (id: string) =>
+    api<{ ok: boolean; reusedExistingJob: boolean; analysisJobId: string; jobStatus: string; workersOnline: number | null }>(
+      `/api/projects/${id}/retry-analysis`,
+      { method: 'POST' },
+    ),
 };
 
 export interface CancelMediaJobResponse {
@@ -296,15 +301,19 @@ export async function uploadVideo(file: File, onProgress: (pct: number) => void)
     onProgress(Math.round((partNumber / partCount) * 100));
   }
 
-  return api<{ projectId: string; analysisJobId: string }>('/api/upload/complete', {
-    method: 'POST',
-    body: JSON.stringify({
-      projectId: start.projectId,
-      key: start.key,
-      uploadId: start.uploadId,
-      contentType: file.type,
-      sizeBytes: file.size,
-      parts,
-    }),
-  });
+  return api<{ projectId: string; analysisJobId: string }>(
+    '/api/upload/complete',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        projectId: start.projectId,
+        key: start.key,
+        uploadId: start.uploadId,
+        contentType: file.type,
+        sizeBytes: file.size,
+        parts,
+      }),
+    },
+    30_000,
+  );
 }

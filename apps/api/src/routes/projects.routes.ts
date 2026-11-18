@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { prisma as defaultPrisma } from '../lib/prisma.js';
 import type { MediaStorageProvider } from '../storage/storage.types.js';
 import { requireAuth, asyncHandler, HttpError } from '../middleware/auth.js';
-import { enqueueRender } from '../queue/queues.js';
+import { enqueueAnalysis, enqueueRender, analysisQueue, renderQueue } from '../queue/queues.js';
 import {
   regenerateSocialCopy,
   editTimelineWithPrompt,
@@ -56,37 +56,165 @@ export function createProjectRouter(options: CreateProjectRouterOptions = {}): R
   }),
 );
 
-// Full project detail (analysis + timeline + renders)
-router.get(
-  '/:id',
-  asyncHandler(async (req, res) => {
-    await ownedProject(req.user!.sub, req.params.id);
-    const project = await prisma.project.findUnique({
-      where: { id: req.params.id },
-      include: {
-        analysis: true,
-        timeline: true,
-        renders: true,
-        sourceAsset: {
-          select: {
-            id: true,
-            kind: true,
-            mimeType: true,
-            durationSec: true,
-            width: true,
-            height: true,
-            fps: true,
-            createdAt: true,
+  async function safeQueueWorkerCount(queue: { getWorkers?: () => Promise<unknown[]> } | undefined): Promise<number | null> {
+    if (!queue || typeof queue.getWorkers !== 'function') return null;
+    try {
+      const workers = await Promise.race([
+        queue.getWorkers(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('worker check timeout')), 1_500)),
+      ]);
+      return Array.isArray(workers) ? workers.length : 0;
+    } catch {
+      return null;
+    }
+  }
+
+  // Full project detail (analysis + timeline + renders + latest analysis job & worker visibility)
+  router.get(
+    '/:id',
+    asyncHandler(async (req, res) => {
+      await ownedProject(req.user!.sub, req.params.id);
+      const [project, latestAnalysisJob, latestError, analysisWorkersOnline, renderWorkersOnline] = await Promise.all([
+        prisma.project.findUnique({
+          where: { id: req.params.id },
+          include: {
+            analysis: true,
+            timeline: true,
+            renders: true,
+            sourceAsset: {
+              select: {
+                id: true,
+                kind: true,
+                mimeType: true,
+                durationSec: true,
+                width: true,
+                height: true,
+                fps: true,
+                createdAt: true,
+              },
+            },
+            mediaSource: {
+              select: { id: true, provider: true, sourceType: true, metadata: true },
+            },
+          },
+        }),
+        prisma.job
+          .findFirst({
+            where: { projectId: req.params.id, type: 'ANALYZE' },
+            orderBy: { createdAt: 'desc' },
+            select: {
+              id: true,
+              bullId: true,
+              type: true,
+              status: true,
+              error: true,
+              createdAt: true,
+              updatedAt: true,
+            },
+          })
+          .catch(() => null),
+        prisma.errorEvent
+          .findFirst({
+            where: { projectId: req.params.id },
+            orderBy: { createdAt: 'desc' },
+            select: { id: true, category: true, message: true, createdAt: true },
+          })
+          .catch(() => null),
+        safeQueueWorkerCount(analysisQueue as any),
+        safeQueueWorkerCount(renderQueue as any),
+      ]);
+
+      if (!project) throw new HttpError(404, 'project not found');
+
+      res.json({
+        project: {
+          ...project,
+          analysisJob: latestAnalysisJob,
+          latestError: project.status === 'FAILED' || latestAnalysisJob?.status === 'FAILED' ? latestError : null,
+          workerStatus: {
+            analysisWorkersOnline,
+            renderWorkersOnline,
           },
         },
-        mediaSource: {
-          select: { id: true, provider: true, sourceType: true, metadata: true },
-        },
-      },
-    });
-    res.json({ project });
-  }),
-);
+      });
+    }),
+  );
+
+  // Retry a failed or orphaned analysis job safely without duplicating active/waiting work
+  router.post(
+    '/:id/retry-analysis',
+    asyncHandler(async (req, res) => {
+      const owned = await ownedProject(req.user!.sub, req.params.id);
+      const project = await prisma.project.findUnique({
+        where: { id: owned.id },
+        include: { sourceAsset: true },
+      });
+      if (!project) throw new HttpError(404, 'project not found');
+      const sourceAsset =
+        project.sourceAsset ??
+        (project.sourceAssetId ? await prisma.asset.findUnique({ where: { id: project.sourceAssetId } }) : null);
+      if (!sourceAsset) {
+        throw new HttpError(400, 'project has no uploaded source video to analyze');
+      }
+      if (project.status === 'ANALYZING') {
+        throw new HttpError(409, 'analysis is already running for this project');
+      }
+      if (project.status === 'ANALYZED' || project.status === 'RENDERING' || project.status === 'RENDERED') {
+        throw new HttpError(409, 'project analysis is already complete');
+      }
+
+      const [latestJob, analysisWorkersOnline] = await Promise.all([
+        prisma.job.findFirst({
+          where: { projectId: project.id, type: 'ANALYZE' },
+          orderBy: { createdAt: 'desc' },
+        }),
+        safeQueueWorkerCount(analysisQueue as any),
+      ]);
+
+      if (latestJob?.status === 'ACTIVE') {
+        throw new HttpError(409, 'analysis job is currently active');
+      }
+
+      // Deduplicate: if a QUEUED BullMQ job still exists in waiting/active/delayed, do not double-enqueue
+      if (latestJob?.status === 'QUEUED' && latestJob.bullId && typeof (analysisQueue as any).getJob === 'function') {
+        const existingBullJob = await (analysisQueue as any).getJob(latestJob.bullId).catch(() => null);
+        if (existingBullJob && typeof existingBullJob.getState === 'function') {
+          const bullState = await existingBullJob.getState().catch(() => null);
+          if (bullState === 'waiting' || bullState === 'active' || bullState === 'delayed') {
+            return res.json({
+              ok: true,
+              reusedExistingJob: true,
+              analysisJobId: latestJob.bullId,
+              jobStatus: 'QUEUED',
+              workersOnline: analysisWorkersOnline,
+            });
+          }
+        }
+      }
+
+      const bullJob = await enqueueAnalysis({
+        projectId: project.id,
+        s3Key: sourceAsset.s3Key,
+        bucket: sourceAsset.bucket,
+      });
+
+      await prisma.job.create({
+        data: { bullId: bullJob.id, projectId: project.id, type: 'ANALYZE', status: 'QUEUED' },
+      });
+      await prisma.project.update({
+        where: { id: project.id },
+        data: { status: 'UPLOADED' },
+      });
+
+      res.json({
+        ok: true,
+        reusedExistingJob: false,
+        analysisJobId: bullJob.id,
+        jobStatus: 'QUEUED',
+        workersOnline: analysisWorkersOnline,
+      });
+    }),
+  );
 
 // Update the editable timeline (operations/effects/outputs) and approve it
 router.patch(

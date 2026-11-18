@@ -61,7 +61,7 @@ export function Uploader({ onDone }: { onDone: (projectId: string) => void }) {
       ) : (
         <div className="max-w-md mx-auto">
           <p className="text-sm text-white/70 mb-2">
-            {progress < 100 ? `Uploading… ${progress}%` : 'Uploaded — Claude is analyzing.'}
+            {progress < 100 ? `Uploading… ${progress}%` : 'Video uploaded. Preparing analysis…'}
           </p>
           <div className="h-2 rounded-full bg-edge overflow-hidden">
             <div className="h-full bg-accent transition-all" style={{ width: `${progress}%` }} />

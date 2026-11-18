@@ -358,7 +358,7 @@ export function TimelineEditor({
                 <div className="mt-1 ml-8 mr-2 text-xs bg-ink border border-accent/30 rounded-md p-2">
                   {explain.loading ? (
                     <span className="text-white/50">
-                      Asking Claude why this is {o.keep === false ? 'removed' : 'kept'}…
+                      Analyzing why this clip is {o.keep === false ? 'removed' : 'kept'}…
                     </span>
                   ) : (
                     <>

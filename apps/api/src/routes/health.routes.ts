@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { prisma } from '../lib/prisma.js';
 import { connection } from '../lib/redis.js';
 import { getStorageProvider } from '../storage/index.js';
-import { analysisQueue, renderQueue, n8nQueue } from '../queue/queues.js';
+import * as queues from '../queue/queues.js';
 import { env } from '../config/env.js';
 
 export const healthRouter = Router();
@@ -17,6 +17,39 @@ async function timed(fn: () => Promise<unknown>): Promise<Check> {
   } catch (e) {
     return { ok: false, ms: Date.now() - t0, detail: (e as Error).message };
   }
+}
+
+async function safeWorkerCount(queue: { getWorkers?: () => Promise<unknown[]> } | undefined): Promise<number | null> {
+  if (!queue || typeof queue.getWorkers !== 'function') return null;
+  try {
+    const workers = await Promise.race([
+      queue.getWorkers(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('worker check timed out')), 2_000)),
+    ]);
+    return Array.isArray(workers) ? workers.length : 0;
+  } catch {
+    return null;
+  }
+}
+
+export async function inspectWorkerHealth() {
+  const [analysis, render, mediaProcess, privateRender] = await Promise.all([
+    safeWorkerCount(queues.analysisQueue as any),
+    safeWorkerCount(queues.renderQueue as any),
+    safeWorkerCount((queues as any).mediaProcessQueue),
+    safeWorkerCount((queues as any).privateRenderQueue),
+  ]);
+  const knownCounts = [analysis, render, mediaProcess, privateRender].filter((n): n is number => typeof n === 'number');
+  const total = knownCounts.reduce((acc, n) => acc + n, 0);
+  const online = knownCounts.length === 0 ? null : (analysis ?? 0) > 0 && (render ?? 0) > 0;
+  return {
+    online,
+    total,
+    analysis,
+    render,
+    mediaProcess,
+    privateRender,
+  };
 }
 
 const checkRedis = () => timed(() => connection.ping());
@@ -45,15 +78,25 @@ const checkOllama = () =>
       throw new Error(`ollama model missing: ${env.OLLAMA_MODEL}`);
     }
   });
-const checkQueue = () =>
-  timed(async () => {
-    const counts = await Promise.all([
-      analysisQueue.getJobCounts('waiting', 'active', 'failed'),
-      renderQueue.getJobCounts('waiting', 'active', 'failed'),
-      n8nQueue.getJobCounts('waiting', 'active', 'failed'),
+const checkQueue = async (): Promise<Check> => {
+  const t0 = Date.now();
+  try {
+    const [analysisCounts, renderCounts, n8nCounts, workers] = await Promise.all([
+      queues.analysisQueue.getJobCounts('waiting', 'active', 'failed'),
+      queues.renderQueue.getJobCounts('waiting', 'active', 'failed'),
+      queues.n8nQueue.getJobCounts('waiting', 'active', 'failed'),
+      inspectWorkerHealth(),
     ]);
-    return counts;
-  });
+    const waitingTotal = (analysisCounts.waiting ?? 0) + (renderCounts.waiting ?? 0) + (n8nCounts.waiting ?? 0);
+    const detail =
+      workers.online === false
+        ? `no active analysis/render workers connected (analysisWorkers=${workers.analysis ?? 0}, renderWorkers=${workers.render ?? 0}, waiting=${waitingTotal})`
+        : undefined;
+    return { ok: true, ms: Date.now() - t0, ...(detail ? { detail } : {}) };
+  } catch (e) {
+    return { ok: false, ms: Date.now() - t0, detail: (e as Error).message };
+  }
+};
 
 healthRouter.get('/redis', async (_q, res) => res.json(await checkRedis()));
 healthRouter.get('/db', async (_q, res) => res.json(await checkDb()));
@@ -61,18 +104,20 @@ healthRouter.get('/s3', async (_q, res) => res.json(await checkS3()));
 healthRouter.get('/claude', async (_q, res) => res.json(await checkClaude()));
 healthRouter.get('/ollama', async (_q, res) => res.json(await checkOllama()));
 healthRouter.get('/queue', async (_q, res) => res.json(await checkQueue()));
+healthRouter.get('/workers', async (_q, res) => res.json(await inspectWorkerHealth()));
 
 // aggregate — returns 200 only if every dependency is healthy
 healthRouter.get('/', async (_q, res) => {
-  const [redis, db, s3c, claude, ollama, queue] = await Promise.all([
+  const [redis, db, s3c, claude, ollama, queue, workers] = await Promise.all([
     checkRedis(),
     checkDb(),
     checkS3(),
     checkClaude(),
     checkOllama(),
     checkQueue(),
+    inspectWorkerHealth(),
   ]);
   const ai = env.AI_PROVIDER === 'ollama' ? ollama : env.AI_PROVIDER === 'claude' ? claude : { ok: true, ms: 0 };
   const ok = redis.ok && db.ok && s3c.ok && ai.ok && queue.ok;
-  res.status(ok ? 200 : 503).json({ ok, redis, db, s3: s3c, claude, ollama, queue });
+  res.status(ok ? 200 : 503).json({ ok, redis, db, s3: s3c, claude, ollama, queue, workers });
 });

@@ -185,6 +185,7 @@ async function runE2ETests(): Promise<number> {
       'run',
       'tests/e2e/browser-pipeline.test.ts',
       'tests/e2e/universal-media-ui.test.ts',
+      '--fileParallelism=false',
       '--testTimeout=360000',
       '--hookTimeout=120000',
     ];
