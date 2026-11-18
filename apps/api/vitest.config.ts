@@ -7,6 +7,11 @@ export default defineConfig({
     setupFiles: ['./tests/setup-env.ts'],
     include: ['tests/**/*.test.ts'],
     pool: 'forks',
+    poolOptions: {
+      forks: {
+        maxForks: 4,
+      },
+    },
     testTimeout: 30_000,
     hookTimeout: 30_000,
   },
