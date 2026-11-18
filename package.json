@@ -7,6 +7,9 @@
     "apps/*"
   ],
   "scripts": {
+    "dev:api": "npm run dev --prefix apps/api",
+    "dev:worker": "npm run worker --prefix apps/api",
+    "dev:web": "npm run dev --prefix apps/web",
     "build:contracts": "npm run build --prefix packages/contracts",
     "build:api": "npm run build --prefix apps/api",
     "build:web": "npm run build --prefix apps/web",

@@ -22,6 +22,14 @@ import {
 import { UnifiedVodProcessingService } from '../../media/vod/unified-vod-pipeline.js';
 import { ControlledVodAcquisitionAdapter } from '../../media/vod/controlled-vod.adapter.js';
 import { ContinuousLiveSessionService } from '../../media/live/continuous-live-session.js';
+import { FfmpegRollingSegmentBuffer } from '../../media/live/rolling-segment-buffer.js';
+import { extractAudioSignalsFromSegments } from '../../media/live/audio-signal-extractor.js';
+import { extractAndVerifyHighlightClip } from '../../media/live/highlight-clip-extractor.js';
+import { CpuFirstHeuristicDetector } from '../../media/highlight-detector.js';
+import { AuthorizedDirectMediaAdapter } from '../../media/acquisition/authorized-direct-media.adapter.js';
+import { buildDefaultPlatformProviderConfig } from '../../media/providers/platform-resolver.service.js';
+import type { PlatformProviderConfig } from '../../media/providers/types.js';
+import type { CacheArtifactDescriptor } from '../../media/shared-cache.js';
 import { getControlledTestFixture } from '../../media/api/controlled-fixture-registry.js';
 import {
   SharedWorkCoordinator,
@@ -90,6 +98,8 @@ export interface CreateMediaWorkerOptions {
     ownerToken: string;
     workerId: string;
   }) => Promise<void> | void;
+  /** Optional platform config for authorized direct-media host allowlists & HTTP options. */
+  platformConfig?: PlatformProviderConfig;
 }
 
 /**
@@ -118,6 +128,7 @@ export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
   const leaseMs = opts.leaseMs ?? 30_000;
   const reconcileIntervalMs = opts.reconcileIntervalMs ?? 15_000;
   const workerIdPrefix = opts.workerIdPrefix ?? `bull_media_${process.pid}`;
+  const platformConfig = opts.platformConfig ?? buildDefaultPlatformProviderConfig();
 
   const enqueueRecoveryFn =
     opts.enqueueRecoveryJob ??
@@ -521,6 +532,313 @@ export function createMediaWorker(opts: CreateMediaWorkerOptions = {}) {
               requesterUserId: data.initiatedByUserId,
               workerId,
               rightsScope: 'PRIVATE_USER',
+              signal: abortCtrl.signal,
+            });
+            generatedClips.push({
+              candidate: cand,
+              cacheKey: clip.cacheKey,
+              objectKey: clip.objectKey,
+              descriptor: clip.descriptor,
+              clipMeta: clip.clipMeta,
+              reusedFromCache: clip.reusedFromCache,
+            });
+          }
+
+          assertNotAborted();
+          await sharedWork.commitWorkReady({
+            sharedWorkKey: data.sharedWorkKey,
+            generation: claimedGen,
+            ownerToken,
+            resultSummary: {
+              highlightsCount: generatedClips.length,
+              highlights: generatedClips,
+            } as unknown as Prisma.InputJsonValue,
+          });
+
+          return {
+            sharedWorkKey: data.sharedWorkKey,
+            generation: claimedGen,
+            highlightsCount: generatedClips.length,
+          };
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // PATH D: Real Authorized Direct Media URL (VOD MP4 or Live/Recorded HLS .m3u8)
+        // ─────────────────────────────────────────────────────────────────────
+        if (data.directMediaUrl) {
+          const allowedHosts = platformConfig.directMediaAllowedHosts ?? new Set<string>();
+          const parsedDirect = new URL(data.directMediaUrl);
+          const directHost = parsedDirect.hostname.toLowerCase().replace(/\.$/, '');
+          if (!allowedHosts.has(directHost)) {
+            throw new MediaSourceError({
+              code: 'SSRF_BLOCKED',
+              message: `Direct media host "${directHost}" is not in server allowlist.`,
+            });
+          }
+
+          const optsIn = data.options ?? {};
+          const directAdapter = new AuthorizedDirectMediaAdapter({
+            canonicalSourceId: data.canonicalSourceId as CacheableSourceId,
+            mediaUrl: data.directMediaUrl,
+            allowedHosts,
+            maxBytes: platformConfig.maxDirectMediaBytes,
+            fetchImpl: platformConfig.http?.fetchImpl,
+            dnsLookup: platformConfig.http?.dnsLookup,
+            allowLocalhostForTest: platformConfig.http?.allowLocalhostForTest,
+            hlsPollIntervalMs: 350,
+            hlsMaxSessionMs: 120_000,
+          });
+
+          // D1. Real Live HLS incremental ingestion -> emits highlights BEFORE broadcast ends!
+          if (data.sourceType === 'live') {
+            await fs.mkdir(tempUploadDir, { recursive: true });
+            const buffer = new FfmpegRollingSegmentBuffer({
+              workDir: path.join(tempUploadDir, 'hls-buffer'),
+              bufferConfig: {
+                segmentDurationSec: 4,
+                preEventSec: optsIn.preRollSec ?? 6,
+                postEventSec: optsIn.postRollSec ?? 4,
+                maxRetentionSec: 120,
+              },
+            });
+            const detector = new CpuFirstHeuristicDetector({
+              canonicalSourceId: data.canonicalSourceId as CacheableSourceId,
+              bufferConfig: {
+                segmentDurationSec: 4,
+                preEventSec: optsIn.preRollSec ?? 6,
+                postEventSec: optsIn.postRollSec ?? 4,
+                maxRetentionSec: 120,
+              },
+              cooldownSec: optsIn.cooldownSec ?? 12,
+              scoreThreshold: optsIn.scoreThreshold ?? 65,
+              aggregationWindowSec: 3,
+            });
+            const liveHighlights: Array<Record<string, unknown>> = [];
+            const emittedKeys = new Set<string>();
+            const analyzedSegIndices = new Set<number>();
+            const defaultBaseRender = {
+              format: 'reel' as const,
+              width: 1280,
+              height: 720,
+              fps: 30,
+              subtitles: false,
+              zooms: false,
+              transitions: 'none' as const,
+              music: false,
+            };
+
+            try {
+              await directAdapter.ingestLiveHlsIncrementally({
+                buffer,
+                scratchDir: path.join(tempUploadDir, 'hls-seg'),
+                signal: abortCtrl.signal,
+                onBatchIngested: async ({ ended }) => {
+                  assertNotAborted();
+                  const newSegs = buffer.getValidSegments().filter((s) => !analyzedSegIndices.has(s.index));
+                  if (newSegs.length > 0) {
+                    const extracted = await extractAudioSignalsFromSegments(newSegs);
+                    for (const s of extracted.samples) detector.ingestSignal(s);
+                    for (const seg of newSegs) analyzedSegIndices.add(seg.index);
+                  }
+                  const latestSec = buffer.getLatestBufferedSec();
+                  const candidates = detector.evaluate(latestSec);
+
+                  for (const cand of candidates) {
+                    assertNotAborted();
+                    const keyTag = `${Math.round(cand.windowStartSec)}_${Math.round(cand.windowEndSec)}`;
+                    if (emittedKeys.has(keyTag)) continue;
+                    if (!ended && !buffer.isWindowReady(cand.windowEndSec)) continue;
+                    if (cand.windowStartSec >= latestSec) continue;
+
+                    const clipDescriptor: CacheArtifactDescriptor = {
+                      artifactKind: 'BASE_CLIP',
+                      sourceRevision: optsIn.sourceRevision ?? 'v1',
+                      timeRangeSec: { start: cand.windowStartSec, end: cand.windowEndSec },
+                      algorithmVersion: cand.algorithmVersion,
+                      renderSettings: defaultBaseRender,
+                      rightsScope: 'SHARED_PERMITTED',
+                    };
+
+                    const clipOut = path.join(tempUploadDir, `live_hl_${liveHighlights.length}.mp4`);
+                    const clipMeta = await extractAndVerifyHighlightClip({
+                      buffer,
+                      windowStartSec: cand.windowStartSec,
+                      windowEndSec: Math.min(latestSec, cand.windowEndSec),
+                      outputPath: clipOut,
+                      preferStreamCopy: true,
+                      requireAudio: true,
+                      signal: abortCtrl.signal,
+                    });
+                    const clipBytes = await fs.readFile(clipOut);
+
+                    const resv = await vodService.publisher.reservePublicationGeneration({
+                      requesterUserId: data.initiatedByUserId,
+                      canonicalSourceId: data.canonicalSourceId,
+                      descriptor: clipDescriptor,
+                      workerId,
+                    });
+
+                    let publishedCacheKey: string;
+                    let publishedObjectKey: string;
+                    let reusedFromCache = false;
+
+                    if (resv.action === 'ALREADY_PUBLISHED' && resv.artifact.publishedObjectKey) {
+                      publishedCacheKey = resv.cacheKey;
+                      publishedObjectKey = resv.artifact.publishedObjectKey;
+                      reusedFromCache = true;
+                    } else if (resv.action === 'RESERVED') {
+                      const up = await vodService.publisher.uploadImmutableAttemptObject({
+                        requesterUserId: data.initiatedByUserId,
+                        canonicalSourceId: data.canonicalSourceId,
+                        descriptor: clipDescriptor,
+                        artifactId: resv.artifactId,
+                        attemptId: resv.attemptId,
+                        generation: resv.generation,
+                        workerId,
+                        body: clipBytes,
+                        contentType: 'video/mp4',
+                        fileExt: 'mp4',
+                      });
+                      const committed = await vodService.publisher.commitPublishedArtifact({
+                        requesterUserId: data.initiatedByUserId,
+                        canonicalSourceId: data.canonicalSourceId,
+                        descriptor: clipDescriptor,
+                        artifactId: resv.artifactId,
+                        attemptId: resv.attemptId,
+                        generation: resv.generation,
+                        workerId,
+                        objectKey: up.objectKey,
+                        contentSha256: up.contentSha256,
+                        etag: up.etag,
+                        sizeBytes: up.sizeBytes,
+                        mimeType: 'video/mp4',
+                        mediaMetadata: {
+                          candidate: cand,
+                          clipMeta: { ...clipMeta, filePath: '(persisted-in-storage)' },
+                        },
+                      });
+                      publishedCacheKey = committed.cacheKey;
+                      publishedObjectKey = committed.publishedObjectKey!;
+                    } else {
+                      continue;
+                    }
+
+                    emittedKeys.add(keyTag);
+                    liveHighlights.push({
+                      candidate: cand,
+                      cacheKey: publishedCacheKey,
+                      objectKey: publishedObjectKey,
+                      descriptor: clipDescriptor,
+                      clipMeta: { ...clipMeta, filePath: '(persisted-in-storage)' },
+                      reusedFromCache,
+                    });
+
+                    // Publish incremental highlight immediately while broadcast stays RUNNING!
+                    await sharedWork.publishProgressFenced({
+                      sharedWorkKey: data.sharedWorkKey,
+                      generation: claimedGen,
+                      ownerToken,
+                      stage: `streaming_live_${liveHighlights.length}_highlights`,
+                      progressPercent: Math.min(95, 25 + liveHighlights.length * 20),
+                      resultSummary: {
+                        highlightsCount: liveHighlights.length,
+                        highlights: liveHighlights,
+                        streamStatus: ended ? 'ENDED' : 'LIVE',
+                      } as unknown as Prisma.InputJsonValue,
+                    });
+                  }
+                },
+              });
+
+              assertNotAborted();
+              await sharedWork.commitWorkReady({
+                sharedWorkKey: data.sharedWorkKey,
+                generation: claimedGen,
+                ownerToken,
+                resultSummary: {
+                  highlightsCount: liveHighlights.length,
+                  highlights: liveHighlights,
+                  streamStatus: 'ENDED',
+                } as unknown as Prisma.InputJsonValue,
+              });
+
+              return {
+                sharedWorkKey: data.sharedWorkKey,
+                generation: claimedGen,
+                highlightsCount: liveHighlights.length,
+              };
+            } finally {
+              await buffer.cleanupAll().catch(() => {});
+            }
+          }
+
+          // D2. Real Authorized Direct VOD MP4/MOV acquisition -> reuses FULL UnifiedVodProcessingService!
+          await fs.mkdir(tempUploadDir, { recursive: true });
+          const localMp4 = path.join(tempUploadDir, 'direct-vod-source.mp4');
+          await directAdapter.acquireVodToFile(localMp4, { signal: abortCtrl.signal });
+
+          const vodIdPart = data.canonicalSourceId.split(':').slice(2).join(':');
+          const vodWrapper = new ControlledVodAcquisitionAdapter({
+            enabled: true,
+            archetype: 'direct_media_recording',
+            vodId: vodIdPart,
+            fixturePath: localMp4,
+            title: `Direct Media ${vodIdPart.slice(0, 8)}`,
+          });
+
+          const srcRes = await vodService.acquireOrReuseVodSource({
+            adapter: vodWrapper,
+            requesterUserId: data.initiatedByUserId,
+            workerId,
+            sourceRevision: optsIn.sourceRevision ?? 'v1',
+            rightsScope: 'SHARED_PERMITTED',
+            signal: abortCtrl.signal,
+          });
+
+          assertNotAborted();
+          await sharedWork.publishProgressFenced({
+            sharedWorkKey: data.sharedWorkKey,
+            generation: claimedGen,
+            ownerToken,
+            stage: 'analyzing_highlights',
+            progressPercent: 45,
+          });
+
+          const anaRes = await vodService.analyzeOrReuseVodHighlights({
+            canonicalSourceId: data.canonicalSourceId as CacheableSourceId,
+            sourceDescriptor: srcRes.descriptor,
+            requesterUserId: data.initiatedByUserId,
+            workerId,
+            sourceRevision: optsIn.sourceRevision ?? 'v1',
+            rightsScope: 'SHARED_PERMITTED',
+            preRollSec: optsIn.preRollSec ?? 6,
+            postRollSec: optsIn.postRollSec ?? 4,
+            cooldownSec: optsIn.cooldownSec ?? 12,
+            scoreThreshold: optsIn.scoreThreshold ?? 65,
+            enableLocalWhisper: optsIn.enableLocalWhisper ?? false,
+            signal: abortCtrl.signal,
+          });
+
+          assertNotAborted();
+          await sharedWork.publishProgressFenced({
+            sharedWorkKey: data.sharedWorkKey,
+            generation: claimedGen,
+            ownerToken,
+            stage: 'generating_base_clips',
+            progressPercent: 70,
+          });
+
+          const generatedClips = [];
+          for (const cand of anaRes.candidates) {
+            assertNotAborted();
+            const clip = await vodService.generateOrReuseVodBaseClip({
+              canonicalSourceId: data.canonicalSourceId as CacheableSourceId,
+              sourceDescriptor: srcRes.descriptor,
+              candidate: cand,
+              requesterUserId: data.initiatedByUserId,
+              workerId,
+              sourceRevision: optsIn.sourceRevision ?? 'v1',
+              rightsScope: 'SHARED_PERMITTED',
               signal: abortCtrl.signal,
             });
             generatedClips.push({

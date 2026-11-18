@@ -109,11 +109,13 @@ describe.skipIf(!RUN_E2E)('Step 3C.1: Universal Media Input, Job Progress & High
       await page.goto(`${WEB_BASE}/media`, { waitUntil: 'networkidle', timeout: 30_000 });
       await page.getByTestId('universal-url-input').waitFor({ state: 'visible', timeout: 15_000 });
 
-      // Scenarios 13, 14, 15: Recognized but unsupported YouTube, Twitch, and Kick URLs
+      // Scenarios 13, 14, 15 & Step 3C.2: Recognized but unsupported YouTube, Twitch (VOD + Clip), and Kick URLs
       const providerUrls = [
-        { label: 'youtube', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-        { label: 'twitch', url: 'https://www.twitch.tv/videos/1234567890' },
-        { label: 'kick', url: 'https://kick.com/video/11111111-2222-3333-4444-555555555555' },
+        { label: 'youtube', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', expectedStatus: 'UNSUPPORTED_ACQUISITION' },
+        { label: 'youtube', url: 'https://www.youtube.com/@mkbhd/live', expectedStatus: 'BROADCAST_UNRESOLVED' },
+        { label: 'twitch', url: 'https://www.twitch.tv/videos/1234567890', expectedStatus: 'UNSUPPORTED_ACQUISITION' },
+        { label: 'twitch', url: 'https://clips.twitch.tv/IncredulousFunnyClipSlug', expectedStatus: 'UNSUPPORTED_ACQUISITION' },
+        { label: 'kick', url: 'https://kick.com/video/11111111-2222-3333-4444-555555555555', expectedStatus: 'UNSUPPORTED_ACQUISITION' },
       ];
 
       for (const item of providerUrls) {
@@ -121,11 +123,11 @@ describe.skipIf(!RUN_E2E)('Step 3C.1: Universal Media Input, Job Progress & High
         await page.getByTestId('resolve-source-btn').click();
 
         const capCard = page.getByTestId('source-capability-card');
-        await capCard.waitFor({ state: 'visible', timeout: 15_000 });
-        expect(await capCard.getAttribute('data-capability-status')).toBe('UNSUPPORTED_ACQUISITION');
+        await capCard.waitFor({ state: 'visible', timeout: 25_000 });
+        expect(await capCard.getAttribute('data-capability-status')).toBe(item.expectedStatus);
         const text = (await capCard.textContent()) ?? '';
         expect(text.toLowerCase()).toContain(item.label);
-        expect(text).toContain("automatic processing isn't available for it yet");
+        expect(text).toContain("automatic processing isn't available");
         // No fake processing submit button shown for unsupported external URLs!
         expect(await page.getByTestId('submit-media-job-btn').count()).toBe(0);
       }

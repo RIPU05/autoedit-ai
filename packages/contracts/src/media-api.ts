@@ -6,6 +6,7 @@ import {
   IdentityScopeSchema,
   MediaSourceProviderSchema,
   MediaSourceTypeSchema,
+  SourceAvailabilitySchema,
 } from './media-source.js';
 import { IdempotencyKeySchema } from './processing.js';
 
@@ -73,14 +74,31 @@ export const ResolveMediaSourceRequestSchema = z
 
 export type ResolveMediaSourceRequest = z.infer<typeof ResolveMediaSourceRequestSchema>;
 
+export const ProviderNoticeSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  retryAfterSec: z.number().int().positive().optional(),
+});
+
+export type ProviderNotice = z.infer<typeof ProviderNoticeSchema>;
+
 export const ResolveMediaSourceResponseSchema = z.object({
   capabilityStatus: SourceCapabilityStatusSchema,
   provider: MediaSourceProviderSchema,
   sourceType: MediaSourceTypeSchema,
   identityScope: IdentityScopeSchema,
+  availability: SourceAvailabilitySchema.optional(),
   normalizedUrl: z.string().optional(),
   mediaSourceId: ResourceIdSchema.optional(),
+  broadcastId: z.string().min(1).optional(),
   title: z.string().optional(),
+  channelName: z.string().optional(),
+  durationSec: z.number().finite().nonnegative().optional(),
+  thumbnailUrl: z.string().url().optional(),
+  isLive: z.boolean().optional(),
+  isClip: z.boolean().optional(),
+  platformClipSupported: z.boolean().optional(),
+  providerNotice: ProviderNoticeSchema.optional(),
   canSubmitJob: z.boolean(),
   reason: z.string().min(1),
   supportedActions: z.array(z.string()),
@@ -338,6 +356,7 @@ export const MediaProcessJobPayloadSchema = z.object({
   userJobId: ResourceIdSchema,
   controlledFixtureKey: z.string().optional(),
   uploadProjectId: ResourceIdSchema.optional(),
+  directMediaUrl: z.string().url().optional(),
   options: MediaJobProcessingOptionsSchema.optional(),
 });
 

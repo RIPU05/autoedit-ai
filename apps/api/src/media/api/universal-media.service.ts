@@ -32,8 +32,9 @@ import { connection as defaultRedis } from '../../lib/redis.js';
 import { getStorageProvider } from '../../storage/index.js';
 import type { MediaStorageProvider } from '../../storage/storage.types.js';
 import { enqueueMediaProcess } from '../../queue/queues.js';
-import { resolveMediaSourceFromUrl } from '../canonical-source.js';
 import { MediaSourceError } from '../errors.js';
+import { PlatformSourceResolverService } from '../providers/platform-resolver.service.js';
+import type { PlatformProviderConfig } from '../providers/types.js';
 import {
   RedisCoordinationStore,
   SharedIngestionCoordinator,
@@ -103,6 +104,8 @@ export interface UniversalMediaServiceDeps {
     payload: PrivateRenderQueuePayload,
     opts?: { jobId?: string },
   ) => Promise<{ id?: string }>;
+  /** Optional platform metadata & direct-media provider config (defaults to env-backed fail-closed config). */
+  platformConfig?: PlatformProviderConfig;
 }
 
 /**
@@ -202,6 +205,7 @@ interface ResolvedInternalSource {
   rightsScope?: CacheRightsScope;
   controlledFixtureKey?: string;
   uploadProjectId?: string;
+  directMediaUrl?: string;
 }
 
 /**
@@ -220,6 +224,7 @@ export class UniversalMediaApiService {
   readonly coordinator: SharedIngestionCoordinator;
   readonly sharedWork: SharedWorkCoordinator;
   readonly privateRenders: PrivateRenderService;
+  readonly platformResolver: PlatformSourceResolverService;
   readonly vodService: UnifiedVodProcessingService;
   readonly quotas: MediaApiQuotaConfig;
   readonly keyPrefix: string;
@@ -264,6 +269,7 @@ export class UniversalMediaApiService {
       skipImmediateEnqueue: this.skipImmediateEnqueue,
       enqueueJob: deps.enqueuePrivateRenderJob,
     });
+    this.platformResolver = new PlatformSourceResolverService(deps.platformConfig);
     this.registry = new DurableMediaRegistryService(this.db);
     this.publisher = new DurableArtifactPublisher(
       this.db,
@@ -459,28 +465,30 @@ export class UniversalMediaApiService {
       };
     }
 
-    // 3. External URL submission (strict SSRF + scheme + host + provider parsing!)
-    const resolvedUrl = resolveMediaSourceFromUrl(input.url);
-
-    // Channel-only live URLs require verified broadcast session resolution before caching/ingestion
-    if (resolvedUrl.identityScope === 'CHANNEL_DISCOVERY') {
-      return {
-        response: {
-          capabilityStatus: 'BROADCAST_UNRESOLVED',
-          provider: resolvedUrl.provider,
-          sourceType: 'live',
-          identityScope: 'CHANNEL_DISCOVERY',
-          normalizedUrl: resolvedUrl.normalizedUrl,
-          canSubmitJob: false,
-          reason:
-            'Recognized live channel URL. An active, permitted broadcast session identity must be resolved before ingestion can start.',
-          supportedActions: ['upload_video'],
-        },
-      };
-    }
+    // 3. External URL submission (strict SSRF + DNS + redirect + official platform metadata resolver!)
+    const platformRes = await this.platformResolver.resolveUrl(input.url, {
+      hasServerVerifiedGrant: async (canonicalId) => {
+        try {
+          await this.registry.resolveServerTrustedAuth({
+            requesterUserId: userId,
+            canonicalSourceId: canonicalId,
+            requireAcquisition: true,
+            requireSharedReuse: true,
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    });
+    const resolvedUrl = platformRes.source;
 
     // Check if an authoritative server MediaSource already exists for this canonical ID
-    const existingMs = await this.registry.getMediaSourceByCanonicalId(resolvedUrl.canonicalId);
+    const existingMs =
+      resolvedUrl.identityScope !== 'CHANNEL_DISCOVERY'
+        ? await this.registry.getMediaSourceByCanonicalId(resolvedUrl.canonicalId)
+        : null;
+
     if (existingMs) {
       if (existingMs.rightsStatus === 'DENIED' || existingMs.rightsStatus === 'RESTRICTED_DRM') {
         return {
@@ -489,8 +497,17 @@ export class UniversalMediaApiService {
             provider: resolvedUrl.provider,
             sourceType: resolvedUrl.sourceType,
             identityScope: resolvedUrl.identityScope,
+            availability: platformRes.availability,
             normalizedUrl: resolvedUrl.normalizedUrl,
             mediaSourceId: existingMs.id,
+            broadcastId: platformRes.metadata.broadcastId ?? resolvedUrl.broadcastId,
+            title: platformRes.metadata.title,
+            channelName: platformRes.metadata.channelName,
+            durationSec: platformRes.metadata.durationSec,
+            thumbnailUrl: platformRes.metadata.thumbnailUrl,
+            isLive: platformRes.metadata.isLive,
+            isClip: platformRes.metadata.isClip,
+            platformClipSupported: platformRes.metadata.platformClipSupported,
             canSubmitJob: false,
             reason: 'Acquisition or sharing permission for this source is denied or restricted.',
             supportedActions: [],
@@ -500,19 +517,134 @@ export class UniversalMediaApiService {
       }
     }
 
-    // Honest truthful status: recognized platform VOD/broadcast URL, but real third-party
-    // acquisition adapters are NOT yet enabled in this milestone — NEVER fake downloads!
+    // 3b. Real non-fixture Authorized Direct Media URL (VOD MP4/MOV or Live/Recorded HLS .m3u8)
+    if (
+      resolvedUrl.provider === 'direct_media' &&
+      platformRes.canSubmitJob &&
+      platformRes.directMediaFinalUrl &&
+      resolvedUrl.identityScope !== 'CHANNEL_DISCOVERY'
+    ) {
+      const canonicalId = resolvedUrl.canonicalId as CacheableSourceId;
+      const ms = await this.registry.registerOrGetMediaSource({
+        canonicalId,
+        provider: 'direct_media',
+        sourceType: resolvedUrl.sourceType,
+        identityScope: resolvedUrl.identityScope,
+        externalId: resolvedUrl.externalId,
+        broadcastId: resolvedUrl.broadcastId,
+        normalizedUrl: platformRes.directMediaFinalUrl,
+        availability: platformRes.availability,
+        metadata: {
+          title: platformRes.metadata.title,
+          durationSec: platformRes.metadata.durationSec,
+          isLive: platformRes.metadata.isLive,
+        },
+      });
+
+      // Ensure active server-authoritative grant exists when host is in server-configured
+      // DIRECT_MEDIA_PERMITTED_PUBLIC_HOSTS, WITHOUT ever overriding a revoked or denied source!
+      let authorized = false;
+      try {
+        await this.registry.resolveServerTrustedAuth({
+          requesterUserId: userId,
+          canonicalSourceId: canonicalId,
+          requireAcquisition: true,
+          requireSharedReuse: true,
+        });
+        authorized = true;
+      } catch {
+        const host = new URL(platformRes.directMediaFinalUrl).hostname.toLowerCase().replace(/\.$/, '');
+        const hasRevoked = await this.db.mediaRightsGrant.count({
+          where: { mediaSourceId: ms.id, revokedAt: { not: null } },
+        });
+        if (
+          hasRevoked === 0 &&
+          ms.rightsStatus !== 'DENIED' &&
+          ms.rightsStatus !== 'RESTRICTED_DRM' &&
+          this.platformResolver.config.directMediaPermittedPublicHosts?.has(host)
+        ) {
+          await this.registry.grantSourceRights({
+            canonicalSourceId: canonicalId,
+            grantScope: 'SHARED_REUSE',
+            allowAcquisition: true,
+            allowSharedReuse: true,
+            rightsStatus: 'PERMITTED_PUBLIC',
+            acquisitionCapability: 'PERMITTED_DIRECT_URL',
+            provenance: 'ADMIN_VERIFIED_GRANT',
+            grantedBy: 'system:direct-media-policy',
+            reason: `Server-authorized direct media host (${host})`,
+          });
+          authorized = true;
+        }
+      }
+
+      if (!authorized) {
+        return {
+          response: {
+            capabilityStatus: 'REQUIRES_PERMISSION',
+            provider: 'direct_media',
+            sourceType: resolvedUrl.sourceType,
+            identityScope: resolvedUrl.identityScope,
+            availability: platformRes.availability,
+            normalizedUrl: platformRes.directMediaFinalUrl,
+            mediaSourceId: ms.id,
+            title: platformRes.metadata.title,
+            durationSec: platformRes.metadata.durationSec,
+            isLive: platformRes.metadata.isLive,
+            canSubmitJob: false,
+            reason: 'Rights for this direct media source are unverified or have been revoked.',
+            supportedActions: ['upload_video'],
+          },
+          mediaSourceId: ms.id,
+        };
+      }
+
+      return {
+        response: {
+          capabilityStatus: 'READY_TO_PROCESS',
+          provider: 'direct_media',
+          sourceType: resolvedUrl.sourceType,
+          identityScope: resolvedUrl.identityScope,
+          availability: platformRes.availability,
+          normalizedUrl: platformRes.directMediaFinalUrl,
+          mediaSourceId: ms.id,
+          broadcastId: platformRes.metadata.broadcastId ?? resolvedUrl.broadcastId,
+          title: platformRes.metadata.title,
+          durationSec: platformRes.metadata.durationSec,
+          isLive: platformRes.metadata.isLive,
+          canSubmitJob: true,
+          reason: platformRes.reason,
+          supportedActions: ['submit_job', 'create_project'],
+        },
+        mediaSourceId: ms.id,
+        canonicalSourceId: canonicalId,
+        rightsScope: 'SHARED_PERMITTED',
+        directMediaUrl: platformRes.directMediaFinalUrl,
+      };
+    }
+
+    // 3c. Truthful official metadata result for YouTube / Twitch / Kick (never fakes downloads!)
     return {
       response: {
-        capabilityStatus: 'UNSUPPORTED_ACQUISITION',
+        capabilityStatus: platformRes.capabilityStatus,
         provider: resolvedUrl.provider,
         sourceType: resolvedUrl.sourceType,
         identityScope: resolvedUrl.identityScope,
+        availability: platformRes.availability,
         normalizedUrl: resolvedUrl.normalizedUrl,
         mediaSourceId: existingMs?.id,
+        broadcastId: platformRes.metadata.broadcastId ?? resolvedUrl.broadcastId,
+        title: platformRes.metadata.title,
+        channelName: platformRes.metadata.channelName,
+        durationSec: platformRes.metadata.durationSec,
+        thumbnailUrl: platformRes.metadata.thumbnailUrl,
+        isLive: platformRes.metadata.isLive,
+        isClip: platformRes.metadata.isClip,
+        platformClipSupported: platformRes.metadata.platformClipSupported,
+        providerNotice: platformRes.providerNotice,
         canSubmitJob: false,
-        reason: `Recognized ${resolvedUrl.provider} ${resolvedUrl.sourceType} URL, but no permitted automated acquisition adapter is enabled for this provider yet. Upload video footage directly or use an approved source.`,
-        supportedActions: ['upload_video'],
+        reason: platformRes.reason,
+        supportedActions: platformRes.supportedActions,
       },
       mediaSourceId: existingMs?.id,
     };
@@ -695,6 +827,7 @@ export class UniversalMediaApiService {
         initiatedByUserId: userId,
         controlledFixtureKey: resolved.controlledFixtureKey,
         uploadProjectId: resolved.uploadProjectId,
+        directMediaUrl: resolved.directMediaUrl,
         options,
       },
     });

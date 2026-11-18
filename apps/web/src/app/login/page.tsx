@@ -37,8 +37,8 @@ export default function LoginPage() {
             Upload once.<br />Ship a week of clips.
           </h1>
           <p className="mt-4 text-sm text-white/60 max-w-sm">
-            Claude finds the highlights, cuts the dead air, writes the captions and the copy.
-            FFmpeg renders the reels. n8n publishes them.
+            AutoAI Edit detects highlights, cuts dead air, and prepares captions. Edit in Auto,
+            Prompt, Reference, or Manual mode and download private MP4 clips.
           </p>
           {/* faux timeline strip — the page's one memorable device */}
           <div className="mt-10 flex gap-[3px] h-12">

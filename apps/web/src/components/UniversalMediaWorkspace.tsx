@@ -807,27 +807,85 @@ export function UniversalMediaWorkspace({
                 : 'border-warn/40 bg-warn/10',
           )}
         >
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-            <div className="flex items-start gap-2.5">
-              {capabilityInfo.tone === 'ready' ? (
-                <CheckCircle2 className="w-4 h-4 text-signal mt-0.5 shrink-0" />
-              ) : (
-                <AlertCircle
-                  className={cn(
-                    'w-4 h-4 mt-0.5 shrink-0',
-                    capabilityInfo.tone === 'unsupported' ? 'text-accent' : 'text-warn',
-                  )}
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+            <div className="flex items-start gap-3 min-w-0">
+              {resolved.thumbnailUrl && (
+                <img
+                  src={resolved.thumbnailUrl}
+                  alt={resolved.title || 'Resolved source thumbnail'}
+                  className="w-24 h-14 rounded-md object-cover border border-edge shrink-0 bg-ink"
                 />
               )}
-              <div>
-                <p className="text-sm font-medium text-white">{capabilityInfo.headline}</p>
-                <p className="text-xs sm:text-sm text-white/70 mt-1">{capabilityInfo.body}</p>
+              <div className="flex items-start gap-2.5 min-w-0">
+                {capabilityInfo.tone === 'ready' ? (
+                  <CheckCircle2 className="w-4 h-4 text-signal mt-0.5 shrink-0" />
+                ) : (
+                  <AlertCircle
+                    className={cn(
+                      'w-4 h-4 mt-0.5 shrink-0',
+                      capabilityInfo.tone === 'unsupported' ? 'text-accent' : 'text-warn',
+                    )}
+                  />
+                )}
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-white">{capabilityInfo.headline}</p>
+                  {(resolved.title || resolved.channelName || typeof resolved.durationSec === 'number') && (
+                    <p
+                      data-testid="resolved-source-metadata"
+                      className="text-xs text-white/80 mt-1 truncate"
+                    >
+                      {resolved.title ? <span className="font-medium">{resolved.title}</span> : null}
+                      {resolved.channelName ? (
+                        <span className="text-white/55">
+                          {resolved.title ? ' · ' : ''}
+                          {resolved.channelName}
+                        </span>
+                      ) : null}
+                      {typeof resolved.durationSec === 'number' && resolved.durationSec > 0 ? (
+                        <span className="font-mono text-white/50">
+                          {' '}
+                          · {Math.floor(resolved.durationSec / 60)}m {Math.round(resolved.durationSec % 60)}s
+                        </span>
+                      ) : null}
+                    </p>
+                  )}
+                  <p className="text-xs sm:text-sm text-white/70 mt-1">{capabilityInfo.body}</p>
+                  {capabilityInfo.technicalReason &&
+                    capabilityInfo.technicalReason !== capabilityInfo.body && (
+                      <p className="text-xs text-white/55 mt-1">{capabilityInfo.technicalReason}</p>
+                    )}
+                </div>
               </div>
             </div>
-            <span className="self-start shrink-0 rounded border border-edge bg-ink px-2 py-0.5 font-mono text-[11px] uppercase text-white/60">
-              {resolved.provider} · {resolved.sourceType} · {resolved.capabilityStatus}
-            </span>
+            <div className="flex flex-wrap sm:flex-col items-start sm:items-end gap-1 shrink-0">
+              <span className="rounded border border-edge bg-ink px-2 py-0.5 font-mono text-[11px] uppercase text-white/60">
+                {resolved.provider} · {capabilityInfo.contentKindLabel} · {resolved.capabilityStatus}
+              </span>
+              <span className="font-mono text-[10px] text-white/45">
+                URL capture: {resolved.canSubmitJob ? 'Enabled (ready to process)' : 'Metadata only in this build'}
+                {resolved.platformClipSupported !== undefined
+                  ? ` · Platform clips: ${resolved.platformClipSupported ? 'API metadata (broadcaster/editor auth for download)' : 'Not supported'}`
+                  : ''}
+              </span>
+            </div>
           </div>
+
+          {resolved.providerNotice && (
+            <div
+              data-testid="provider-api-notice"
+              className="rounded border border-edge bg-ink/80 px-3 py-2 text-xs text-white/60 flex items-center justify-between gap-2"
+            >
+              <span>
+                <span className="font-mono text-white/75">{resolved.providerNotice.code}:</span>{' '}
+                {resolved.providerNotice.message}
+              </span>
+              {resolved.providerNotice.retryAfterSec ? (
+                <span className="font-mono text-[11px] text-accent shrink-0">
+                  Retry in ~{resolved.providerNotice.retryAfterSec}s
+                </span>
+              ) : null}
+            </div>
+          )}
 
           <div className="flex flex-wrap gap-2.5 pt-1">
             {resolved.canSubmitJob && (
@@ -850,7 +908,7 @@ export function UniversalMediaWorkspace({
                 className="inline-flex items-center gap-1.5 rounded-lg border border-edge bg-ink px-3.5 py-2 text-xs sm:text-sm text-white hover:border-accent"
               >
                 <Upload className="w-4 h-4" />
-                Upload an authorized video instead
+                Upload a local video file
               </button>
             )}
 
