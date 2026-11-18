@@ -121,12 +121,14 @@ export function VersionSidebar({
                     {v.changes.map((c, i) => (
                       <li key={i} className="text-[11px]">
                         <span className="font-mono uppercase text-white/40">{c.action}</span>{' '}
-                        <span className="text-white/80">{c.target}</span>
-                        <ul className="list-disc list-inside text-white/50 ml-1">
-                          {c.reasons.map((r, j) => (
-                            <li key={j}>{r}</li>
-                          ))}
-                        </ul>
+                        <span className="text-white/80">{c.target ?? ''}</span>
+                        {Array.isArray(c.reasons) && c.reasons.length > 0 && (
+                          <ul className="list-disc list-inside text-white/50 ml-1">
+                            {c.reasons.map((r, j) => (
+                              <li key={j}>{r}</li>
+                            ))}
+                          </ul>
+                        )}
                       </li>
                     ))}
                   </ul>

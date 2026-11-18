@@ -152,12 +152,17 @@ async function ensureLocalServices() {
     console.log('✓ Next.js frontend is already running on http://localhost:3000 (verified app signature)');
   }
 
-  // Reset only disposable test-owned registration rate limits in Redis
+  // Reset only disposable test-owned auth rate limits in Redis
   try {
     const { connection: redis } = await import('../src/lib/redis.js');
-    const testKeys = ['rl:auth:reg:ip:::1', 'rl:auth:reg:ip:127.0.0.1'];
+    const testKeys = [
+      'rl:auth:reg:ip:::1',
+      'rl:auth:reg:ip:127.0.0.1',
+      'rl:auth:login:ip:::1',
+      'rl:auth:login:ip:127.0.0.1',
+    ];
     await redis.del(...testKeys);
-    console.log('✓ Reset disposable local test registration rate-limit keys.');
+    console.log('✓ Reset disposable local test auth rate-limit keys.');
   } catch {
     // Handled
   }
@@ -179,6 +184,7 @@ async function runE2ETests(): Promise<number> {
       'vitest',
       'run',
       'tests/e2e/browser-pipeline.test.ts',
+      'tests/e2e/universal-media-ui.test.ts',
       '--testTimeout=360000',
       '--hookTimeout=120000',
     ];

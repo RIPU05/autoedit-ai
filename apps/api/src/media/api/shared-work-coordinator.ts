@@ -170,9 +170,7 @@ export class SharedWorkCoordinator {
       peek !== null &&
       ((peek.status === 'READY' && input.allowSharedReuse) ||
         peek.status === 'ENQUEUED' ||
-        (peek.status === 'RUNNING' &&
-          peek.leaseExpiresAt !== null &&
-          peek.leaseExpiresAt.getTime() + this.defaultLeaseMs > now.getTime()));
+        peek.status === 'RUNNING');
 
     if (canTryKeyShareFastPath) {
       try {
@@ -215,10 +213,7 @@ export class SharedWorkCoordinator {
             };
           }
 
-          const isHealthyRunning =
-            work.status === 'RUNNING' &&
-            work.leaseExpiresAt !== null &&
-            new Date(work.leaseExpiresAt).getTime() + this.defaultLeaseMs > now.getTime();
+          const isHealthyRunning = work.status === 'RUNNING';
           if (work.status === 'ENQUEUED' || isHealthyRunning) {
             const attachedJob = await tx.mediaProcessingJob.create({
               data: {
@@ -375,13 +370,9 @@ export class SharedWorkCoordinator {
           };
         }
 
-        // Case B: Prior work FAILED, CANCELLED, or RUNNING whose lease has been expired past the
-        // hot-path grace margin (reconcileStrandedWork handles immediate lease-expiry recovery so
-        // impatient subscribers never preempt a healthy worker during a brief FFmpeg CPU burst!)
-        const isExpiredRunning =
-          work.status === 'RUNNING' &&
-          work.leaseExpiresAt !== null &&
-          work.leaseExpiresAt.getTime() + this.defaultLeaseMs <= now.getTime();
+        // Case B: Prior work FAILED or CANCELLED -> bump generation and transition cleanly to PENDING_ENQUEUE!
+        // (Expired RUNNING worker leases are recovered exclusively by bounded reconcileStrandedWork so
+        // concurrent hot-path subscribers never preempt a live FFmpeg worker into duplicate enqueues.)
         const isTerminalRestart =
           work.status === 'FAILED' ||
           work.status === 'CANCELLED' ||
@@ -391,7 +382,7 @@ export class SharedWorkCoordinator {
         let nextGen = work.generation;
         let deduplicatedSharedWork = false;
 
-        if (isTerminalRestart || isExpiredRunning) {
+        if (isTerminalRestart) {
           nextGen = work.generation + 1;
           needsEnqueue = true;
           deduplicatedSharedWork = false;
@@ -403,15 +394,14 @@ export class SharedWorkCoordinator {
           needsEnqueue = isBrandNew || retryDue;
           deduplicatedSharedWork = !isBrandNew;
         } else {
-          // ENQUEUED or healthy active RUNNING -> attach without re-enqueueing!
+          // ENQUEUED or RUNNING -> attach without re-enqueueing!
           needsEnqueue = false;
           deduplicatedSharedWork = true;
         }
 
-        const initialJobStatus =
-          work.status === 'RUNNING' && !isExpiredRunning ? 'RUNNING' : 'QUEUED';
+        const initialJobStatus = work.status === 'RUNNING' ? 'RUNNING' : 'QUEUED';
         const initialSummary =
-          work.status === 'RUNNING' && !isExpiredRunning && work.resultSummary
+          work.status === 'RUNNING' && work.resultSummary
             ? ({
                 ...(work.resultSummary as Record<string, unknown>),
                 deduplicatedSharedWork: true,
@@ -428,14 +418,11 @@ export class SharedWorkCoordinator {
             attachedGeneration: nextGen,
             sourceType: input.sourceType,
             status: initialJobStatus,
-            stage: work.status === 'RUNNING' && !isExpiredRunning ? work.stage : 'queued',
-            progressPercent:
-              work.status === 'RUNNING' && !isExpiredRunning ? work.progressPercent : 0,
-            bullJobId: work.status === 'ENQUEUED' || (work.status === 'RUNNING' && !isExpiredRunning)
-              ? work.bullJobId
-              : null,
-            startedAt:
-              work.status === 'RUNNING' && !isExpiredRunning ? work.startedAt : null,
+            stage: work.status === 'RUNNING' ? work.stage : 'queued',
+            progressPercent: work.status === 'RUNNING' ? work.progressPercent : 0,
+            bullJobId:
+              work.status === 'ENQUEUED' || work.status === 'RUNNING' ? work.bullJobId : null,
+            startedAt: work.status === 'RUNNING' ? work.startedAt : null,
             options: input.options as Prisma.InputJsonValue,
             resultSummary: initialSummary,
           },
@@ -461,10 +448,9 @@ export class SharedWorkCoordinator {
               errorMessage: null,
               stage: 'queued',
               progressPercent: 0,
-              resultSummary:
-                isTerminalRestart || isExpiredRunning ? undefined : (work.resultSummary ?? undefined),
+              resultSummary: isTerminalRestart ? undefined : (work.resultSummary ?? undefined),
               enqueuePayload: enqueuePayload as unknown as Prisma.InputJsonValue,
-              enqueueAttempts: isTerminalRestart || isExpiredRunning ? 0 : work.enqueueAttempts,
+              enqueueAttempts: isTerminalRestart ? 0 : work.enqueueAttempts,
               // Short dispatch lease (5s) so concurrent arrivals don't stampede enqueueFn while we dispatch,
               // yet an API crash before enqueue recovers promptly!
               nextEnqueueAt: new Date(now.getTime() + 5_000),

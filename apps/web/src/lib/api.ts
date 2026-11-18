@@ -1,3 +1,19 @@
+import type {
+  ApplyPrivateProjectEditRequest,
+  ApplyPrivateProjectEditResponse,
+  CancelPrivateRenderResponse,
+  CreatePrivateRenderRequest,
+  CreateProjectFromSourceRequest,
+  CreateProjectFromSourceResponse,
+  MediaHighlightItem,
+  MediaJobHighlightsResponse,
+  MediaJobResponse,
+  PrivateRenderJobResponse,
+  ProjectSourcePreviewResponse,
+  ResolveMediaSourceResponse,
+  SubmitMediaJobRequest,
+  UniversalMediaInput,
+} from '@autoedit/contracts';
 import type { EditChange, Version, VersionDiff } from './types';
 
 const API_BASE_URL =
@@ -19,9 +35,9 @@ export class ApiError extends Error {
   }
 }
 
-async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function api<T>(path: string, init: RequestInit = {}, timeoutMs = 15_000): Promise<T> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 15_000);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${API_BASE_URL}${path}`, {
       ...init,
@@ -113,7 +129,7 @@ export const integrations = {
 export const projects = {
   list: () => api<{ projects: any[] }>('/api/projects'),
   get: (id: string) => api<{ project: any }>(`/api/projects/${id}`),
-  sourceUrl: (id: string) => api<{ url: string }>(`/api/projects/${id}/source-url`),
+  sourceUrl: (id: string) => api<ProjectSourcePreviewResponse>(`/api/projects/${id}/source-url`),
   repurpose: (id: string, platforms: string[]) =>
     api<{ renders: { platform: string; renderId: string; format: string; caption: string }[] }>(
       `/api/projects/${id}/repurpose`,
@@ -146,6 +162,93 @@ export const projects = {
     api<{ renderId: string }>(`/api/projects/${id}/render`, { method: 'POST', body: JSON.stringify({ format }) }),
   renderStatus: (id: string, renderId: string) =>
     api<{ render: any }>(`/api/projects/${id}/renders/${renderId}`),
+};
+
+export interface CancelMediaJobResponse {
+  jobId: string;
+  status: 'CANCELLED' | 'READY' | 'FAILED';
+  alreadyCompleted?: boolean;
+  detachedFromSharedWork: boolean;
+  sharedWorkStillActive: boolean;
+}
+
+export interface ProjectHighlightsResponse {
+  projectId: string;
+  mediaSourceId: string;
+  highlights: MediaHighlightItem[];
+}
+
+export interface ProjectPrivateRendersListResponse {
+  projectId: string;
+  renders: PrivateRenderJobResponse[];
+}
+
+/**
+ * Authenticated Universal Media API client (Steps 3B.9 / 3B.9.1 / 3C.1 / 3C.1.1).
+ * Never sends client-forged rightsStatus, ownerUserId, workerId, storageKey, or canonicalSourceId.
+ * Private MP4 renders execute asynchronously in background workers (no 90s blocking HTTP requests).
+ */
+export const media = {
+  resolveSource: (input: UniversalMediaInput) =>
+    api<ResolveMediaSourceResponse>('/api/media/sources/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ input }),
+    }),
+  submitJob: (req: SubmitMediaJobRequest) =>
+    api<MediaJobResponse>('/api/media/jobs', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+  getJobStatus: (jobId: string) =>
+    api<MediaJobResponse>(`/api/media/jobs/${encodeURIComponent(jobId)}`),
+  cancelJob: (jobId: string) =>
+    api<CancelMediaJobResponse>(`/api/media/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: 'POST',
+    }),
+  getJobHighlights: (jobId: string) =>
+    api<MediaJobHighlightsResponse>(`/api/media/jobs/${encodeURIComponent(jobId)}/highlights`),
+  createProjectFromSource: (req: CreateProjectFromSourceRequest) =>
+    api<CreateProjectFromSourceResponse>(
+      '/api/media/projects/from-source',
+      {
+        method: 'POST',
+        body: JSON.stringify(req),
+      },
+      20_000,
+    ),
+  getProjectHighlights: (projectId: string) =>
+    api<ProjectHighlightsResponse>(`/api/media/projects/${encodeURIComponent(projectId)}/highlights`),
+  applyProjectEdit: (projectId: string, req: ApplyPrivateProjectEditRequest) =>
+    api<ApplyPrivateProjectEditResponse>(
+      `/api/media/projects/${encodeURIComponent(projectId)}/edits`,
+      {
+        method: 'POST',
+        body: JSON.stringify(req),
+      },
+      20_000,
+    ),
+  enqueueProjectRender: (projectId: string, req: CreatePrivateRenderRequest) =>
+    api<PrivateRenderJobResponse>(
+      `/api/media/projects/${encodeURIComponent(projectId)}/renders`,
+      {
+        method: 'POST',
+        body: JSON.stringify(req),
+      },
+      20_000,
+    ),
+  listProjectRenders: (projectId: string) =>
+    api<ProjectPrivateRendersListResponse>(
+      `/api/media/projects/${encodeURIComponent(projectId)}/renders`,
+    ),
+  getPrivateRenderStatus: (projectId: string, renderJobId: string) =>
+    api<PrivateRenderJobResponse>(
+      `/api/media/projects/${encodeURIComponent(projectId)}/renders/${encodeURIComponent(renderJobId)}`,
+    ),
+  cancelPrivateRender: (projectId: string, renderJobId: string) =>
+    api<CancelPrivateRenderResponse>(
+      `/api/media/projects/${encodeURIComponent(projectId)}/renders/${encodeURIComponent(renderJobId)}/cancel`,
+      { method: 'POST' },
+    ),
 };
 
 /**

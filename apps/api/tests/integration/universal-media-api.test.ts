@@ -8,7 +8,7 @@ import dotenv from 'dotenv';
 import { Queue } from 'bullmq';
 import rateLimit from 'express-rate-limit';
 import { PrismaClient } from '@prisma/client';
-import type { MediaProcessJobPayload, CacheableSourceId } from '@autoedit/contracts';
+import type { MediaProcessJobPayload, PrivateRenderQueuePayload, CacheableSourceId } from '@autoedit/contracts';
 import {
   ensureControlledLiveFixture,
   ensureControlledMultiEventLiveFixture,
@@ -22,6 +22,7 @@ import {
 } from '../../src/media/index.js';
 import { createMediaRouter } from '../../src/routes/media.routes.js';
 import { createMediaWorker } from '../../src/queue/workers/media.worker.js';
+import { createPrivateRenderWorker } from '../../src/queue/workers/private-render.worker.js';
 import { requireAuth, errorHandler } from '../../src/middleware/auth.js';
 import { signToken } from '../../src/utils/auth.js';
 import { bullConnection, connection as redis } from '../../src/lib/redis.js';
@@ -87,6 +88,7 @@ describe('Step 3B.9: Universal Media API, Authenticated Jobs, Real BullMQ Worker
 
   const runTag = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   const queueName = `media-process-test-${runTag}`;
+  const privateRenderQueueName = `private-render-test-${runTag}`;
   const keyPrefix = `autoedit:test:step3b9:${runTag}:`;
   const fixture30sPath = path.resolve(process.cwd(), 'tmp', 'step3b5-controlled-live-fixture.mp4');
   const fixture60sPath = path.resolve(process.cwd(), 'tmp', 'step3b6-3event-60s-fixture.mp4');
@@ -99,7 +101,9 @@ describe('Step 3B.9: Universal Media API, Authenticated Jobs, Real BullMQ Worker
   const createdStorageKeys = new Set<string>();
 
   let testQueue: Queue<MediaProcessJobPayload>;
+  let privateRenderTestQueue: Queue<PrivateRenderQueuePayload>;
   let workerHandle: ReturnType<typeof createMediaWorker>;
+  let privateRenderWorkerHandle: ReturnType<typeof createPrivateRenderWorker>;
   let service: UniversalMediaApiService;
   let server: http.Server;
   let baseUrl = '';
@@ -212,6 +216,15 @@ describe('Step 3B.9: Universal Media API, Authenticated Jobs, Real BullMQ Worker
         removeOnFail: 200,
       },
     });
+    privateRenderTestQueue = new Queue<PrivateRenderQueuePayload>(privateRenderQueueName, {
+      connection: bullConnection,
+      defaultJobOptions: {
+        attempts: 3,
+        backoff: { type: 'fixed', delay: 300 },
+        removeOnComplete: 200,
+        removeOnFail: 100,
+      },
+    });
 
     service = new UniversalMediaApiService({
       db,
@@ -241,6 +254,14 @@ describe('Step 3B.9: Universal Media API, Authenticated Jobs, Real BullMQ Worker
         });
         return { id: job.id };
       },
+      enqueuePrivateRenderJob: async (payload, opts) => {
+        const job = await privateRenderTestQueue.add('private-render', payload, {
+          jobId: opts?.jobId ?? `priv_${payload.renderJobId}__g${payload.generation}`,
+          attempts: 3,
+          backoff: { type: 'fixed', delay: 300 },
+        });
+        return { id: job.id };
+      },
     });
 
     workerHandle = createMediaWorker({
@@ -255,6 +276,19 @@ describe('Step 3B.9: Universal Media API, Authenticated Jobs, Real BullMQ Worker
       reconcileIntervalMs: 0,
     });
     await workerHandle.worker.waitUntilReady();
+
+    privateRenderWorkerHandle = createPrivateRenderWorker({
+      queueName: privateRenderQueueName,
+      db: dbWorker,
+      storage,
+      redis: redis as any,
+      bullConnection,
+      workRootDir: path.join(workRootWorker, 'priv-renders'),
+      keyPrefix: `${keyPrefix}priv_render:`,
+      concurrency: 2,
+      reconcileIntervalMs: 0,
+    });
+    await privateRenderWorkerHandle.worker.waitUntilReady();
 
     // High-ceiling rate limiters for main app (tight rate-limit test mounts its own dedicated route!)
     const noopLimiter: express.RequestHandler = (_req, _res, next) => next();
@@ -285,8 +319,15 @@ describe('Step 3B.9: Universal Media API, Authenticated Jobs, Real BullMQ Worker
     if (server) {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+    if (privateRenderWorkerHandle) {
+      await privateRenderWorkerHandle.worker.close().catch(() => {});
+    }
     if (workerHandle) {
       await workerHandle.worker.close().catch(() => {});
+    }
+    if (privateRenderTestQueue) {
+      await privateRenderTestQueue.obliterate({ force: true }).catch(() => {});
+      await privateRenderTestQueue.close().catch(() => {});
     }
     if (testQueue) {
       await testQueue.obliterate({ force: true }).catch(() => {});
@@ -644,7 +685,7 @@ describe('Step 3B.9: Universal Media API, Authenticated Jobs, Real BullMQ Worker
     expect(projAHl.data.highlights.length).toBeGreaterThanOrEqual(1);
     assertNoRawStorageLeak(projAHl.data);
 
-    // 18. Private custom edit isolation: User A applies prompt edit + renders private MP4
+    // 18. Private custom edit isolation: User A applies prompt edit -> enqueues async private render (HTTP 202)
     const editA = await apiRequest('POST', `/api/media/projects/${projA.data.projectId}/edits`, {
       token: userA.token,
       body: {
@@ -655,14 +696,36 @@ describe('Step 3B.9: Universal Media API, Authenticated Jobs, Real BullMQ Worker
         windowEndSec: 21,
         effects: { subtitles: false, zooms: true, transitions: 'fade', music: false },
         renderOutput: true,
+        idempotencyKey: `priv_edit_idem_${runTag}`,
       },
     });
-    expect(editA.status).toBe(201);
+    expect(editA.status).toBe(202);
     expect(editA.data.parentVersionId).toBe(projA.data.rootVersionId);
-    expect(editA.data.downloadUrl).toBeTruthy();
-    expect(editA.data.downloadUrlExpiresInSec).toBe(300);
+    expect(editA.data.renderJob?.renderJobId).toBeTruthy();
     assertNoRawStorageLeak(editA.data);
-    await downloadAndProbeSignedUrl(editA.data.downloadUrl, `priv_edit_a_${runTag}`);
+
+    // Poll async private render job until READY, then probe verified private MP4
+    const renderJobId = editA.data.renderJob.renderJobId as string;
+    let renderDone: any = null;
+    const renderDeadline = Date.now() + 60_000;
+    while (Date.now() < renderDeadline) {
+      const rPoll = await apiRequest(
+        'GET',
+        `/api/media/projects/${projA.data.projectId}/renders/${renderJobId}`,
+        { token: userA.token },
+      );
+      expect(rPoll.status).toBe(200);
+      assertNoRawStorageLeak(rPoll.data);
+      if (['READY', 'FAILED', 'CANCELLED'].includes(rPoll.data.status)) {
+        renderDone = rPoll.data;
+        break;
+      }
+      await sleep(250);
+    }
+    expect(renderDone?.status).toBe('READY');
+    expect(renderDone?.downloadUrl).toBeTruthy();
+    expect(renderDone?.downloadUrlExpiresInSec).toBe(300);
+    await downloadAndProbeSignedUrl(renderDone.downloadUrl, `priv_edit_a_${runTag}`);
 
     // User B gets 404 trying to view or edit User A's project
     const sneakProjHl = await apiRequest(

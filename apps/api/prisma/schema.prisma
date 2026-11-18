@@ -39,6 +39,7 @@ model User {
   integrationEventLogs IntegrationEventLog[]
   ownedMediaSources   MediaSource[] @relation("OwnedMediaSources")
   mediaJobs           MediaProcessingJob[] @relation("UserMediaJobs")
+  privateRenderJobs   PrivateRenderJob[] @relation("UserPrivateRenders")
 }
 
 enum IntegrationProvider {
@@ -126,6 +127,7 @@ model Project {
   renders     Render[]
   jobs        Job[]
   mediaJobs   MediaProcessingJob[] @relation("ProjectMediaJobs")
+  privateRenderJobs PrivateRenderJob[] @relation("ProjectPrivateRenders")
 
   @@index([userId, createdAt])
   @@index([mediaSourceId])
@@ -215,6 +217,7 @@ model EditVersion {
   project  Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
   parent   EditVersion?  @relation("VersionTree", fields: [parentVersionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   children EditVersion[] @relation("VersionTree")
+  privateRenderJobs PrivateRenderJob[] @relation("VersionPrivateRenders")
 
   @@index([projectId, createdAt])
 }
@@ -732,4 +735,57 @@ model MediaProcessingJob {
   @@index([userId, status])
   @@index([sharedWorkKey, status])
   @@index([mediaSourceId, status])
+}
+
+// Durable owner-scoped background private render jobs (Step 3C.1.1)
+// Separates immutable EditVersion creation from asynchronous FFmpeg rendering.
+// Never persists signed download URLs; signed URLs are minted dynamically after live rights & storage verification.
+model PrivateRenderJob {
+  id                  String             @id @default(cuid())
+  userId              String
+  projectId           String
+  editVersionId       String
+  mediaSourceId       String?
+  idempotencyKey      String
+  customEditHash      String
+  mode                String
+  windowStartSec      Float
+  windowEndSec        Float
+  effects             Json               @default("{}")
+  renderSettings      Json               @default("{}")
+  status              MediaJobStatusEnum @default(QUEUED)
+  stage               String             @default("queued")
+  progressPercent     Int                @default(0)
+  generation          Int                @default(1)
+  ownerWorkerId       String?
+  ownerToken          String?
+  leaseExpiresAt      DateTime?
+  bullJobId           String?
+  attempts            Int                @default(0)
+  maxAttempts         Int                @default(3)
+  artifactCacheKey    String?
+  outputObjectKey     String?
+  outputSha256        String?
+  outputEtag          String?
+  outputSizeBytes     BigInt?
+  outputDurationSec   Float?
+  outputWidth         Int?
+  outputHeight        Int?
+  outputExpiresAt     DateTime?
+  errorCode           String?
+  errorMessage        String?
+  startedAt           DateTime?
+  completedAt         DateTime?
+  cancelledAt         DateTime?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  user                User               @relation("UserPrivateRenders", fields: [userId], references: [id], onDelete: Cascade)
+  project             Project            @relation("ProjectPrivateRenders", fields: [projectId], references: [id], onDelete: Cascade)
+  editVersion         EditVersion        @relation("VersionPrivateRenders", fields: [editVersionId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, idempotencyKey])
+  @@index([projectId, createdAt])
+  @@index([userId, status])
+  @@index([status, leaseExpiresAt])
 }
