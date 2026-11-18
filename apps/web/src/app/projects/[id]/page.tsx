@@ -8,6 +8,7 @@ import { VersionSidebar } from '@/components/VersionSidebar';
 import { CompareView } from '@/components/CompareView';
 import { RepurposePanel } from '@/components/RepurposePanel';
 import { FeedbackModal } from '@/components/FeedbackModal';
+import { SourceHighlightsEditorPanel } from '@/components/SourceHighlightsEditorPanel';
 
 interface PageError {
   status: number;
@@ -182,67 +183,99 @@ export default function ProjectPage() {
   const a = project.analysis;
   const t = project.timeline;
   const completed = (project.renders ?? []).filter((r: any) => r.status === 'COMPLETED');
+  const hasMediaSourceEditor = Boolean(project.mediaSourceId && t);
+  const initialHighlightId =
+    typeof window !== 'undefined'
+      ? new URLSearchParams(window.location.search).get('highlight')
+      : null;
+  const sourceDuration =
+    project.sourceAsset?.durationSec ??
+    (typeof project.mediaSource?.metadata?.durationSec === 'number'
+      ? project.mediaSource.metadata.durationSec
+      : 0);
 
   return (
-    <main className="max-w-5xl mx-auto px-6 py-8">
-      <a href="/dashboard" className="text-sm text-white/40 hover:text-white">← Dashboard</a>
+    <main className="max-w-5xl mx-auto px-4 sm:px-6 py-8">
+      <div className="flex flex-wrap items-center gap-4 text-sm">
+        <a href="/dashboard" className="text-white/40 hover:text-white">← Dashboard</a>
+        <a href="/media" className="text-white/40 hover:text-white">Media Hub</a>
+      </div>
       <h1 className="font-display text-2xl mt-2">{project.title}</h1>
-      <p className="font-mono text-xs text-white/40 mt-1">status: {project.status}</p>
+      <p className="font-mono text-xs text-white/40 mt-1">
+        status: {project.status}
+        {project.mediaSource
+          ? ` · source: ${String(project.mediaSource.provider).toLowerCase()} (${String(project.mediaSource.sourceType).toLowerCase()})`
+          : ''}
+      </p>
 
-      {!a && project.status !== 'FAILED' && (
+      {!a && !hasMediaSourceEditor && project.status !== 'FAILED' && (
         <p className="mt-8 text-white/60">Claude is analyzing your video… this page updates automatically.</p>
       )}
       {project.status === 'FAILED' && (
         <p className="mt-8 text-warn">Something failed during processing. Check the worker logs and re-upload.</p>
       )}
 
-      {a && (
+      {hasMediaSourceEditor && (
+        <SourceHighlightsEditorPanel
+          projectId={id}
+          initialHighlightId={initialHighlightId}
+          onVersionCreated={async () => {
+            await load();
+            setVersionRefresh((k) => k + 1);
+            setEditorKey((k) => k + 1);
+          }}
+        />
+      )}
+
+      {(a || hasMediaSourceEditor) && (
         <>
-          {/* analysis summary */}
-          <div className="mt-8 grid lg:grid-cols-2 gap-8">
-            <section>
-              <h2 className="font-display text-sm uppercase tracking-wider text-white/40 mb-2">Summary</h2>
-              <p className="text-sm text-white/80">{a.summary}</p>
-              {a.strategy && (
-                <>
-                  <h2 className="font-display text-sm uppercase tracking-wider text-white/40 mt-6 mb-2">Director strategy</h2>
-                  <p className="text-sm text-white/70">{a.strategy}</p>
-                </>
-              )}
-              {a.hook?.hook && (
-                <div className="mt-4 bg-panel border border-accent/30 rounded p-3">
-                  <span className="font-mono text-[11px] text-accent uppercase">Hook</span>
-                  <p className="text-sm text-white/80 mt-0.5">“{a.hook.hook.text}”</p>
-                  <p className="font-mono text-[11px] text-white/30 mt-0.5">
-                    {Math.floor(a.hook.hook.start)}s–{Math.floor(a.hook.hook.end)}s
-                  </p>
+          {/* analysis summary (for direct-upload AI analysis projects) */}
+          {a && (
+            <div className="mt-8 grid lg:grid-cols-2 gap-8">
+              <section>
+                <h2 className="font-display text-sm uppercase tracking-wider text-white/40 mb-2">Summary</h2>
+                <p className="text-sm text-white/80">{a.summary}</p>
+                {a.strategy && (
+                  <>
+                    <h2 className="font-display text-sm uppercase tracking-wider text-white/40 mt-6 mb-2">Director strategy</h2>
+                    <p className="text-sm text-white/70">{a.strategy}</p>
+                  </>
+                )}
+                {a.hook?.hook && (
+                  <div className="mt-4 bg-panel border border-accent/30 rounded p-3">
+                    <span className="font-mono text-[11px] text-accent uppercase">Hook</span>
+                    <p className="text-sm text-white/80 mt-0.5">“{a.hook.hook.text}”</p>
+                    <p className="font-mono text-[11px] text-white/30 mt-0.5">
+                      {Math.floor(a.hook.hook.start)}s–{Math.floor(a.hook.hook.end)}s
+                    </p>
+                  </div>
+                )}
+                {a.thumbnail && (
+                  <div className="mt-3 bg-panel border border-edge rounded p-3">
+                    <span className="font-mono text-[11px] text-signal uppercase">Thumbnail</span>
+                    <p className="text-sm text-white/80 mt-0.5">{a.thumbnail.overlayText}</p>
+                    <p className="text-xs text-white/50 mt-0.5">{a.thumbnail.concept}</p>
+                  </div>
+                )}
+                <h2 className="font-display text-sm uppercase tracking-wider text-white/40 mt-6 mb-2">Suggested titles</h2>
+                <ul className="space-y-1 text-sm text-white/80 list-disc list-inside">
+                  {a.suggestedTitles?.map((title: string, i: number) => <li key={i}>{title}</li>)}
+                </ul>
+              </section>
+              <section>
+                <h2 className="font-display text-sm uppercase tracking-wider text-white/40 mb-2">Social copy</h2>
+                <div className="space-y-2 text-sm">
+                  {a.socialCopy &&
+                    Object.entries(a.socialCopy).map(([k, v]) => (
+                      <div key={k} className="bg-panel border border-edge rounded px-3 py-2">
+                        <span className="font-mono text-[11px] text-accent uppercase">{k}</span>
+                        <p className="text-white/80 mt-0.5">{v as string}</p>
+                      </div>
+                    ))}
                 </div>
-              )}
-              {a.thumbnail && (
-                <div className="mt-3 bg-panel border border-edge rounded p-3">
-                  <span className="font-mono text-[11px] text-signal uppercase">Thumbnail</span>
-                  <p className="text-sm text-white/80 mt-0.5">{a.thumbnail.overlayText}</p>
-                  <p className="text-xs text-white/50 mt-0.5">{a.thumbnail.concept}</p>
-                </div>
-              )}
-              <h2 className="font-display text-sm uppercase tracking-wider text-white/40 mt-6 mb-2">Suggested titles</h2>
-              <ul className="space-y-1 text-sm text-white/80 list-disc list-inside">
-                {a.suggestedTitles?.map((title: string, i: number) => <li key={i}>{title}</li>)}
-              </ul>
-            </section>
-            <section>
-              <h2 className="font-display text-sm uppercase tracking-wider text-white/40 mb-2">Social copy</h2>
-              <div className="space-y-2 text-sm">
-                {a.socialCopy &&
-                  Object.entries(a.socialCopy).map(([k, v]) => (
-                    <div key={k} className="bg-panel border border-edge rounded px-3 py-2">
-                      <span className="font-mono text-[11px] text-accent uppercase">{k}</span>
-                      <p className="text-white/80 mt-0.5">{v as string}</p>
-                    </div>
-                  ))}
-              </div>
-            </section>
-          </div>
+              </section>
+            </div>
+          )}
 
           {/* timeline editor + version history */}
           <section className="mt-10">
@@ -263,10 +296,10 @@ export default function ProjectPage() {
                     <TimelineEditor
                       key={editorKey /* remount only when a restore changes the working ops */}
                       projectId={id}
-                      duration={project.sourceAsset?.durationSec ?? 0}
+                      duration={sourceDuration}
                       initialOps={t.operations ?? []}
                       initialEffects={t.effects ?? { subtitles: true, zooms: true, transitions: 'fade', music: false }}
-                      silences={(a.silences as any[]) ?? []}
+                      silences={((a?.silences as any[]) ?? [])}
                       onRender={(renderId) => setRendering({ id: renderId, pct: 0 })}
                       onVersionCreated={() => setVersionRefresh((k) => k + 1)}
                     />
@@ -280,7 +313,7 @@ export default function ProjectPage() {
                         setVersionRefresh((k) => k + 1);
                         setEditorKey((k) => k + 1);
                       }}
-                      onCompare={(a, b) => setCompare({ a, b })}
+                      onCompare={(aId, bId) => setCompare({ a: aId, b: bId })}
                     />
                   </div>
                 </div>
@@ -293,10 +326,12 @@ export default function ProjectPage() {
           )}
           {showFeedback && <FeedbackModal projectId={id} onClose={() => setShowFeedback(false)} />}
 
-          {/* one-click repurposing */}
-          <section className="mt-8">
-            <RepurposePanel projectId={id} onQueued={load} />
-          </section>
+          {/* one-click repurposing (only for classic upload-analysis projects) */}
+          {a && (
+            <section className="mt-8">
+              <RepurposePanel projectId={id} onQueued={load} />
+            </section>
+          )}
 
           {/* completed renders */}
           {completed.length > 0 && (

@@ -12,6 +12,8 @@ import {
 } from '../services/claude.service.js';
 import { createVersion, getHeadVersion, diffVersions, restoreVersion } from '../services/version.service.js';
 import { getStorageProvider } from '../storage/index.js';
+import { DurableMediaRegistryService } from '../media/durable-media-registry.js';
+import { MediaSourceError } from '../media/errors.js';
 import { buildPromptInjection, learnFromPromptEdit } from '../services/creator-memory.service.js';
 import { getConnectedClaudeApiKey } from '../services/integration-events.service.js';
 
@@ -33,7 +35,15 @@ projectRouter.get(
       where: { userId: req.user!.sub },
       orderBy: { createdAt: 'desc' },
       take: 50,
-      include: { renders: { orderBy: { createdAt: 'desc' }, take: 1 } },
+      include: {
+        renders: { orderBy: { createdAt: 'desc' }, take: 1 },
+        sourceAsset: {
+          select: { id: true, durationSec: true, width: true, height: true },
+        },
+        mediaSource: {
+          select: { id: true, provider: true, sourceType: true },
+        },
+      },
     });
     res.json({ projects });
   }),
@@ -46,7 +56,15 @@ projectRouter.get(
     await ownedProject(req.user!.sub, req.params.id);
     const project = await prisma.project.findUnique({
       where: { id: req.params.id },
-      include: { analysis: true, timeline: true, renders: true, sourceAsset: true },
+      include: {
+        analysis: true,
+        timeline: true,
+        renders: true,
+        sourceAsset: true,
+        mediaSource: {
+          select: { id: true, provider: true, sourceType: true, metadata: true },
+        },
+      },
     });
     res.json({ project });
   }),
@@ -242,15 +260,58 @@ projectRouter.post(
 projectRouter.get(
   '/:id/source-url',
   asyncHandler(async (req, res) => {
-    await ownedProject(req.user!.sub, req.params.id);
+    const userId = req.user!.sub;
+    await ownedProject(userId, req.params.id);
     const project = await prisma.project.findUnique({
       where: { id: req.params.id },
-      include: { sourceAsset: true },
+      include: { sourceAsset: true, mediaSource: true },
     });
-    if (!project?.sourceAsset) throw new HttpError(404, 'no source video');
     const storage = getStorageProvider();
-    const url = await storage.createDownloadUrl({ key: project.sourceAsset.s3Key });
-    res.json({ url });
+
+    if (project?.sourceAsset) {
+      const url = await storage.createDownloadUrl({ key: project.sourceAsset.s3Key });
+      return res.json({ url });
+    }
+
+    // Projects created from /api/media/projects/from-source verify live rights before previewing
+    if (project?.mediaSource) {
+      const registry = new DurableMediaRegistryService(prisma);
+      const scope = project.mediaSource.provider === 'UPLOAD' ? 'PRIVATE_USER' : 'SHARED_PERMITTED';
+      try {
+        await registry.resolveServerTrustedAuth({
+          requesterUserId: userId,
+          canonicalSourceId: project.mediaSource.canonicalId,
+          requireSharedReuse: scope === 'SHARED_PERMITTED',
+        });
+      } catch (err) {
+        if (err instanceof MediaSourceError) {
+          throw new HttpError(err.statusCode, err.message);
+        }
+        throw new HttpError(403, 'Source access denied.');
+      }
+
+      const artifact = await prisma.sharedCacheArtifact.findFirst({
+        where: {
+          mediaSourceId: project.mediaSource.id,
+          artifactKind: { in: ['SOURCE_MEDIA', 'BASE_CLIP'] },
+          state: 'PUBLISHED',
+          publishedObjectKey: { not: null },
+          ...(scope === 'PRIVATE_USER'
+            ? { rightsScope: 'PRIVATE_USER', ownerUserId: userId }
+            : { rightsScope: 'SHARED_PERMITTED' }),
+        },
+        orderBy: [{ artifactKind: 'asc' }, { updatedAt: 'desc' }],
+      });
+      if (artifact?.publishedObjectKey) {
+        const url = await storage.createDownloadUrl({
+          key: artifact.publishedObjectKey,
+          expiresIn: 300,
+        });
+        return res.json({ url, expiresInSec: 300 });
+      }
+    }
+
+    throw new HttpError(404, 'no source video');
   }),
 );
 
