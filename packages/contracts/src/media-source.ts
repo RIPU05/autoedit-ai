@@ -110,6 +110,10 @@ export const MediaSourceErrorCodeSchema = z.enum([
   'COORDINATION_CONFLICT',
   'INVALID_STATE_TRANSITION',
   'LEASE_EXPIRED',
+  'COORDINATION_TIMEOUT',
+  'REQUEST_CANCELLED',
+  'ARTIFACT_CORRUPT',
+  'MAX_RETRIES_EXCEEDED',
 ]);
 
 export type MediaSourceErrorCode = z.infer<typeof MediaSourceErrorCodeSchema>;

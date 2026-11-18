@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import {
   CacheableSourceIdSchema,
   type CacheableSourceId,
@@ -5,6 +6,50 @@ import {
   type SharedIngestionState,
 } from '@autoedit/contracts';
 import { MediaSourceError } from './errors.js';
+
+function shortHash(value: unknown): string {
+  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 16);
+}
+
+/**
+ * Layer A: Source acquisition / segmentation work identity scoped by immutable source + revision.
+ */
+export function buildSourceWorkId(
+  canonicalSourceId: CanonicalSourceId,
+  sourceRevision = 'v1',
+): CacheableSourceId {
+  const base = assertCacheableCanonicalId(canonicalSourceId);
+  const safeRev = sourceRevision.replace(/[^a-zA-Z0-9._-]/g, '_');
+  return `${base}::src::${safeRev}` as CacheableSourceId;
+}
+
+/**
+ * Layer B: Source analysis work identity scoped by source + revision + algorithm & detection options.
+ */
+export function buildAnalysisWorkId(
+  canonicalSourceId: CanonicalSourceId,
+  params: {
+    sourceRevision: string;
+    algorithmVersion: string;
+    scoreThreshold: number;
+    cooldownSec: number;
+    bufferConfig?: unknown;
+  },
+): CacheableSourceId {
+  const base = assertCacheableCanonicalId(canonicalSourceId);
+  return `${base}::ana::${shortHash(params)}` as CacheableSourceId;
+}
+
+/**
+ * Layer C: Derived base clip work identity scoped by source + revision + window + render settings.
+ */
+export function buildClipWorkId(
+  canonicalSourceId: CanonicalSourceId,
+  cacheKey: string,
+): CacheableSourceId {
+  const base = assertCacheableCanonicalId(canonicalSourceId);
+  return `${base}::clip::${cacheKey.slice(0, 24)}` as CacheableSourceId;
+}
 
 /**
  * Compact, fixed-size O(1) work-ownership record.
@@ -48,6 +93,12 @@ export interface RequestIngestionResult {
   record: IngestionCoordinationRecord;
 }
 
+export interface InvalidateReadyResult {
+  action: 'ACQUIRED_REPAIR' | 'CONFLICT_ALREADY_RECOVERING';
+  fencingToken: number;
+  record: IngestionCoordinationRecord | null;
+}
+
 export interface CoordinationStore {
   get(canonicalSourceId: CacheableSourceId): Promise<IngestionCoordinationRecord | null>;
   requestIngestion(input: {
@@ -81,6 +132,15 @@ export interface CoordinationStore {
     fencingToken: number;
     nowMs: number;
   }): Promise<boolean>;
+  invalidateReadyArtifact(input: {
+    canonicalSourceId: CacheableSourceId;
+    expectedArtifactRef: string;
+    expectedFencingToken: number;
+    repairWorkerId: string;
+    leaseMs: number;
+    maxRetries: number;
+    nowMs: number;
+  }): Promise<InvalidateReadyResult>;
 }
 
 const DEFAULT_LEASE_MS = 30_000;
@@ -368,6 +428,50 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     return true;
   }
 
+  async invalidateReadyArtifact(input: {
+    canonicalSourceId: CacheableSourceId;
+    expectedArtifactRef: string;
+    expectedFencingToken: number;
+    repairWorkerId: string;
+    leaseMs: number;
+    maxRetries: number;
+    nowMs: number;
+  }): Promise<InvalidateReadyResult> {
+    const existing = this.records.get(input.canonicalSourceId);
+    if (
+      !existing ||
+      existing.state !== 'READY' ||
+      existing.artifactRef !== input.expectedArtifactRef ||
+      existing.fencingToken !== input.expectedFencingToken
+    ) {
+      return {
+        action: 'CONFLICT_ALREADY_RECOVERING',
+        fencingToken: existing?.fencingToken ?? 0,
+        record: existing ? { ...existing } : null,
+      };
+    }
+
+    const nextToken = existing.fencingToken + 1;
+    const repaired: IngestionCoordinationRecord = {
+      ...existing,
+      state: 'ACQUIRING',
+      ownerWorkerId: input.repairWorkerId,
+      fencingToken: nextToken,
+      attempts: 1,
+      maxRetries: input.maxRetries,
+      leaseExpiresAtMs: input.nowMs + input.leaseMs,
+      updatedAtMs: input.nowMs,
+      artifactRef: undefined,
+      lastError: `Invalidated missing/corrupt artifact (prev token ${input.expectedFencingToken})`,
+    };
+    this.records.set(input.canonicalSourceId, repaired);
+    return {
+      action: 'ACQUIRED_REPAIR',
+      fencingToken: nextToken,
+      record: { ...repaired },
+    };
+  }
+
   clear(): void {
     this.records.clear();
   }
@@ -614,6 +718,79 @@ return cjson.encode({ ok = true, record = rec })
 `;
 
 /**
+ * Explicit positional ARGV contract for INVALIDATE_READY_LUA:
+ *   KEYS[1] = coordination Redis key
+ *   ARGV[1] = expectedArtifactRef (string)
+ *   ARGV[2] = expectedFencingToken (positive integer)
+ *   ARGV[3] = repairWorkerId (string)
+ *   ARGV[4] = leaseMs (positive integer)
+ *   ARGV[5] = maxRetries (positive integer)
+ *   ARGV[6] = nowMs (non-negative integer)
+ *   ARGV[7] = recordTtlMs (positive integer)
+ */
+export function buildInvalidateReadyLuaArgs(params: {
+  expectedArtifactRef: string;
+  expectedFencingToken: number;
+  repairWorkerId: string;
+  leaseMs: number;
+  maxRetries: number;
+  nowMs: number;
+  recordTtlMs: number;
+}): [string, number, string, number, number, number, number] {
+  return [
+    params.expectedArtifactRef,
+    Math.trunc(params.expectedFencingToken),
+    params.repairWorkerId,
+    Math.trunc(params.leaseMs),
+    Math.trunc(params.maxRetries),
+    Math.trunc(params.nowMs),
+    Math.trunc(params.recordTtlMs),
+  ];
+}
+
+const INVALIDATE_READY_LUA = `
+local key = KEYS[1]
+local expectedArtifactRef = ARGV[1]
+local expectedToken = tonumber(ARGV[2])
+local repairWorkerId = ARGV[3]
+local leaseMs = tonumber(ARGV[4])
+local maxRetries = tonumber(ARGV[5])
+local nowMs = tonumber(ARGV[6])
+local recordTtlMs = tonumber(ARGV[7])
+
+assert(expectedArtifactRef and expectedArtifactRef ~= '', 'ARGV[1] expectedArtifactRef required')
+assert(expectedToken and expectedToken >= 1, 'ARGV[2] expectedToken >= 1')
+assert(repairWorkerId and repairWorkerId ~= '', 'ARGV[3] repairWorkerId required')
+assert(leaseMs and leaseMs > 0, 'ARGV[4] leaseMs > 0')
+assert(maxRetries and maxRetries >= 1, 'ARGV[5] maxRetries >= 1')
+assert(nowMs and nowMs >= 0, 'ARGV[6] nowMs >= 0')
+assert(recordTtlMs and recordTtlMs > 0, 'ARGV[7] recordTtlMs > 0')
+
+local raw = redis.call('GET', key)
+if not raw then
+  return cjson.encode({ action = 'CONFLICT_ALREADY_RECOVERING', fencingToken = 0, record = cjson.null })
+end
+local rec = cjson.decode(raw)
+if rec.state ~= 'READY' or rec.artifactRef ~= expectedArtifactRef or rec.fencingToken ~= expectedToken then
+  return cjson.encode({ action = 'CONFLICT_ALREADY_RECOVERING', fencingToken = rec.fencingToken or 0, record = rec })
+end
+
+local nextToken = (rec.fencingToken or 0) + 1
+rec.state = 'ACQUIRING'
+rec.ownerWorkerId = repairWorkerId
+rec.fencingToken = nextToken
+rec.attempts = 1
+rec.maxRetries = maxRetries
+rec.leaseExpiresAtMs = nowMs + leaseMs
+rec.updatedAtMs = nowMs
+rec.artifactRef = nil
+rec.lastError = 'Invalidated missing/corrupt artifact (prev token ' .. tostring(expectedToken) .. ')'
+
+redis.call('SET', key, cjson.encode(rec), 'PX', recordTtlMs)
+return cjson.encode({ action = 'ACQUIRED_REPAIR', fencingToken = nextToken, record = rec })
+`;
+
+/**
  * Redis-backed atomic coordination store using single-key Lua scripts.
  *
  * Durability / TTL caveat:
@@ -779,6 +956,33 @@ export class RedisCoordinationStore implements CoordinationStore {
     const parsed = JSON.parse(raw) as { ok?: boolean };
     return Boolean(parsed.ok);
   }
+
+  async invalidateReadyArtifact(input: {
+    canonicalSourceId: CacheableSourceId;
+    expectedArtifactRef: string;
+    expectedFencingToken: number;
+    repairWorkerId: string;
+    leaseMs: number;
+    maxRetries: number;
+    nowMs: number;
+  }): Promise<InvalidateReadyResult> {
+    const args = buildInvalidateReadyLuaArgs({
+      expectedArtifactRef: input.expectedArtifactRef,
+      expectedFencingToken: input.expectedFencingToken,
+      repairWorkerId: input.repairWorkerId,
+      leaseMs: input.leaseMs,
+      maxRetries: input.maxRetries,
+      nowMs: input.nowMs,
+      recordTtlMs: this.recordTtlMs,
+    });
+    const raw = (await this.redis.eval(
+      INVALIDATE_READY_LUA,
+      1,
+      this.key(input.canonicalSourceId),
+      ...args,
+    )) as string;
+    return JSON.parse(raw) as InvalidateReadyResult;
+  }
 }
 
 /**
@@ -879,6 +1083,27 @@ export class SharedIngestionCoordinator {
       canonicalSourceId,
       workerId: input.workerId,
       fencingToken: input.fencingToken,
+      nowMs: input.nowMs ?? Date.now(),
+    });
+  }
+
+  async invalidateReadyArtifact(input: {
+    canonicalSourceId: CanonicalSourceId;
+    expectedArtifactRef: string;
+    expectedFencingToken: number;
+    repairWorkerId: string;
+    leaseMs?: number;
+    maxRetries?: number;
+    nowMs?: number;
+  }): Promise<InvalidateReadyResult> {
+    const canonicalSourceId = assertCacheableCanonicalId(input.canonicalSourceId);
+    return this.store.invalidateReadyArtifact({
+      canonicalSourceId,
+      expectedArtifactRef: input.expectedArtifactRef,
+      expectedFencingToken: input.expectedFencingToken,
+      repairWorkerId: input.repairWorkerId,
+      leaseMs: input.leaseMs ?? DEFAULT_LEASE_MS,
+      maxRetries: input.maxRetries ?? DEFAULT_MAX_RETRIES,
       nowMs: input.nowMs ?? Date.now(),
     });
   }

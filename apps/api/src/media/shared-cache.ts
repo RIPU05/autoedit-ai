@@ -328,6 +328,33 @@ export function assertVerifiedCacheIdentity(
   return expected;
 }
 
+async function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(
+      Buffer.isBuffer(chunk)
+        ? chunk
+        : typeof chunk === 'string'
+          ? Buffer.from(chunk)
+          : Buffer.from(chunk as Uint8Array),
+    );
+  }
+  return Buffer.concat(chunks);
+}
+
+function assertAuthorizedObjectKey(identity: SharedCacheIdentity, objectKey: string): void {
+  const valid =
+    objectKey === identity.storageKey ||
+    objectKey === `${identity.storageKey}.manifest.json` ||
+    objectKey.startsWith(`${identity.storageKey}/v/`);
+  if (!valid || objectKey.includes('..')) {
+    throw new MediaSourceError({
+      code: 'ACCESS_DENIED',
+      message: `Object key "${objectKey}" is outside authorized cache prefix for ${identity.cacheKey}.`,
+    });
+  }
+}
+
 /**
  * Thin cache storage adapter reusing the existing MediaStorageProvider.
  * All cache reads, writes, and signed URLs reconstruct and authorize the storage key
@@ -339,11 +366,16 @@ export class SharedArtifactCacheService {
   async checkCachedArtifact(
     auth: TrustedCacheAuthContext,
     descriptor: CacheArtifactDescriptor,
-  ): Promise<{ hit: boolean; cacheKey: string; sizeBytes?: number }> {
+  ): Promise<{ hit: boolean; cacheKey: string; sizeBytes?: number; etag?: string }> {
     const identity = resolveAuthorizedCacheIdentity(auth, descriptor);
     try {
       const meta = await this.storage.getObjectMetadata({ key: identity.storageKey });
-      return { hit: true, cacheKey: identity.cacheKey, sizeBytes: meta.contentLength };
+      return {
+        hit: true,
+        cacheKey: identity.cacheKey,
+        sizeBytes: meta.contentLength,
+        etag: meta.etag,
+      };
     } catch {
       return { hit: false, cacheKey: identity.cacheKey };
     }
@@ -354,10 +386,10 @@ export class SharedArtifactCacheService {
     descriptor: CacheArtifactDescriptor,
     body: Buffer | Uint8Array | string,
     contentType: string,
-  ): Promise<{ cacheKey: string; rightsScope: CacheRightsScope }> {
+  ): Promise<{ cacheKey: string; rightsScope: CacheRightsScope; etag?: string }> {
     const identity = resolveAuthorizedCacheIdentity(auth, descriptor);
     const normalizedBody = typeof body === 'string' ? Buffer.from(body, 'utf-8') : body;
-    await this.storage.putObject({
+    const out = await this.storage.putObject({
       key: identity.storageKey,
       body: normalizedBody,
       contentType,
@@ -365,6 +397,7 @@ export class SharedArtifactCacheService {
     return {
       cacheKey: identity.cacheKey,
       rightsScope: identity.rightsScope,
+      etag: out.etag,
     };
   }
 
@@ -376,6 +409,122 @@ export class SharedArtifactCacheService {
     const identity = resolveAuthorizedCacheIdentity(auth, descriptor);
     return this.storage.createDownloadUrl({
       key: identity.storageKey,
+      expiresIn: opts?.expiresIn ?? 900,
+    });
+  }
+
+  /**
+   * Stores an immutable versioned artifact under `<storageKey>/v/<versionTag>` so
+   * stale workers or failed replacement attempts can never overwrite an existing healthy object.
+   */
+  async putVersionedArtifact(
+    auth: TrustedCacheAuthContext,
+    descriptor: CacheArtifactDescriptor,
+    versionTag: string,
+    body: Buffer | Uint8Array,
+    contentType: string,
+  ): Promise<{
+    cacheKey: string;
+    storageKey: string;
+    objectKey: string;
+    rightsScope: CacheRightsScope;
+    etag?: string;
+  }> {
+    const identity = resolveAuthorizedCacheIdentity(auth, descriptor);
+    const safeTag = versionTag.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const objectKey = `${identity.storageKey}/v/${safeTag}`;
+    assertAuthorizedObjectKey(identity, objectKey);
+    const out = await this.storage.putObject({
+      key: objectKey,
+      body,
+      contentType,
+    });
+    return {
+      cacheKey: identity.cacheKey,
+      storageKey: identity.storageKey,
+      objectKey,
+      rightsScope: identity.rightsScope,
+      etag: out.etag,
+    };
+  }
+
+  async putCachedManifest(
+    auth: TrustedCacheAuthContext,
+    descriptor: CacheArtifactDescriptor,
+    manifest: unknown,
+  ): Promise<{ cacheKey: string; manifestKey: string; etag?: string }> {
+    const identity = resolveAuthorizedCacheIdentity(auth, descriptor);
+    const manifestKey = `${identity.storageKey}.manifest.json`;
+    const body = Buffer.from(JSON.stringify(manifest), 'utf-8');
+    const out = await this.storage.putObject({
+      key: manifestKey,
+      body,
+      contentType: 'application/json',
+    });
+    return { cacheKey: identity.cacheKey, manifestKey, etag: out.etag };
+  }
+
+  async getCachedManifest<T>(
+    auth: TrustedCacheAuthContext,
+    descriptor: CacheArtifactDescriptor,
+  ): Promise<{ cacheKey: string; manifestKey: string; data: T } | null> {
+    const identity = resolveAuthorizedCacheIdentity(auth, descriptor);
+    const manifestKey = `${identity.storageKey}.manifest.json`;
+    try {
+      const obj = await this.storage.getObject({ key: manifestKey });
+      const buf = await streamToBuffer(obj.body);
+      const data = JSON.parse(buf.toString('utf-8')) as T;
+      return { cacheKey: identity.cacheKey, manifestKey, data };
+    } catch {
+      return null;
+    }
+  }
+
+  async checkObjectAtKey(
+    auth: TrustedCacheAuthContext,
+    descriptor: CacheArtifactDescriptor,
+    objectKey: string,
+  ): Promise<{ hit: boolean; cacheKey: string; sizeBytes?: number; etag?: string }> {
+    const identity = resolveAuthorizedCacheIdentity(auth, descriptor);
+    assertAuthorizedObjectKey(identity, objectKey);
+    try {
+      const meta = await this.storage.getObjectMetadata({ key: objectKey });
+      return {
+        hit: true,
+        cacheKey: identity.cacheKey,
+        sizeBytes: meta.contentLength,
+        etag: meta.etag,
+      };
+    } catch {
+      return { hit: false, cacheKey: identity.cacheKey };
+    }
+  }
+
+  async getObjectBytesAtKey(
+    auth: TrustedCacheAuthContext,
+    descriptor: CacheArtifactDescriptor,
+    objectKey: string,
+  ): Promise<Buffer | null> {
+    const identity = resolveAuthorizedCacheIdentity(auth, descriptor);
+    assertAuthorizedObjectKey(identity, objectKey);
+    try {
+      const obj = await this.storage.getObject({ key: objectKey });
+      return await streamToBuffer(obj.body);
+    } catch {
+      return null;
+    }
+  }
+
+  async createAuthorizedDownloadUrlForObject(
+    auth: TrustedCacheAuthContext,
+    descriptor: CacheArtifactDescriptor,
+    objectKey: string,
+    opts?: { expiresIn?: number },
+  ): Promise<string> {
+    const identity = resolveAuthorizedCacheIdentity(auth, descriptor);
+    assertAuthorizedObjectKey(identity, objectKey);
+    return this.storage.createDownloadUrl({
+      key: objectKey,
       expiresIn: opts?.expiresIn ?? 900,
     });
   }
