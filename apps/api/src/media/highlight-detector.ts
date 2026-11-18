@@ -93,27 +93,147 @@ export interface CpuDetectorOptions {
 export class CpuFirstHeuristicDetector implements LiveHighlightDetector {
   readonly algorithmVersion = 'v1.0-heuristic' as const;
   private readonly buffer: RollingMediaBufferTracker;
-  private readonly samples: HighlightDetectionSample[] = [];
+  private samples: HighlightDetectionSample[] = [];
   private readonly canonicalSourceId: CacheableSourceId;
   private readonly scoreThreshold: number;
   private readonly cooldownSec: number;
   private readonly aggregationWindowSec: number;
+  private readonly maxRetainedSamples: number;
+  private lastEmittedEventSec = -Infinity;
+  private readonly evaluatedBucketKeys = new Set<number>();
 
-  constructor(opts: CpuDetectorOptions) {
+  constructor(opts: CpuDetectorOptions & { maxRetainedSamples?: number }) {
     this.canonicalSourceId = CacheableSourceIdSchema.parse(opts.canonicalSourceId);
     this.buffer = new RollingMediaBufferTracker(opts.bufferConfig);
     this.scoreThreshold = opts.scoreThreshold ?? 65;
     this.cooldownSec = opts.cooldownSec ?? 20;
     this.aggregationWindowSec = opts.aggregationWindowSec ?? 5;
+    this.maxRetainedSamples = Math.max(64, opts.maxRetainedSamples ?? 2000);
   }
 
   getRollingBufferConfig(): RollingBufferConfig {
     return { ...this.buffer.config };
   }
 
+  getRetainedSampleCount(): number {
+    return this.samples.length;
+  }
+
   ingestSignal(rawSample: HighlightDetectionSample): void {
     const sample = HighlightDetectionSampleSchema.parse(rawSample);
     this.samples.push(sample);
+    if (this.samples.length > this.maxRetainedSamples) {
+      this.samples.splice(0, this.samples.length - this.maxRetainedSamples);
+    }
+  }
+
+  /** Prunes historical samples older than the rolling retention horizon to keep state bounded. */
+  pruneOldSamples(currentTimeSec: number): void {
+    const earliestSec = Math.max(0, currentTimeSec - this.buffer.config.maxRetentionSec);
+    if (this.samples.length > 0 && this.samples[0].timestampSec < earliestSec) {
+      this.samples = this.samples.filter((s) => s.timestampSec >= earliestSec);
+    }
+    const earliestBucket = Math.floor(earliestSec / this.aggregationWindowSec);
+    for (const bk of this.evaluatedBucketKeys) {
+      if (bk < earliestBucket) this.evaluatedBucketKeys.delete(bk);
+    }
+  }
+
+  private scoreBucket(
+    bucketKey: number,
+    bucketSamples: HighlightDetectionSample[],
+  ): { eventSec: number; compositeScore: number; contributingSignals: CpuSignalKind[] } {
+    const peakByKind = new Map<CpuSignalKind, number>();
+    let eventSec = bucketKey * this.aggregationWindowSec;
+    let maxIntensity = -1;
+
+    for (const s of bucketSamples) {
+      const prev = peakByKind.get(s.signalKind) ?? 0;
+      if (s.normalizedIntensity > prev) {
+        peakByKind.set(s.signalKind, s.normalizedIntensity);
+      }
+      if (s.normalizedIntensity > maxIntensity) {
+        maxIntensity = s.normalizedIntensity;
+        eventSec = s.timestampSec;
+      }
+    }
+
+    let weightedSum = 0;
+    let weightTotal = 0;
+    const contributingSignals: CpuSignalKind[] = [];
+    for (const [kind, intensity] of peakByKind.entries()) {
+      const w = DEFAULT_SIGNAL_WEIGHTS[kind] ?? 0.1;
+      weightedSum += intensity * w;
+      weightTotal += w;
+      contributingSignals.push(kind);
+    }
+
+    const baseScore = weightTotal > 0 ? (weightedSum / weightTotal) * 100 : 0;
+    const corroborationBonus =
+      contributingSignals.length >= 2 ? Math.min(10, (contributingSignals.length - 1) * 5) : 0;
+    const compositeScore = Math.min(100, Math.round((baseScore + corroborationBonus) * 100) / 100);
+    return { eventSec, compositeScore, contributingSignals };
+  }
+
+  /**
+   * Incremental evaluation for continuous live streams:
+   * - Evaluates only new samples/buckets since previous calls.
+   * - Enforces persistent cooldown across segment arrivals so one prolonged event spanning
+   *   multiple segments never emits duplicate candidates.
+   * - Prunes old detector samples to keep memory strictly bounded.
+   */
+  evaluateIncremental(currentTimeSec: number): HighlightWindowCandidate[] {
+    this.pruneOldSamples(currentTimeSec);
+    const earliestSec = Math.max(0, currentTimeSec - this.buffer.config.maxRetentionSec);
+    const active = this.samples
+      .filter((s) => s.timestampSec >= earliestSec && s.timestampSec <= currentTimeSec)
+      .sort((a, b) => a.timestampSec - b.timestampSec);
+
+    if (active.length === 0) return [];
+
+    const buckets = new Map<number, HighlightDetectionSample[]>();
+    for (const s of active) {
+      const bucketKey = Math.floor(s.timestampSec / this.aggregationWindowSec);
+      const list = buckets.get(bucketKey) ?? [];
+      list.push(s);
+      buckets.set(bucketKey, list);
+    }
+
+    const newlyDetected: HighlightWindowCandidate[] = [];
+    for (const [bucketKey, bucketSamples] of [...buckets.entries()].sort((a, b) => a[0] - b[0])) {
+      if (this.evaluatedBucketKeys.has(bucketKey)) continue;
+
+      const { eventSec, compositeScore, contributingSignals } = this.scoreBucket(
+        bucketKey,
+        bucketSamples,
+      );
+
+      if (compositeScore >= this.scoreThreshold) {
+        this.evaluatedBucketKeys.add(bucketKey);
+        if (eventSec - this.lastEmittedEventSec >= this.cooldownSec) {
+          const win = this.buffer.computeCandidateWindow(eventSec);
+          newlyDetected.push(
+            HighlightWindowCandidateSchema.parse({
+              candidateId: `hl_${this.canonicalSourceId}_${Math.round(eventSec * 1000)}`,
+              canonicalSourceId: this.canonicalSourceId,
+              eventTimestampSec: eventSec,
+              windowStartSec: win.windowStartSec,
+              windowEndSec: win.windowEndSec,
+              compositeScore,
+              contributingSignals,
+              pinnedSegmentIndices: win.pinnedSegmentIndices,
+              algorithmVersion: this.algorithmVersion,
+            }),
+          );
+          this.lastEmittedEventSec = eventSec;
+        }
+      } else if ((bucketKey + 1) * this.aggregationWindowSec <= currentTimeSec) {
+        // Bucket is completely closed in time and did not cross threshold -> mark done
+        this.evaluatedBucketKeys.add(bucketKey);
+      }
+    }
+
+    return newlyDetected;
   }
 
   evaluate(currentTimeSec: number): HighlightWindowCandidate[] {
@@ -137,38 +257,10 @@ export class CpuFirstHeuristicDetector implements LiveHighlightDetector {
     let lastCandidateTime = -Infinity;
 
     for (const [bucketKey, bucketSamples] of [...buckets.entries()].sort((a, b) => a[0] - b[0])) {
-      // Take max intensity per signal kind inside this bucket
-      const peakByKind = new Map<CpuSignalKind, number>();
-      let eventSec = bucketKey * this.aggregationWindowSec;
-      let maxIntensity = -1;
-
-      for (const s of bucketSamples) {
-        const prev = peakByKind.get(s.signalKind) ?? 0;
-        if (s.normalizedIntensity > prev) {
-          peakByKind.set(s.signalKind, s.normalizedIntensity);
-        }
-        if (s.normalizedIntensity > maxIntensity) {
-          maxIntensity = s.normalizedIntensity;
-          eventSec = s.timestampSec;
-        }
-      }
-
-      // Normalize weights across the signal kinds actually observed in this bucket
-      // so missing live chat does not penalize audio/speech-only platforms.
-      let weightedSum = 0;
-      let weightTotal = 0;
-      const contributingSignals: CpuSignalKind[] = [];
-      for (const [kind, intensity] of peakByKind.entries()) {
-        const w = DEFAULT_SIGNAL_WEIGHTS[kind] ?? 0.1;
-        weightedSum += intensity * w;
-        weightTotal += w;
-        contributingSignals.push(kind);
-      }
-
-      const baseScore = weightTotal > 0 ? (weightedSum / weightTotal) * 100 : 0;
-      // Multi-signal corroboration bonus (up to +10 points when >= 2 signals agree)
-      const corroborationBonus = contributingSignals.length >= 2 ? Math.min(10, (contributingSignals.length - 1) * 5) : 0;
-      const compositeScore = Math.min(100, Math.round((baseScore + corroborationBonus) * 100) / 100);
+      const { eventSec, compositeScore, contributingSignals } = this.scoreBucket(
+        bucketKey,
+        bucketSamples,
+      );
 
       if (compositeScore >= this.scoreThreshold && eventSec - lastCandidateTime >= this.cooldownSec) {
         const win = this.buffer.computeCandidateWindow(eventSec);

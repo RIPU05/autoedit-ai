@@ -37,6 +37,11 @@ import {
   probeAndValidateClipMp4FromBuffer,
   type ProbedClipMetadata,
 } from './highlight-clip-extractor.js';
+import {
+  ContinuousLiveSessionService,
+  type ContinuousBroadcastRequest,
+  type ContinuousBroadcastResult,
+} from './continuous-live-session.js';
 
 export interface SharedBroadcastRequest {
   adapter: ControlledLocalStreamAdapter;
@@ -271,6 +276,7 @@ function computeVideoFilterForRenderSettings(renderSettings: CacheRenderSettings
  */
 export class SharedLiveProcessingService {
   readonly cache: SharedArtifactCacheService;
+  readonly continuous: ContinuousLiveSessionService;
   readonly metrics: SharedPipelineMetrics = {
     sourceProcessingCount: 0,
     analysisPassCount: 0,
@@ -303,6 +309,17 @@ export class SharedLiveProcessingService {
     private readonly workRootDir: string,
   ) {
     this.cache = new SharedArtifactCacheService(storage);
+    this.continuous = new ContinuousLiveSessionService(coordinator, storage, workRootDir);
+  }
+
+  /**
+   * Joins an active continuous livestream ingestion or starts it if this worker acquires
+   * the Redis lease. Reuses the same coordinator, storage, and work root as batch highlights.
+   */
+  async joinOrStartContinuousBroadcast(
+    req: ContinuousBroadcastRequest,
+  ): Promise<ContinuousBroadcastResult> {
+    return this.continuous.joinOrStartContinuousBroadcast(req);
   }
 
   private buildAuth(
@@ -768,7 +785,7 @@ export class SharedLiveProcessingService {
             fencingToken: params.fencingToken,
             error: effectiveErr instanceof Error ? effectiveErr.message : String(effectiveErr),
           })
-          .catch(() => {});
+          .catch(() => { });
       }
       throw effectiveErr;
     } finally {
@@ -799,8 +816,8 @@ export class SharedLiveProcessingService {
 
     const selectedEntries = params.windowRange
       ? params.manifest.segments.filter(
-          (s) => s.endSec > params.windowRange!.startSec && s.startSec < params.windowRange!.endSec,
-        )
+        (s) => s.endSec > params.windowRange!.startSec && s.startSec < params.windowRange!.endSec,
+      )
       : params.manifest.segments;
 
     const hydrated: BufferedMediaSegment[] = [];
@@ -1126,7 +1143,7 @@ export class SharedLiveProcessingService {
           return { value: manifest, artifactRef: published.manifestKey };
         } finally {
           await buffer.cleanupAll();
-          await fs.rm(scratchDir, { recursive: true, force: true }).catch(() => {});
+          await fs.rm(scratchDir, { recursive: true, force: true }).catch(() => { });
         }
       },
     });
@@ -1240,7 +1257,7 @@ export class SharedLiveProcessingService {
           return { value: manifest, artifactRef: published.manifestKey };
         } finally {
           if (buffer) await buffer.cleanupAll();
-          await fs.rm(scratchDir, { recursive: true, force: true }).catch(() => {});
+          await fs.rm(scratchDir, { recursive: true, force: true }).catch(() => { });
         }
       },
     });
@@ -1385,7 +1402,7 @@ export class SharedLiveProcessingService {
           return { value: manifest, artifactRef: storedObj.objectKey };
         } finally {
           if (buffer) await buffer.cleanupAll();
-          await fs.rm(scratchDir, { recursive: true, force: true }).catch(() => {});
+          await fs.rm(scratchDir, { recursive: true, force: true }).catch(() => { });
         }
       },
     });
@@ -1550,7 +1567,7 @@ export class SharedLiveProcessingService {
       return { cacheKey: stored.cacheKey, descriptor, clipMeta, downloadUrl };
     } finally {
       await buffer.cleanupAll();
-      await fs.rm(scratchDir, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(scratchDir, { recursive: true, force: true }).catch(() => { });
     }
   }
 }

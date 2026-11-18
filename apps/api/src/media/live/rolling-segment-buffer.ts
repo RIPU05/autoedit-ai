@@ -79,6 +79,28 @@ function runFfmpegSegment(args: string[], timeoutMs: number, signal?: AbortSigna
  * verifies each segment with ffprobe, pins segments needed by active clip jobs,
  * evicts unpinned expired or over-quota segments, and cleans all scratch files on exit.
  */
+export interface WindowReadinessStatus {
+  windowStartSec: number;
+  windowEndSec: number;
+  preEventAvailable: boolean;
+  postEventAvailable: boolean;
+  hasCoveringSegments: boolean;
+  hasMissingGap: boolean;
+  canFinalize: boolean;
+  pinnedSegmentIndices: number[];
+  earliestBufferedSec: number;
+  latestBufferedSec: number;
+  streamEnded: boolean;
+}
+
+export interface IncomingSegmentInput {
+  index: number;
+  sourceFilePath: string;
+  expectedStartSec: number;
+  /** Copy incoming file into buffer workDir so producer cleanup cannot delete retained segments; defaults to true. */
+  copyToWorkDir?: boolean;
+}
+
 export class FfmpegRollingSegmentBuffer {
   readonly tracker: RollingMediaBufferTracker;
   readonly workDir: string;
@@ -91,6 +113,10 @@ export class FfmpegRollingSegmentBuffer {
   private streamEnded = false;
   private evictedCount = 0;
   private corruptSegmentsSkipped = 0;
+  private peakDiskBytes = 0;
+  private highestIndexSeen = -1;
+  private gapsDetected = 0;
+  private lateSegmentsReceived = 0;
 
   constructor(opts: RollingSegmentBufferOptions) {
     this.tracker = new RollingMediaBufferTracker(opts.bufferConfig);
@@ -240,6 +266,143 @@ export class FfmpegRollingSegmentBuffer {
    */
   registerVerifiedSegment(segment: BufferedMediaSegment): void {
     this.segments.set(segment.index, segment);
+    this.peakDiskBytes = Math.max(this.peakDiskBytes, this.getTotalDiskBytes());
+  }
+
+  /**
+   * Appends a single live incoming segment as it arrives over time.
+   *
+   * - Copies into buffer workDir (unless copyToWorkDir === false) so producer staging cleanup
+   *   never deletes retained or pinned footage.
+   * - Validates via ffprobe + SHA-256; corrupt segments are skipped safely without crashing.
+   * - Tracks sequence gaps and late/out-of-order segment arrivals.
+   * - Evicts expired or over-quota unpinned segments while preserving pinned highlight windows.
+   */
+  async appendIncomingSegment(input: IncomingSegmentInput): Promise<BufferedMediaSegment> {
+    await fs.mkdir(this.workDir, { recursive: true });
+
+    if (this.highestIndexSeen >= 0) {
+      if (input.index > this.highestIndexSeen + 1) {
+        this.gapsDetected += input.index - this.highestIndexSeen - 1;
+      } else if (input.index < this.highestIndexSeen) {
+        this.lateSegmentsReceived++;
+      }
+    }
+    if (input.index > this.highestIndexSeen) {
+      this.highestIndexSeen = input.index;
+    }
+
+    let targetPath = input.sourceFilePath;
+    if (input.copyToWorkDir !== false) {
+      targetPath = path.join(this.workDir, `seg_${String(input.index).padStart(6, '0')}.mp4`);
+      if (path.resolve(input.sourceFilePath) !== path.resolve(targetPath)) {
+        await fs.copyFile(input.sourceFilePath, targetPath);
+      }
+    }
+
+    const seg = await this.registerSegmentFile(input.index, targetPath, input.expectedStartSec);
+    if (!seg.valid) {
+      // Remove invalid copy immediately so corrupt bytes never occupy buffer quota
+      if (input.copyToWorkDir !== false) {
+        await fs.rm(targetPath, { force: true }).catch(() => {});
+      }
+    }
+
+    this.peakDiskBytes = Math.max(this.peakDiskBytes, this.getTotalDiskBytes());
+    await this.evictExpired(this.getLatestBufferedSec());
+    return seg;
+  }
+
+  /** Returns the earliest and latest valid buffered timestamps currently retained. */
+  getBufferedTimeRange(): {
+    earliestSec: number;
+    latestSec: number;
+    validSegmentCount: number;
+  } {
+    const valid = this.getValidSegments();
+    if (valid.length === 0) {
+      return { earliestSec: 0, latestSec: 0, validSegmentCount: 0 };
+    }
+    let earliestSec = Infinity;
+    let latestSec = 0;
+    for (const s of valid) {
+      if (s.startSec < earliestSec) earliestSec = s.startSec;
+      if (s.endSec > latestSec) latestSec = s.endSec;
+    }
+    return {
+      earliestSec: Number.isFinite(earliestSec) ? earliestSec : 0,
+      latestSec,
+      validSegmentCount: valid.length,
+    };
+  }
+
+  /**
+   * Clear readiness API for continuous live highlight extraction:
+   * reports whether pre-event footage is buffered, post-event footage has arrived,
+   * whether any interior segment gap exists, and whether the candidate can be finalized now
+   * (without waiting for the livestream to end).
+   */
+  checkCandidateWindowReadiness(
+    eventTimestampSec: number,
+    opts?: {
+      preEventSec?: number;
+      postEventSec?: number;
+      /** When true, delays finalization if an interior gap exists while stream is still live. */
+      waitForGapsWhileLive?: boolean;
+    },
+  ): WindowReadinessStatus {
+    const preSec = opts?.preEventSec ?? this.tracker.config.preEventSec;
+    const postSec = opts?.postEventSec ?? this.tracker.config.postEventSec;
+    const range = this.getBufferedTimeRange();
+    const rawStart = Math.max(0, eventTimestampSec - preSec);
+    const rawEnd = eventTimestampSec + postSec;
+    const windowEndSec =
+      this.streamEnded && range.latestSec > 0
+        ? Math.min(range.latestSec, Math.max(rawStart + 0.5, rawEnd))
+        : rawEnd;
+
+    const covering = this.getSegmentsForTimeRange(rawStart, windowEndSec);
+    const hasCoveringSegments = covering.length > 0;
+
+    // Pre-event footage is available if earliest retained segment reaches <= windowStartSec (+0.5s tolerance)
+    // or if the event occurred near stream start and we have the earliest valid segment.
+    const preEventAvailable =
+      hasCoveringSegments &&
+      (covering[0].startSec <= rawStart + 0.75 || (rawStart === 0 && covering[0].index === 0));
+
+    // Post-event footage is available as soon as live buffer reaches windowEndSec OR stream has ended
+    const postEventAvailable =
+      hasCoveringSegments &&
+      (range.latestSec >= rawEnd - 0.1 || (this.streamEnded && range.latestSec > eventTimestampSec));
+
+    let hasMissingGap = false;
+    const gapToleranceSec = Math.max(1.0, this.tracker.config.segmentDurationSec * 0.75);
+    for (let i = 1; i < covering.length; i++) {
+      if (covering[i].startSec - covering[i - 1].endSec > gapToleranceSec) {
+        hasMissingGap = true;
+        break;
+      }
+    }
+
+    const canFinalize =
+      hasCoveringSegments &&
+      preEventAvailable &&
+      postEventAvailable &&
+      (!opts?.waitForGapsWhileLive || !hasMissingGap || this.streamEnded);
+
+    return {
+      windowStartSec: rawStart,
+      windowEndSec,
+      preEventAvailable,
+      postEventAvailable,
+      hasCoveringSegments,
+      hasMissingGap,
+      canFinalize,
+      pinnedSegmentIndices: covering.map((s) => s.index),
+      earliestBufferedSec: range.earliestSec,
+      latestBufferedSec: range.latestSec,
+      streamEnded: this.streamEnded,
+    };
   }
 
   /** Computes the clip window and exact segment indices covering an event spike. */
@@ -356,15 +519,26 @@ export class FfmpegRollingSegmentBuffer {
     evictedCount: number;
     corruptSegmentsSkipped: number;
     totalDiskBytes: number;
+    peakDiskBytes: number;
+    earliestBufferedSec: number;
     latestBufferedSec: number;
+    gapsDetected: number;
+    lateSegmentsReceived: number;
+    streamEnded: boolean;
   } {
+    const range = this.getBufferedTimeRange();
     return {
-      retainedSegments: this.getValidSegments().length,
+      retainedSegments: range.validSegmentCount,
       pinnedSegments: this.pins.size,
       evictedCount: this.evictedCount,
       corruptSegmentsSkipped: this.corruptSegmentsSkipped,
       totalDiskBytes: this.getTotalDiskBytes(),
-      latestBufferedSec: this.getLatestBufferedSec(),
+      peakDiskBytes: this.peakDiskBytes,
+      earliestBufferedSec: range.earliestSec,
+      latestBufferedSec: range.latestSec,
+      gapsDetected: this.gapsDetected,
+      lateSegmentsReceived: this.lateSegmentsReceived,
+      streamEnded: this.streamEnded,
     };
   }
 
