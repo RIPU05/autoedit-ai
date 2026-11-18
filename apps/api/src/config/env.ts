@@ -79,6 +79,15 @@ const schema = z.object({
   // Transcription sidecar (services/whisper)
   WHISPER_URL: z.string().url().default('http://localhost:9000'),
   WHISPER_MODEL: z.string().default('base'),
+
+  // Platform metadata resolvers & authorized direct-media acquisition (Step 3C.2 — all optional, fail-closed)
+  YOUTUBE_API_KEY: z.string().optional().default(''),
+  TWITCH_CLIENT_ID: z.string().optional().default(''),
+  TWITCH_CLIENT_SECRET: z.string().optional().default(''),
+  KICK_CLIENT_ID: z.string().optional().default(''),
+  KICK_CLIENT_SECRET: z.string().optional().default(''),
+  DIRECT_MEDIA_ALLOWED_HOSTS: z.string().optional().default(''),
+  DIRECT_MEDIA_PERMITTED_PUBLIC_HOSTS: z.string().optional().default(''),
 }).superRefine((value, ctx) => {
   if (value.AI_PROVIDER === 'claude' && value.ANTHROPIC_API_KEY.trim().length === 0) {
     ctx.addIssue({

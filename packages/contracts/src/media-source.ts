@@ -161,7 +161,7 @@ export type BroadcastIdentity = z.infer<typeof BroadcastIdentitySchema>;
 export const CacheableSourceIdSchema = z
   .string()
   .regex(
-    /^(upload:uploaded|youtube:(vod|broadcast)|twitch:(vod|broadcast)|kick:(vod|broadcast)|direct_media:vod):[a-zA-Z0-9._:-]+$/,
+    /^(upload:uploaded|youtube:(vod|broadcast)|twitch:(vod|broadcast)|kick:(vod|broadcast)|direct_media:(vod|broadcast)):[a-zA-Z0-9._:-]+$/,
     'Cacheable source ID must be an immutable broadcast, VOD, or upload identity (channel-only IDs are forbidden)',
   );
 
@@ -173,7 +173,7 @@ export type CacheableSourceId = z.infer<typeof CacheableSourceIdSchema>;
 export const CanonicalSourceIdSchema = z
   .string()
   .regex(
-    /^(upload:uploaded|youtube:(vod|broadcast|channel)|twitch:(vod|broadcast|channel)|kick:(vod|broadcast|channel)|direct_media:vod):[a-zA-Z0-9._:-]+$/,
+    /^(upload:uploaded|youtube:(vod|broadcast|channel)|twitch:(vod|broadcast|channel)|kick:(vod|broadcast|channel)|direct_media:(vod|broadcast)):[a-zA-Z0-9._:-]+$/,
     'Canonical source ID must follow <provider>:<kind>:<id>',
   );
 
@@ -182,7 +182,10 @@ export type CanonicalSourceId = z.infer<typeof CanonicalSourceIdSchema>;
 export const UniversalMediaMetadataSchema = MediaMetadataSchema.extend({
   title: z.string().optional(),
   channelName: z.string().optional(),
+  thumbnailUrl: z.string().url().optional(),
   isLive: z.boolean().optional(),
+  isClip: z.boolean().optional(),
+  publishedAt: z.string().optional(),
 });
 
 export type UniversalMediaMetadata = z.infer<typeof UniversalMediaMetadataSchema>;

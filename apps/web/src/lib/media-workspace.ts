@@ -119,7 +119,9 @@ export function describeCapabilityResult(resolved: ResolveMediaSourceResponse): 
   tone: 'ready' | 'unsupported' | 'warning';
   headline: string;
   body: string;
+  technicalReason?: string;
   showUploadCta: boolean;
+  contentKindLabel: string;
 } {
   const providerLabel =
     resolved.provider === 'youtube'
@@ -130,7 +132,21 @@ export function describeCapabilityResult(resolved: ResolveMediaSourceResponse): 
           ? 'Kick'
           : resolved.provider === 'upload'
             ? 'Uploaded video'
-            : 'Media source';
+            : resolved.provider === 'direct_media'
+              ? 'Authorized direct media'
+              : 'Media source';
+
+  const contentKindLabel = resolved.isClip
+    ? 'Clip'
+    : resolved.isLive || resolved.availability === 'LIVE_NOW'
+      ? 'Live'
+      : resolved.availability === 'OFFLINE'
+        ? 'Offline channel'
+        : resolved.sourceType === 'uploaded'
+          ? 'Uploaded'
+          : resolved.sourceType === 'live'
+            ? 'Live channel'
+            : 'Recorded VOD';
 
   switch (resolved.capabilityStatus) {
     case 'READY_TO_PROCESS':
@@ -139,20 +155,28 @@ export function describeCapabilityResult(resolved: ResolveMediaSourceResponse): 
         headline: `${providerLabel} ready for highlight detection`,
         body: resolved.reason || 'This source is authorized and ready to process.',
         showUploadCta: false,
+        contentKindLabel,
       };
     case 'UNSUPPORTED_ACQUISITION':
       return {
         tone: 'unsupported',
-        headline: `${providerLabel} ${resolved.sourceType === 'live' ? 'livestream' : 'VOD'} recognized — automatic processing unavailable`,
-        body: "This source is recognized, but automatic processing isn't available for it yet. You can upload a video you are authorized to use.",
+        headline: `${providerLabel} ${contentKindLabel.toLowerCase()} recognized — URL capture not yet enabled`,
+        body: `AutoAI Edit recognized this ${providerLabel} source and loaded its metadata, but automatic processing isn't available for ${providerLabel} URLs yet because live/VOD playback capture is not enabled in this build. Upload a local MP4/MOV video file to detect highlights and edit private clips now.`,
+        technicalReason: resolved.reason,
         showUploadCta: true,
+        contentKindLabel,
       };
     case 'BROADCAST_UNRESOLVED':
       return {
         tone: 'unsupported',
-        headline: `${providerLabel} live channel recognized — no active permitted broadcast`,
-        body: "This source is recognized, but automatic processing isn't available for live channel URLs yet. You can upload a video recording you are authorized to use.",
+        headline:
+          resolved.availability === 'OFFLINE'
+            ? `${providerLabel} channel is currently offline`
+            : `${providerLabel} live channel recognized — live URL capture not yet enabled`,
+        body: `AutoAI Edit recognized this ${providerLabel} channel, but automatic processing isn't available for live ${providerLabel} URLs yet because live stream capture is not enabled in this build. Upload a local video recording to detect highlights and edit clips now.`,
+        technicalReason: resolved.reason,
         showUploadCta: true,
+        contentKindLabel,
       };
     case 'REQUIRES_PERMISSION':
       return {
@@ -162,6 +186,7 @@ export function describeCapabilityResult(resolved: ResolveMediaSourceResponse): 
           resolved.reason ||
           'Permission could not be verified for this source. Upload a video you are authorized to edit.',
         showUploadCta: true,
+        contentKindLabel,
       };
     case 'SOURCE_UNAVAILABLE':
     default:
@@ -172,6 +197,7 @@ export function describeCapabilityResult(resolved: ResolveMediaSourceResponse): 
           resolved.reason ||
           'This source could not be found or accessed for your account. Try uploading a video instead.',
         showUploadCta: true,
+        contentKindLabel,
       };
   }
 }

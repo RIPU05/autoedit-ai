@@ -46,6 +46,8 @@ export interface AcquisitionPolicyContext {
   directMediaAuthorization?: DirectMediaAuthorization;
   /** URL safety options (https-only by default). */
   urlSafety?: UrlSafetyOptions;
+  /** Strictly non-production test escape hatch for local HTTP direct-media integration servers. */
+  allowLocalhostDirectMediaForTest?: boolean;
 }
 
 const YOUTUBE_HOSTS = new Set([
@@ -105,6 +107,9 @@ const KICK_RESERVED_PATHS = new Set([
 ]);
 
 const YOUTUBE_ID_RE = /^[a-zA-Z0-9_-]{11}$/;
+const YOUTUBE_HANDLE_RE = /^[a-zA-Z0-9._-]{2,60}$/;
+const YOUTUBE_CHANNEL_ID_RE = /^UC[a-zA-Z0-9_-]{20,30}$/;
+const YOUTUBE_CLIP_ID_RE = /^[a-zA-Z0-9_-]{10,80}$/;
 const TWITCH_CHANNEL_RE = /^[a-z0-9_]{2,25}$/;
 const TWITCH_VOD_ID_RE = /^\d{5,20}$/;
 const TWITCH_CLIP_SLUG_RE = /^[a-zA-Z0-9_-]{6,120}$/;
@@ -138,6 +143,100 @@ function resolveYouTube(url: URL, policy?: AcquisitionPolicyContext): UniversalM
   const host = url.hostname.toLowerCase();
   const segments = pathSegments(url.pathname);
   const { capability, rightsStatus } = buildPlatformCapability('youtube', policy);
+
+  // youtube.com/@<handle> or youtube.com/@<handle>/live -> Channel discovery identity
+  if (host !== 'youtu.be' && segments[0]?.startsWith('@')) {
+    const handle = segments[0].slice(1).toLowerCase();
+    if (!YOUTUBE_HANDLE_RE.test(handle)) {
+      throw new MediaSourceError({
+        code: 'MALFORMED_URL',
+        message: 'YouTube handle URL does not contain a valid channel handle.',
+      });
+    }
+    const wantsLive = segments[1]?.toLowerCase() === 'live';
+    const channelId = `youtube:channel:${handle}` as ChannelIdentity;
+    return UniversalMediaSourceSchema.parse({
+      canonicalId: channelId,
+      identityScope: 'CHANNEL_DISCOVERY',
+      provider: 'youtube',
+      sourceType: 'live',
+      externalId: handle,
+      channelId,
+      normalizedUrl: wantsLive
+        ? `https://www.youtube.com/@${handle}/live`
+        : `https://www.youtube.com/@${handle}`,
+      availability: 'UNKNOWN',
+      acquisitionCapability: capability,
+      rightsStatus,
+      ingestionStatus: 'PENDING',
+      metadata: {
+        hasAudio: true,
+        isLive: true,
+        channelName: `@${handle}`,
+      },
+    });
+  }
+
+  // youtube.com/channel/UC... or youtube.com/channel/UC.../live -> Channel discovery identity
+  if (host !== 'youtu.be' && segments[0]?.toLowerCase() === 'channel') {
+    const rawChanId = segments[1];
+    if (!rawChanId || !YOUTUBE_CHANNEL_ID_RE.test(rawChanId)) {
+      throw new MediaSourceError({
+        code: 'MALFORMED_URL',
+        message: 'YouTube channel URL does not contain a valid UC... channel ID.',
+      });
+    }
+    const wantsLive = segments[2]?.toLowerCase() === 'live';
+    const channelId = `youtube:channel:${rawChanId}` as ChannelIdentity;
+    return UniversalMediaSourceSchema.parse({
+      canonicalId: channelId,
+      identityScope: 'CHANNEL_DISCOVERY',
+      provider: 'youtube',
+      sourceType: 'live',
+      externalId: rawChanId,
+      channelId,
+      normalizedUrl: wantsLive
+        ? `https://www.youtube.com/channel/${rawChanId}/live`
+        : `https://www.youtube.com/channel/${rawChanId}`,
+      availability: 'UNKNOWN',
+      acquisitionCapability: capability,
+      rightsStatus,
+      ingestionStatus: 'PENDING',
+      metadata: {
+        hasAudio: true,
+        isLive: true,
+      },
+    });
+  }
+
+  // youtube.com/clip/<clipId>
+  if (host !== 'youtu.be' && segments[0]?.toLowerCase() === 'clip') {
+    const clipId = segments[1];
+    if (!clipId || !YOUTUBE_CLIP_ID_RE.test(clipId)) {
+      throw new MediaSourceError({
+        code: 'MALFORMED_URL',
+        message: 'YouTube clip URL does not contain a valid clip ID.',
+      });
+    }
+    const externalId = `clip_${clipId}`;
+    return UniversalMediaSourceSchema.parse({
+      canonicalId: `youtube:vod:${externalId}`,
+      identityScope: 'IMMUTABLE_VOD',
+      provider: 'youtube',
+      sourceType: 'vod',
+      externalId,
+      normalizedUrl: `https://www.youtube.com/clip/${clipId}`,
+      availability: 'UNKNOWN',
+      acquisitionCapability: capability,
+      rightsStatus,
+      ingestionStatus: 'PENDING',
+      metadata: {
+        hasAudio: true,
+        isLive: false,
+        isClip: true,
+      },
+    });
+  }
 
   let videoId: string | undefined;
   let sourceType: 'live' | 'vod' = 'vod';
@@ -218,7 +317,7 @@ function resolveTwitch(url: URL, policy?: AcquisitionPolicyContext): UniversalMe
       acquisitionCapability: capability,
       rightsStatus,
       ingestionStatus: 'PENDING',
-      metadata: { hasAudio: true, isLive: false },
+      metadata: { hasAudio: true, isLive: false, isClip: true },
     });
   }
 
@@ -295,7 +394,7 @@ function resolveTwitch(url: URL, policy?: AcquisitionPolicyContext): UniversalMe
       acquisitionCapability: capability,
       rightsStatus,
       ingestionStatus: 'PENDING',
-      metadata: { hasAudio: true, isLive: false, channelName: channel },
+      metadata: { hasAudio: true, isLive: false, isClip: true, channelName: channel },
     });
   }
 
@@ -408,7 +507,39 @@ function resolveKick(url: URL, policy?: AcquisitionPolicyContext): UniversalMedi
       acquisitionCapability: capability,
       rightsStatus,
       ingestionStatus: 'PENDING',
-      metadata: { hasAudio: true, isLive: false, channelName: channel },
+      metadata: { hasAudio: true, isLive: false, isClip: true, channelName: channel },
+    });
+  }
+
+  // kick.com/<channel>?clip=<clipId> (Kick share clip query link)
+  if (segments.length === 1 && url.searchParams.has('clip')) {
+    const channel = segments[0].toLowerCase();
+    const clipId = url.searchParams.get('clip')?.trim();
+    if (
+      KICK_RESERVED_PATHS.has(channel) ||
+      !KICK_CHANNEL_RE.test(channel) ||
+      !clipId ||
+      !KICK_ASSET_ID_RE.test(clipId)
+    ) {
+      throw new MediaSourceError({
+        code: 'MALFORMED_URL',
+        message: 'Kick clip URL has an invalid channel or clip ID.',
+      });
+    }
+    const externalId = `clip_${clipId}`;
+    return UniversalMediaSourceSchema.parse({
+      canonicalId: `kick:vod:${externalId}`,
+      identityScope: 'IMMUTABLE_VOD',
+      provider: 'kick',
+      sourceType: 'vod',
+      externalId,
+      channelId: `kick:channel:${channel}` as ChannelIdentity,
+      normalizedUrl: `https://kick.com/${channel}/clips/${clipId}`,
+      availability: 'UNKNOWN',
+      acquisitionCapability: capability,
+      rightsStatus,
+      ingestionStatus: 'PENDING',
+      metadata: { hasAudio: true, isLive: false, isClip: true, channelName: channel },
     });
   }
 
@@ -446,8 +577,9 @@ function resolveKick(url: URL, policy?: AcquisitionPolicyContext): UniversalMedi
 
 function resolveApprovedDirectMedia(url: URL, policy?: AcquisitionPolicyContext): UniversalMediaSource {
   const host = url.hostname.toLowerCase();
+  const portSegment = url.port ? `:${url.port}` : '';
   const normalizedPathname = url.pathname.replace(/\/+$/, '');
-  const cleanUrl = `${url.protocol}//${host}${normalizedPathname}`;
+  const cleanUrl = `${url.protocol}//${host}${portSegment}${normalizedPathname}`;
   const isMediaExt = /\.(mp4|mov|webm|mkv|m3u8)$/i.test(normalizedPathname);
 
   if (!isMediaExt) {
@@ -487,7 +619,31 @@ export function resolveMediaSourceFromUrl(
   rawUrl: string,
   policy?: AcquisitionPolicyContext,
 ): UniversalMediaSource {
-  const parsed = parseAndValidateSafeUrl(rawUrl, policy?.urlSafety);
+  const allowLocalDirect =
+    Boolean(policy?.allowLocalhostDirectMediaForTest) && process.env.NODE_ENV !== 'production';
+
+  let parsed: URL;
+  if (allowLocalDirect) {
+    let candidate: URL;
+    try {
+      candidate = new URL(rawUrl.trim());
+    } catch {
+      throw new MediaSourceError({ code: 'MALFORMED_URL', message: 'Malformed media source URL.' });
+    }
+    const candHost = candidate.hostname.toLowerCase().replace(/\.$/, '');
+    if (
+      policy?.approvedDirectMediaHosts?.has(candHost) &&
+      (candidate.protocol === 'http:' || candidate.protocol === 'https:') &&
+      !candidate.username &&
+      !candidate.password
+    ) {
+      return resolveApprovedDirectMedia(candidate, policy);
+    }
+    parsed = parseAndValidateSafeUrl(rawUrl, policy?.urlSafety);
+  } else {
+    parsed = parseAndValidateSafeUrl(rawUrl, policy?.urlSafety);
+  }
+
   const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
 
   if (YOUTUBE_HOSTS.has(host)) {
