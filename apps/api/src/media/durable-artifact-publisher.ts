@@ -8,7 +8,10 @@ import type {
 import { prisma as defaultPrisma } from '../lib/prisma.js';
 import type { MediaStorageProvider } from '../storage/storage.types.js';
 import { MediaSourceError } from './errors.js';
-import { DurableMediaRegistryService } from './durable-media-registry.js';
+import {
+  DurableMediaRegistryService,
+  verifyServerRightsInsideTx,
+} from './durable-media-registry.js';
 import {
   SharedArtifactCacheService,
   resolveAuthorizedCacheIdentity,
@@ -514,6 +517,42 @@ export class DurableArtifactPublisher {
         await input.onBeforeCommitInsideTx();
       }
 
+      // Re-verify authoritative rights INSIDE the locked PostgreSQL transaction so any
+      // rights revocation racing with generation/publication ALWAYS fails closed!
+      const txRights = await verifyServerRightsInsideTx(tx, {
+        mediaSourceId: artifact.mediaSourceId,
+        requesterUserId: input.requesterUserId,
+        rightsScope: identity.rightsScope,
+        now,
+      });
+      if (!txRights.ok) {
+        await tx.sharedArtifactAttempt.update({
+          where: { id: input.attemptId },
+          data: {
+            state: 'ABANDONED',
+            objectKey: attempt.objectKey ?? input.objectKey,
+            errorMessage: txRights.reason,
+            cleanupEligibleAfter,
+            updatedAt: now,
+          },
+        });
+        const restoredState =
+          artifact.publishedGeneration > 0 && artifact.publishedObjectKey ? 'PUBLISHED' : 'PENDING';
+        await tx.sharedCacheArtifact.update({
+          where: { id: artifact.id },
+          data: {
+            activeAttemptId: null,
+            state: restoredState,
+            updatedAt: now,
+          },
+        });
+        return {
+          committed: false as const,
+          errorCode: txRights.code,
+          reason: txRights.reason,
+        };
+      }
+
       // Mark any prior COMMITTED attempt as SUPERSEDED with delayed cleanup grace window
       await tx.sharedArtifactAttempt.updateMany({
         where: {
@@ -565,7 +604,7 @@ export class DurableArtifactPublisher {
 
     if (!txOutcome.committed) {
       throw new MediaSourceError({
-        code: 'LEASE_EXPIRED',
+        code: 'errorCode' in txOutcome && txOutcome.errorCode ? txOutcome.errorCode : 'LEASE_EXPIRED',
         message: txOutcome.reason,
       });
     }

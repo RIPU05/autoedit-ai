@@ -48,7 +48,7 @@ describe('Whisper Live Sidecar Integration (Step 2C)', () => {
     // 4. Model recorded
     expect(result.model).toBeDefined();
     expect(typeof result.avgConfidence).toBe('number');
-  });
+  }, 60_000);
 
   it('verifies transcribe() helper returns cues with start, end, text', async () => {
     const cues = await transcribe(speechWav, 'en', {
@@ -61,5 +61,5 @@ describe('Whisper Live Sidecar Integration (Step 2C)', () => {
     expect(cues[0]).toHaveProperty('end');
     expect(cues[0]).toHaveProperty('text');
     expect(cues[0].text.length).toBeGreaterThan(0);
-  });
+  }, 60_000);
 });
