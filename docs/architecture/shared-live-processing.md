@@ -1,104 +1,140 @@
-# AutoAI Edit — Working Shared Livestream Ingestion & Highlight Cache Prototype (Step 3B.5)
+# AutoAI Edit — Distributed Shared Livestream Ingestion & Highlight Cache Prototype (Steps 3B.5 & 3B.5.1)
 
-## 1. Overview & Working Pipeline
+## 1. Overview & What Each Milestone Proved
 
-Step 3B.5 delivers an end-to-end working shared video-ingestion, CPU-first highlight detection, FFmpeg MP4 clip generation, and private MinIO/S3 cache reuse prototype using controlled, authorized local test media. Unlike Step 3B.4's contracts and coordination primitives, this milestone processes real H.264/AAC video bytes through FFmpeg, probes every generated MP4 with `ffprobe`, stores real playable MP4s in private MinIO, and proves multi-clipper deduplication on live local Redis + MinIO.
+### What Step 3B.5 (Same-Instance Prototype) Proved
+Step 3B.5 proved the single-process end-to-end media mechanics on real local FFmpeg, Redis, and MinIO:
+- Real FFmpeg stream-copy segmentation into a rolling buffer (`FfmpegRollingSegmentBuffer`).
+- Real CPU-first audio energy + spike detection (`extractAudioSignalsFromSegments` + `CpuFirstHeuristicDetector`).
+- Real FFmpeg highlight clip extraction with stream-copy/re-encode fallback and `ffprobe` validation (`extractAndVerifyHighlightClip`).
+- Private MinIO storage via `SharedArtifactCacheService` with fail-closed rights checks and isolated `PRIVATE_USER` edits.
+- Same-instance fan-in of 1,000 clippers using an in-process `activeRuns` Map paired with Redis coordination.
+
+However, independent review identified four distributed-systems gaps when running **multiple independent service instances or separate OS processes**:
+1. Cross-instance `ATTACH_EXISTING` could fall through into `executeRealProcessing()` when the owner promise was not in the local process's `activeRuns` Map.
+2. Coordination keyed only on `canonicalSourceId` conflated source acquisition with downstream algorithm/render-setting clip variants.
+3. Missing-artifact recovery bypassed fencing with `fencingToken: undefined`, allowing concurrent repair races and stale-worker overwrites, and reused fabricated probe metadata (`sha256: cacheKey`) on Redis key loss.
+4. No continuous lease heartbeat or FFmpeg child-process cancellation existed for long-running FFmpeg work.
+
+### What Step 3B.5.1 (Distributed Hardening) Proves
+Step 3B.5.1 resolves all four distributed gaps and proves coordination across **multiple independent `SharedLiveProcessingService` instances** AND **two separate Node OS processes** sharing **only** live local Redis and live local MinIO (with completely separate process-local memory and scratch directories).
 
 ```
-Controlled Authorized Broadcast Fixture (30s 1280x720 H.264/AAC, spike at 16–19s)
-  → ControlledLocalStreamAdapter (explicit opt-in test adapter; external SSRF intact)
-  → assertAcquisitionPermitted + createTrustedCacheAuthContext (fail-closed BEFORE lock/FFmpeg)
-  → SharedIngestionCoordinator (Redis Lua atomic 1-owner lease + monotonic fencing token)
-      ├─ 1 Owner (ACQUIRED_NEW / ACQUIRED_RECOVERY):
-      │   1. FfmpegRollingSegmentBuffer (real FFmpeg stream-copy segmentation + ffprobe check + pinning)
-      │   2. extractAudioSignalsFromSegments (FFmpeg 16kHz s16le PCM → per-second RMS dBFS & spike delta)
-      │   3. CpuFirstHeuristicDetector (1 shared CPU analysis pass; optional injected chat signals)
-      │   4. Durable MinIO pre-check (avoids re-render if Redis TTL expired while MP4 still exists)
-      │   5. extractAndVerifyHighlightClip (FFmpeg concat/trim stream-copy w/ H.264/AAC fallback + ffprobe)
-      │   6. SharedArtifactCacheService.putCachedArtifact (private MinIO object under cache/shared/...)
-      │   7. coordinator.markReady (fenced by fencingToken; only AFTER durable MinIO write & validation)
-      └─ 999 Concurrent Clippers (ATTACH_EXISTING / REUSE_READY):
-          • Zero duplicate FFmpeg runs; wait on owner or verify durable MinIO object
-          • Receive authorized presigned download URL for the exact same verified MP4
+Authorized Broadcast Input (ControlledLocalStreamAdapter; external SSRF intact)
+  → assertAcquisitionPermitted + createTrustedCacheAuthContext (fail-closed BEFORE Redis/MinIO)
+  → Layer A: Source Acquisition   workId = <canonicalId>::src::<rev>_s<segDur>
+       • 1 owner runs FFmpeg segmentation ONCE → uploads immutable segments + SourceManifest to MinIO
+       • Remote instances wait via bounded Redis polling or reuse verified SourceManifest
+  → Layer B: Source Analysis      workId = <canonicalId>::ana::<hash16(rev,algo,threshold,cooldown,buf)>
+       • 1 owner runs CPU audio analysis ONCE → uploads AnalysisManifest (HighlightWindowCandidate) to MinIO
+       • Reuses Layer A segments from MinIO (0 duplicate source FFmpeg segmentation)
+  → Layer C: Derived Base Clip    workId = <canonicalId>::clip::<clipCacheKey[0..24]>
+       • 1 owner runs FFmpeg clip extraction + ffprobe ONCE → uploads immutable /v/gen-<token>-<sha12>.mp4
+       • Verifies active lease + monotonic manifest fencingToken → atomically publishes .manifest.json
+       • Marks Redis READY only AFTER durable MP4 + verified manifest exist
+       • 999 concurrent clippers across instances wait via bounded Redis polling → verify manifest + ETag → signed URL
 ```
 
 ---
 
-## 2. Controlled Test Media Fixture & Security Boundary
+## 2. Cross-Instance Coordination Strategy
 
-Implemented in `apps/api/src/media/live/controlled-stream.adapter.ts`:
-- `ensureControlledLiveFixture()` deterministically generates a 30-second `1280x720 @ 30fps` H.264/AAC MP4 (`-g 30` 1-second keyframes for clean segment alignment) with quiet baseline audio (`-32 dBFS`, `220Hz`) and one loud highlight spike (`-4 dBFS`, `880Hz + 1320Hz`) during `16.0s–19.0s`.
-- `ControlledLocalStreamAdapter` requires explicit `policy.enabled = true` and a verified `IMMUTABLE_BROADCAST` session identity.
-- **SSRF Preserved:** Normal external URL ingestion (`resolveMediaSourceFromUrl`) continues to reject `file://`, loopback `127.0.0.1`, private networks, and cloud metadata endpoints. Local media access exists strictly inside this opt-in test adapter.
+Implemented in `apps/api/src/media/live/shared-live-pipeline.ts` (`runCoordinatedStage` & `waitForCoordinatedChange`):
 
----
-
-## 3. Real FFmpeg Rolling Segment Buffer & Disk Lifecycle
-
-Implemented in `apps/api/src/media/live/rolling-segment-buffer.ts`:
-- Slices incoming video bytes via FFmpeg (`-f segment -segment_time <N> -reset_timestamps 1 -c copy`) into ordered `.mp4` segments (`seg_000000.mp4`, ...).
-- Probes every segment with `ffprobe` (`durationSec`, `width`, `height`, `sizeBytes`, `sha256`). Corrupt or 0-byte segments are marked `valid: false` (`corruptSegmentsSkipped++`) without crashing the worker.
-- **Configurable Parameters:** `segmentDurationSec`, `maxRetentionSec`, `preEventSec`, `postEventSec`, `maxDiskBytes` (default 256 MiB), and `maxStreamDurationSec` (default 3600s).
-- **Start-of-Stream & Post-Event Safety:** Clamps early events cleanly at `0s`; `isWindowReady(windowEndSec)` ensures clip extraction waits until required post-event footage has arrived (or end-of-stream is signaled).
-- **Pinning & Safe Eviction:** Active clip jobs call `pinSegments(indices, leaseId)` and `unpinLease(leaseId)` in `finally`. `evictExpired()` deletes unpinned segments outside `maxRetentionSec` or exceeding `maxDiskBytes` from disk while never deleting pinned footage. `cleanupAll()` removes all temporary files on completion, failure, or cancellation.
+- **Strict Ownership Rule:** Only a worker receiving `ACQUIRED_NEW`, `ACQUIRED_RECOVERY`, or `ACQUIRED_REPAIR` (each carrying a positive monotonic `fencingToken`) may execute FFmpeg or write artifacts.
+- **No `ATTACH_EXISTING` Fall-Through:** When Redis returns `ATTACH_EXISTING`, the caller **never** enters `executeAsOwner()`. Instead, it enters a bounded cross-instance polling loop (`waitForCoordinatedChange`) with exponential backoff (`25ms → 40ms → 64ms → ... → 200ms` max).
+- **Zero Process-Local Ownership or Artifact Caches:** `SharedLiveProcessingService` stores no `activeRuns` ownership map and no `readyCandidates` metadata map. All durable state (`SourceManifest`, `AnalysisManifest`, `ClipManifest`) lives in MinIO.
+- **In-Flight-Only Read Coalescing:** To prevent 500 concurrent waiters waking up inside one Node process on the exact same tick from saturating S3/MinIO sockets, `localPollCoalescer` and `localDurableCheckCoalescer` coalesce simultaneous in-flight reads and delete their entry immediately in `finally` (zero TTL caching, fresh live checks on every subsequent call).
+- **Owner Crash & Lease Expiry Recovery:** If the active owner transitions to `FAILED` / `EXPIRED`, or its `leaseExpiresAtMs <= Date.now()`, or the Redis key disappears, waiters break out and re-enter `requestIngestion()`. Redis Lua guarantees strictly **one** waiter wins `ACQUIRED_RECOVERY` with an incremented `fencingToken`.
+- **Cancellation & Timeouts:** Waiters honor both `waitTimeoutMs` (`MediaSourceError` code `COORDINATION_TIMEOUT`) and caller `AbortSignal` (`REQUEST_CANCELLED`), releasing timers and listeners immediately without spawning FFmpeg.
 
 ---
 
-## 4. CPU-First Audio Highlight Signals
+## 3. Source vs. Analysis vs. Derived Clip Identity
 
-Implemented in `apps/api/src/media/live/audio-signal-extractor.ts`:
-- Decodes each buffered segment's audio via FFmpeg to 16kHz mono signed 16-bit PCM (`s16le`) in memory (zero temp WAV files).
-- Computes per-second `rmsDb`, `peakDb`, median stream baseline (`baselineRmsDb`), and relative `deltaOverBaselineDb`.
-- Feeds normalized `AUDIO_ENERGY` and `SPEECH_ACTIVITY` samples directly into `CpuFirstHeuristicDetector`.
-- Supports typed injected synthetic chat signals (`CHAT_VELOCITY`, `CHAT_EXCITEMENT_KEYWORDS`) in tests without claiming real YouTube/Twitch/Kick live chat integration or running continuous vision models.
-- **Measured Fixture Accuracy:** On the 30-second fixture (`16–19s` spike), baseline measures below `-20 dBFS`, spike exceeds `+15 dB` above baseline, yielding **1 true positive candidate** in `[15.5s, 19.5s]` and **0 false positives** across quiet intervals `[0–15s]` and `[20–30s]`.
+Implemented in `apps/api/src/media/ingestion-coordinator.ts` and `shared-live-pipeline.ts`:
 
----
+| Layer | Redis Coordination Work ID | Durable MinIO Artifact Kind | Parameters Included | Reused When |
+| :--- | :--- | :--- | :--- | :--- |
+| **A. Source** | `buildSourceWorkId(canonicalId, rev_segDur)` → `<id>::src::<rev>` | `SOURCE_SEGMENT` (`.manifest.json` + `/v/gen-<tok>-seg-*.mp4`) | `canonicalSourceId`, `sourceRevision`, `segmentDurationSec` | Downstream `renderSettings`, `algorithmVersion`, or clip windows differ |
+| **B. Analysis** | `buildAnalysisWorkId(canonicalId, opts)` → `<id>::ana::<hash16>` | `HIGHLIGHT_ANALYSIS` (`.manifest.json`) | `sourceRevision`, `algorithmVersion`, `scoreThreshold`, `cooldownSec`, `bufferConfig`, synthetic signal hash | Downstream `renderSettings` differ for the same broadcast & algorithm |
+| **C. Base Clip** | `buildClipWorkId(canonicalId, clipCacheKey)` → `<id>::clip::<key24>` | `BASE_CLIP` (`.manifest.json` + `/v/gen-<tok>-<sha12>.mp4`) | `sourceRevision`, `timeRangeSec`, `algorithmVersion`, `renderSettings` | Identical base clip requested across clippers/instances |
+| **Private Edit** | No shared coordination | `BASE_CLIP` under `cache/private/<ownerUserId>/...` | `ownerUserId`, `customEditHash`, window, filter | Strictly same `ownerUserId` only (`ACCESS_DENIED` across users) |
 
-## 5. Real Highlight MP4 Generation & Validation
-
-Implemented in `apps/api/src/media/live/highlight-clip-extractor.ts`:
-- Concatenates pinned buffered segments via FFmpeg concat demuxer and trims to `[windowStartSec, windowEndSec]`.
-- **Stream-Copy First with Re-Encode Fallback:** Attempts fast `-c copy -movflags +faststart` first; if stream-copy fails or probed duration drifts outside bounds (or a custom video filter is requested), falls back automatically to frame-accurate `libx264` + `aac` re-encoding.
-- **Deep `ffprobe` Validation (`probeAndValidateClipMp4`):** Rejects missing/0-byte files, missing video/audio streams, invalid/NaN durations, or duration drift beyond tolerance. Never trusts `.mp4` file extensions alone.
+All three scoped work IDs remain 100% backward-compatible with `CacheableSourceIdSchema` and continue to reject channel-only discovery IDs (`:channel:`).
 
 ---
 
-## 6. Shared Cache Reuse, Rights Authorization & Redis Lease Guarantees
+## 4. Worker Lease Heartbeat & FFmpeg Cancellation
 
-Implemented in `apps/api/src/media/live/shared-live-pipeline.ts`:
-- **Shared Cache Keys:** Reuses `SharedArtifactCacheService` + `TrustedCacheAuthContext`. Identical base clips map to the same `cacheKey` under `cache/shared/base_clip/...` in private MinIO. Different event windows, revisions, algorithm versions, or render settings produce distinct cache keys.
-- **Private User Edits:** `renderPrivateUserEdit()` stores user-specific `customEditHash` clips strictly under `cache/private/<ownerUserId>/...`. Cross-user access is denied with `ACCESS_DENIED`.
-- **Redis Lease & Fencing Guarantees:**
-  - Atomic Redis Lua scripts guarantee 1 active work owner with O(1) compact lock record (`< 350 bytes` even at `attachedCount = 1000`).
-  - Owner renews lease during FFmpeg processing and fences `markReady` with `fencingToken` ONLY AFTER durable MinIO write & probe validation succeed.
-  - Stale workers whose lease expired during FFmpeg are rejected with `LEASE_EXPIRED` and cannot publish over a recovery worker.
-- **Failure Recovery Verified:**
-  - Storage write failure / worker crash → marks `FAILED`, cleans temp files, next worker recovers via `ACQUIRED_RECOVERY`.
-  - Redis key loss / TTL expiry → next worker checks durable MinIO before FFmpeg clip extraction and reuses the existing MP4 without re-rendering.
-  - Missing MinIO object while Redis says `READY` → `checkCachedArtifact` detects missing object, triggers recovery (`recoveryRuns++`), regenerates valid MP4, and re-uploads to MinIO.
+Implemented across `shared-live-pipeline.ts` (`runOwnerWithHeartbeat`), `rolling-segment-buffer.ts`, and `highlight-clip-extractor.ts`:
+
+- Active owners schedule a non-overlapping renewal timer every `Math.max(100, Math.floor(leaseMs / 3))` ms, calling `coordinator.renewLease(...)` and incrementing `metrics.heartbeatRenewals`.
+- Renewal stops immediately in `finally` on completion, failure, lease loss, or cancellation.
+- If lease renewal fails (`LEASE_EXPIRED`) or the caller's `AbortSignal` fires, an internal `ownerAbort` `AbortController` immediately signals both `FfmpegRollingSegmentBuffer` and `extractAndVerifyHighlightClip`, sending `SIGKILL` to the active FFmpeg child process, cleaning up scratch files, and preventing any further object/manifest writes or `markReady` calls.
 
 ---
 
-## 7. Measured Local Prototype Results
+## 5. Coordinated Recovery, Atomic Publication & Stale-Worker Fencing
+
+Implemented in `ingestion-coordinator.ts` (`INVALIDATE_READY_LUA`) and `shared-live-pipeline.ts`:
+
+- **No `fencingToken: undefined` Bypass:** Missing or corrupt artifact recovery never bypasses coordination ownership.
+- **Conditional Atomic Invalidation (`invalidateReadyArtifact`):** When a `REUSE_READY` (or waiter `READY`) check finds a missing or corrupt object in MinIO, callers invoke `coordinator.invalidateReadyArtifact({ canonicalSourceId, expectedArtifactRef, expectedFencingToken, repairWorkerId, leaseMs, maxRetries })`.
+  - The single-key Redis Lua script verifies `rec.state == 'READY' && rec.artifactRef == expectedArtifactRef && rec.fencingToken == expectedToken`.
+  - Strictly **one** caller wins `ACQUIRED_REPAIR` (state → `ACQUIRING`, `fencingToken` incremented).
+  - Concurrent repair callers receive `CONFLICT_ALREADY_RECOVERING` and wait via bounded cross-instance polling without duplicating FFmpeg.
+- **Immutable Objects + Atomic Manifest Cutover:**
+  - MP4 files are written to immutable versioned keys: `<storageKey>/v/gen-<fencingToken>-<contentSha256_12>.mp4`.
+  - If a replacement fails before manifest write, the previous healthy object and `.manifest.json` remain completely intact.
+  - Before writing `.manifest.json`, the owner verifies active Redis lease (`renewNow()`) AND verifies any existing `.manifest.json` has `existing.fencingToken < fencingToken`. Stale workers cannot overwrite newer generations either in object storage or in the manifest.
+
+---
+
+## 6. Cache Validation & Real Media Verification
+
+Implemented in `shared-live-pipeline.ts` (`loadAndVerifyClipManifest`) and `highlight-clip-extractor.ts` (`probeAndValidateClipMp4FromBuffer`):
+
+- **Never Trust Size Alone or Fabricate Metadata:**
+  - Every `ClipManifest` stores the real `ProbedClipMetadata` produced by `ffprobe` and real SHA-256 of the MP4 file bytes (`clipMeta.sha256` is strictly distinct from `cacheKey`).
+  - On reuse, `loadAndVerifyClipManifest` validates: (1) manifest schema & candidate schema, (2) `clipMeta.sha256 !== cacheKey`, (3) authorized object-key prefix, (4) MinIO `HEAD` existence + exact `Content-Length === clipMeta.sizeBytes`, and (5) `ETag === manifest.etag` (catching even same-byte-length object corruption in O(1)).
+  - On Redis-key-loss cold cache rehydration (or whenever `verifyMediaIntegrity: true`), full MP4 bytes are fetched and validated via SHA-256 + `probeAndValidateClipMp4FromBuffer` (`ffprobe`).
+  - Corrupt objects are never served (`ARTIFACT_CORRUPT` on direct download; automatic atomic invalidation & regeneration on shared highlight requests).
+
+---
+
+## 7. Measured Local Prototype Results (Step 3B.5.1)
 
 Measured on local Docker Redis (`redis://localhost:6379`) + local Docker MinIO (`http://127.0.0.1:9002`, bucket `autoedit-local`) + `ffmpeg-static`:
 
-| Measurement | Observed Value |
+| Scenario / Measurement | Observed Result |
 | :--- | :--- |
-| Controlled Fixture | 30.0s, `1280x720 @ 30fps`, `h264/aac` |
-| Extracted Base Highlight MP4 | `9,181,225 bytes` (~8.76 MiB), `10.016s`, `1280x720`, `h264/aac`, `stream-copy` |
-| 1,000 Concurrent Clippers Fan-In | `~5.97s` total; **1** `ACQUIRED_NEW`, **999** `ATTACH_EXISTING`/`REUSE_READY`; **1** source job, **1** analysis pass, **1** FFmpeg render |
-| 5,000 Authorized Cached Download Requests | `~4.12s` total (signing 5,000 authorized presigned URLs + MinIO existence verification); **0** additional FFmpeg renders |
-| Redis Coordination Record Size (at 1,000 clippers) | `< 350 bytes` (`attachedCount: 1000`, constant O(1)) |
+| Controlled Fixture | 30.0s, `1280x720 @ 30fps`, `h264/aac`, audio spike at `16.0–19.0s` |
+| Extracted Base Highlight MP4 | `9,181,225 bytes` (~8.76 MiB), `10.016s`, `1280x720`, `h264/aac`, `stream-copy`, real `sha256=bc56ff731241...` |
+| **1,000 Concurrent Clippers across 2 Independent Instances** (`500` instA + `500` instB) | `14.36s` total; **1** `ACQUIRED_NEW`, **999** `ATTACH_EXISTING`/`REUSE_READY`; **1** source job, **1** analysis pass, **1** FFmpeg render (`instA=1, instB=0`) |
+| **2 Separate OS Node Processes** (parent + spawned child PID) | `5.54s` total; **1** source job, **1** analysis pass, **1** FFmpeg render across both PIDs; identical `cacheKey`, `objectKey`, and `sha256` |
+| **5,000 Authorized Cached Download Requests** (across 2 instances) | `5.12s` total (`heapDelta=46.3 MB`); **0** additional FFmpeg renders; short-lived `600s` signed URLs |
+| **16 Concurrent Missing-Object Repair Requests** (8 instA + 8 instB) | Strictly **1** `ACQUIRED_REPAIR` winner, **1** repair FFmpeg render, new immutable `gen-N` object published |
+| **Same-Length Corrupt MP4 Overwrite** | Detected immediately (`corruptArtifactsDetected >= 1`), rejected on direct download (`ARTIFACT_CORRUPT`), atomically repaired & re-verified by `ffprobe` |
+| **Long-Running Lease Heartbeat** (`leaseMs=600ms`, `1,100ms` work) | `heartbeatRenewals >= 3`, remote waiter stayed attached with `0` duplicate renders |
+| Redis Clip Coordination Record Size (at 1,000 clippers) | `< 450 bytes` (`attachedCount: 1000`, constant O(1)) |
 
-> **Important Scope Disclaimer:** These tests prove **functional deduplication, authorization enforcement, and real FFmpeg/MinIO/Redis integration** on a single local machine. They are **not** a production multi-node bandwidth or throughput benchmark and do not claim measured production cost savings percentages.
+> **Honest Scope Disclaimer for the 5,000-Download Test:** The 5,000-request test measures **authorized cache lookups, manifest/metadata validation, and short-lived presigned URL issuance** on one local developer machine. It does **not** transfer 5,000 × 8.76 MiB (~43.8 GiB) of actual MP4 video bytes over a network and is **not** a CDN-scale delivery or multi-node bandwidth benchmark.
 
 ---
 
-## 8. Limitations & Requirements Before Production
+## 8. Remaining Limitations of Redis-Only Coordination
 
-1. **Test-Only Rights Fixtures:** Step 3B.5 authorizes controlled test media via an explicit test-only policy object. Production **must** replace this with persistent authoritative rights & ownership records in PostgreSQL (`MediaSource`, `SharedCacheEntry`).
-2. **Real Platform Acquisition (Deferred):** YouTube, Twitch, and Kick live/VOD acquisition adapters (using approved, rights-compliant platform methods without bypassing DRM/paywalls) are intentionally out of scope for Step 3B.5.
-3. **Distributed Multi-Node Fan-In:** In-process single-flight waiters (`activeRuns`) deduplicate concurrent requests inside one API/worker node; multi-node production deployments should pair `RedisCoordinationStore` with Redis Pub/Sub or BullMQ job-completion notifications so remote nodes await completion without polling.
-4. **CDN / Edge Delivery:** Serving 5,000+ simultaneous actual MP4 byte transfers in production requires a CDN/edge cache in front of signed S3/R2 origin URLs.
+1. **Redis Restart / Eviction Durability:** Redis coordination keys are volatile (`PX recordTtlMs`, in-memory state). If Redis restarts or evicts a key mid-flight, another worker may acquire a fresh `fencingToken = 1`. Because MinIO manifests store monotonic `fencingToken` and immutable object keys, a fresh cold start will still rehydrate an already-published valid artifact without re-rendering, **but** true distributed mutual exclusion across Redis data loss requires durable transactional leases (e.g., PostgreSQL advisory/row locks or Raft-backed coordination).
+2. **Polling Latency vs. Event-Driven Wakeup:** Bounded exponential backoff polling (`25–200ms`) is simple, reliable, and resilient to missed pub/sub messages, but adds small wakeup latency (~25–200ms) and periodic Redis `GET` load under many distinct active streams. Pairing Redis Pub/Sub or BullMQ completion events with a slower fallback poll is recommended at higher stream counts.
+3. **Manifest Check-Then-Put Non-Atomicity in S3/MinIO:** Checking `existingManifest.fencingToken < fencingToken` followed by `putCachedManifest` prevents stale writes across normal timing windows, but standard S3 `PutObject` without conditional `If-Match` / DB CAS cannot provide strict linearizability if two workers somehow held concurrent leases after a Redis wipe. Recording active generation pointers in PostgreSQL (`UPDATE ... WHERE fencing_token < $new`) closes this theoretical window completely.
+4. **Test-Only Rights Policy:** `ControlledLocalStreamAdapter` supplies an opt-in test policy. Production must hydrate `TrustedCacheAuthContext` strictly from authoritative PostgreSQL `MediaSource` / `Project` ownership and rights records.
+
+---
+
+## 9. What Remains for a Continuously Running Live Ingestion Service
+
+1. **Authoritative PostgreSQL Persistence:** Persist `MediaSource`, `BroadcastSession`, `SharedCacheArtifact` (with CAS `fencingToken`), and `UserProject` rows so rights, ownership, and manifest generation pointers are transactionally durable.
+2. **Permitted Platform Acquisition Adapters:** Implement compliant, rights-verified YouTube, Twitch, and Kick VOD/broadcast acquisition adapters behind `AcquisitionCapability` checks (without bypassing DRM, paywalls, or platform restrictions).
+3. **Continuous Live Worker Daemon:** Long-lived BullMQ/worker processes that continuously ingest rolling HLS/DASH segments while a broadcast is `LIVE_NOW`, emit sliding-window `HighlightWindowCandidate` records in real time, and garbage-collect old immutable object generations after a grace window.
+4. **CDN / Edge Delivery:** Put a CDN (CloudFront / Cloudflare R2 + signed edge URLs) in front of private object storage to serve thousands of concurrent real MP4 byte downloads at low egress cost.

@@ -40,6 +40,14 @@ function defaultStatusForCode(code: MediaSourceErrorCode): number {
     case 'BROADCAST_UNRESOLVED':
     case 'LEASE_EXPIRED':
       return 409;
+    case 'REQUEST_CANCELLED':
+      return 499;
+    case 'ARTIFACT_CORRUPT':
+      return 502;
+    case 'MAX_RETRIES_EXCEEDED':
+      return 503;
+    case 'COORDINATION_TIMEOUT':
+      return 504;
     case 'UNSUPPORTED_ACQUISITION':
       return 422;
     default:

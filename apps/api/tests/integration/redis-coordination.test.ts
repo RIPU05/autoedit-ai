@@ -4,6 +4,10 @@ import {
   RedisCoordinationStore,
   buildRequestIngestionLuaArgs,
   buildMutateLeaseLuaArgs,
+  buildInvalidateReadyLuaArgs,
+  buildSourceWorkId,
+  buildAnalysisWorkId,
+  buildClipWorkId,
   resolveMediaSourceFromUrl,
   MediaSourceError,
 } from '../../src/media/index.js';
@@ -317,5 +321,107 @@ describe('Real Local Redis Shared Ingestion Coordination Integration (Step 3B.4.
     expect(afterExpiry.action).toBe('ACQUIRED_NEW');
     expect(afterExpiry.fencingToken).toBe(1);
     expect(afterExpiry.record.ownerWorkerId).toBe('w2');
+  });
+
+  it('6. verifies conditional invalidateReadyArtifact fencing & scoped work IDs on real Redis (Step 3B.5.1)', async () => {
+    const baseSource = 'twitch:broadcast:shroud:repair_demo_1' as const;
+    const srcWork = buildSourceWorkId(baseSource, 'v1');
+    const anaWork = buildAnalysisWorkId(baseSource, {
+      sourceRevision: 'v1',
+      algorithmVersion: 'v1.0-heuristic',
+      scoreThreshold: 65,
+      cooldownSec: 15,
+    });
+    const clipWorkA = buildClipWorkId(baseSource, 'aaaa1111222233334444555566667777');
+    const clipWorkB = buildClipWorkId(baseSource, 'bbbb1111222233334444555566667777');
+    expect(new Set([srcWork, anaWork, clipWorkA, clipWorkB]).size).toBe(4);
+
+    // Channel-only IDs remain rejected by scoped work ID builders
+    expect(() => buildSourceWorkId('twitch:channel:shroud', 'v1')).toThrow(MediaSourceError);
+
+    const invArgs = buildInvalidateReadyLuaArgs({
+      expectedArtifactRef: 'cache/shared/clip/v/gen-1.mp4',
+      expectedFencingToken: 1,
+      repairWorkerId: 'repair_1',
+      leaseMs: 10_000,
+      maxRetries: 3,
+      nowMs: 5_000,
+      recordTtlMs: 60_000,
+    });
+    expect(invArgs).toEqual([
+      'cache/shared/clip/v/gen-1.mp4',
+      1,
+      'repair_1',
+      10_000,
+      3,
+      5_000,
+      60_000,
+    ]);
+
+    trackKey(clipWorkA);
+    const store = new RedisCoordinationStore(redis as any, {
+      keyPrefix,
+      recordTtlMs: 60_000,
+    });
+    const coordinator = new SharedIngestionCoordinator(store);
+
+    const acq = await coordinator.requestIngestion({
+      canonicalSourceId: clipWorkA,
+      requesterId: 'c1',
+      workerId: 'w1',
+      leaseMs: 10_000,
+      nowMs: 1_000,
+    });
+    expect(acq.fencingToken).toBe(1);
+    await coordinator.markReady({
+      canonicalSourceId: clipWorkA,
+      workerId: 'w1',
+      fencingToken: 1,
+      artifactRef: 'cache/shared/clip/v/gen-1.mp4',
+      nowMs: 2_000,
+    });
+
+    // Wrong expectedFencingToken or wrong expectedArtifactRef is rejected without mutation
+    const mismatchRef = await coordinator.invalidateReadyArtifact({
+      canonicalSourceId: clipWorkA,
+      expectedArtifactRef: 'cache/shared/clip/v/WRONG.mp4',
+      expectedFencingToken: 1,
+      repairWorkerId: 'repair_wrong',
+      leaseMs: 10_000,
+      nowMs: 3_000,
+    });
+    expect(mismatchRef.action).toBe('CONFLICT_ALREADY_RECOVERING');
+
+    const mismatchToken = await coordinator.invalidateReadyArtifact({
+      canonicalSourceId: clipWorkA,
+      expectedArtifactRef: 'cache/shared/clip/v/gen-1.mp4',
+      expectedFencingToken: 99,
+      repairWorkerId: 'repair_wrong_tok',
+      leaseMs: 10_000,
+      nowMs: 3_000,
+    });
+    expect(mismatchToken.action).toBe('CONFLICT_ALREADY_RECOVERING');
+
+    // 50 concurrent repair workers race to invalidate missing artifact -> STRICTLY 1 wins!
+    const race = await Promise.all(
+      Array.from({ length: 50 }, (_, i) =>
+        coordinator.invalidateReadyArtifact({
+          canonicalSourceId: clipWorkA,
+          expectedArtifactRef: 'cache/shared/clip/v/gen-1.mp4',
+          expectedFencingToken: 1,
+          repairWorkerId: `repair_worker_${i}`,
+          leaseMs: 10_000,
+          nowMs: 4_000,
+        }),
+      ),
+    );
+
+    const winners = race.filter((r) => r.action === 'ACQUIRED_REPAIR');
+    const losers = race.filter((r) => r.action === 'CONFLICT_ALREADY_RECOVERING');
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(49);
+    expect(winners[0].fencingToken).toBe(2);
+    expect(winners[0].record?.state).toBe('ACQUIRING');
+    expect(winners[0].record?.ownerWorkerId).toMatch(/^repair_worker_\d+$/);
   });
 });

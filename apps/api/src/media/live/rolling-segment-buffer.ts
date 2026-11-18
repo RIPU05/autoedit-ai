@@ -30,28 +30,44 @@ export interface RollingSegmentBufferOptions {
   ffmpegTimeoutMs?: number;
 }
 
-function runFfmpegSegment(args: string[], timeoutMs: number): Promise<void> {
+function runFfmpegSegment(args: string[], timeoutMs: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      return reject(new Error('FFmpeg segmentation aborted before start'));
+    }
     const bin = ffmpegPath || 'ffmpeg';
     const child = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
+    let settled = false;
+
+    const finish = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      if (err) reject(err);
+      else resolve();
+    };
+
+    const onAbort = () => {
+      child.kill('SIGKILL');
+      finish(new Error('FFmpeg segmentation cancelled (lease lost or request aborted)'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      reject(new Error(`FFmpeg segmentation timed out after ${timeoutMs}ms`));
+      finish(new Error(`FFmpeg segmentation timed out after ${timeoutMs}ms`));
     }, timeoutMs);
 
     child.stderr?.on('data', (chunk) => {
       stderr += String(chunk);
       if (stderr.length > 4000) stderr = stderr.slice(-4000);
     });
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
+    child.on('error', (err) => finish(err));
     child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve();
-      else reject(new Error(`FFmpeg segmentation failed (code ${code}): ${stderr.trim().slice(-400)}`));
+      if (code === 0) finish();
+      else finish(new Error(`FFmpeg segmentation failed (code ${code}): ${stderr.trim().slice(-400)}`));
     });
   });
 }
@@ -97,8 +113,12 @@ export class FfmpegRollingSegmentBuffer {
     opts?: {
       onSegmentIngested?: (segment: BufferedMediaSegment) => Promise<void> | void;
       markEndOfStream?: boolean;
+      signal?: AbortSignal;
     },
   ): Promise<BufferedMediaSegment[]> {
+    if (opts?.signal?.aborted) {
+      throw new Error('Ingestion aborted before start');
+    }
     await fs.mkdir(this.workDir, { recursive: true });
 
     const sourceMeta = await probe(sourcePath);
@@ -132,6 +152,7 @@ export class FfmpegRollingSegmentBuffer {
         pattern,
       ],
       this.ffmpegTimeoutMs,
+      opts?.signal,
     );
 
     const files = (await fs.readdir(this.workDir))
@@ -211,6 +232,14 @@ export class FfmpegRollingSegmentBuffer {
       this.segments.set(index, bad);
       return bad;
     }
+  }
+
+  /**
+   * Registers a pre-verified segment hydrated from durable object storage (whose bytes
+   * have already passed SHA-256 integrity verification against the source manifest).
+   */
+  registerVerifiedSegment(segment: BufferedMediaSegment): void {
+    this.segments.set(segment.index, segment);
   }
 
   /** Computes the clip window and exact segment indices covering an event spike. */

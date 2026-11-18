@@ -38,15 +38,52 @@ export interface ExtractHighlightClipInput {
   videoFilter?: string;
   /** Timeout for FFmpeg extraction in ms; defaults to 60_000. */
   timeoutMs?: number;
+  /** Optional AbortSignal to cancel running FFmpeg immediately (e.g., on lease loss or request timeout). */
+  signal?: AbortSignal;
 }
 
-function runFfmpegExtract(args: string[], timeoutMs: number): Promise<void> {
+function runFfmpegExtract(args: string[], timeoutMs: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('FFmpeg clip extraction aborted before start.'));
+      return;
+    }
+
     const bin = ffmpegPath || 'ffmpeg';
     const child = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
+    let settled = false;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // ignore if already exited
+      }
+      reject(new Error('FFmpeg clip extraction aborted (lease lost or request cancelled).'));
+    };
+
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
     const timer = setTimeout(() => {
-      child.kill('SIGKILL');
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // ignore
+      }
       reject(new Error(`FFmpeg clip extraction timed out after ${timeoutMs}ms`));
     }, timeoutMs);
 
@@ -55,11 +92,15 @@ function runFfmpegExtract(args: string[], timeoutMs: number): Promise<void> {
       if (stderr.length > 4000) stderr = stderr.slice(-4000);
     });
     child.on('error', (err) => {
-      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      cleanup();
       reject(err);
     });
     child.on('close', (code) => {
-      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      cleanup();
       if (code === 0) resolve();
       else reject(new Error(`FFmpeg clip extraction failed (code ${code}): ${stderr.trim().slice(-400)}`));
     });
@@ -142,6 +183,37 @@ export async function probeAndValidateClipMp4(
 }
 
 /**
+ * Writes candidate MP4 bytes to a temporary file, probes and validates via ffprobe,
+ * computes real content SHA-256, and removes the temporary file.
+ */
+export async function probeAndValidateClipMp4FromBuffer(
+  bytes: Buffer,
+  workDir: string,
+  opts?: {
+    expectedDurationSec?: number;
+    durationToleranceSec?: number;
+    requireAudio?: boolean;
+    encodingMode?: ProbedClipMetadata['encodingMode'];
+  },
+): Promise<ProbedClipMetadata> {
+  if (!bytes || bytes.length === 0) {
+    throw new Error('Clip validation failed: buffer is empty.');
+  }
+  await fs.mkdir(workDir, { recursive: true });
+  const tmpPath = path.join(
+    workDir,
+    `probe_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.mp4`,
+  );
+  try {
+    await fs.writeFile(tmpPath, bytes);
+    const meta = await probeAndValidateClipMp4(tmpPath, opts);
+    return { ...meta, filePath: '(verified-from-storage)' };
+  } finally {
+    await fs.rm(tmpPath, { force: true }).catch(() => {});
+  }
+}
+
+/**
  * Extracts a real, playable highlight MP4 from buffered segments in FfmpegRollingSegmentBuffer.
  *
  * - Pins required segments for the duration of extraction and unpins on completion/failure.
@@ -153,6 +225,9 @@ export async function probeAndValidateClipMp4(
 export async function extractAndVerifyHighlightClip(
   input: ExtractHighlightClipInput,
 ): Promise<ProbedClipMetadata> {
+  if (input.signal?.aborted) {
+    throw new Error('FFmpeg clip extraction aborted before start.');
+  }
   const timeoutMs = input.timeoutMs ?? 60_000;
   const maxAvailable = input.buffer.getLatestBufferedSec();
   if (maxAvailable <= 0) {
@@ -218,17 +293,28 @@ export async function extractAndVerifyHighlightClip(
             input.outputPath,
           ],
           timeoutMs,
+          input.signal,
         );
+        if (input.signal?.aborted) {
+          throw new Error('FFmpeg clip extraction aborted.');
+        }
         return await probeAndValidateClipMp4(input.outputPath, {
           expectedDurationSec: targetDurationSec,
           durationToleranceSec: Math.max(2.0, targetDurationSec * 0.25),
           requireAudio: input.requireAudio ?? true,
           encodingMode: 'stream-copy',
         });
-      } catch {
-        // Stream-copy failed or drifted outside tolerance -> fall back cleanly to frame-accurate re-encode
+      } catch (copyErr) {
         await fs.rm(input.outputPath, { force: true }).catch(() => {});
+        if (input.signal?.aborted) {
+          throw copyErr;
+        }
+        // Stream-copy failed or drifted outside tolerance -> fall back cleanly to frame-accurate re-encode
       }
+    }
+
+    if (input.signal?.aborted) {
+      throw new Error('FFmpeg clip extraction aborted before re-encode.');
     }
 
     const reencodeArgs = [
@@ -259,7 +345,12 @@ export async function extractAndVerifyHighlightClip(
       input.outputPath,
     ];
 
-    await runFfmpegExtract(reencodeArgs, timeoutMs);
+    await runFfmpegExtract(reencodeArgs, timeoutMs, input.signal);
+
+    if (input.signal?.aborted) {
+      await fs.rm(input.outputPath, { force: true }).catch(() => {});
+      throw new Error('FFmpeg clip extraction aborted after re-encode.');
+    }
 
     return await probeAndValidateClipMp4(input.outputPath, {
       expectedDurationSec: targetDurationSec,
